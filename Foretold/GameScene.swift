@@ -20,7 +20,11 @@ class GameScene: SKScene {
     private var enemyPlanArrowNodes: [SKShapeNode] = []
     private var enemyInfoLabel: SKLabelNode?
     private var goButton: SKShapeNode!
-    private var statsLabel: SKLabelNode!
+    /// Bottom-left status: health/armor pip rows and the ultimate charge bar.
+    private let healthBarNode = SKNode()
+    private let armorBarNode = SKNode()
+    private let ultimateBarNode = SKNode()
+    private var dodgeChipLabel: SKLabelNode!
     private var itemsLabel: SKLabelNode!
     private var scoreLabel: SKLabelNode!
     private var buffsLabel: SKLabelNode!
@@ -62,41 +66,78 @@ class GameScene: SKScene {
     /// Set when this resolve's kills finished charging the ultimate; announced
     /// once the animations wrap up.
     private var pendingUltimateReadyToast = false
+    /// While false (early resolve phases), freshly painted pools stay hidden:
+    /// the arrow that paints a trail must visibly cross the tiles first.
+    private var revealLiveHazards = true
     /// Best score across runs, persisted in UserDefaults.
     private var highScore: Int {
         get { UserDefaults.standard.integer(forKey: "highScore") }
         set { UserDefaults.standard.set(newValue, forKey: "highScore") }
     }
+    /// Elite trophies claimed across runs (by weapon name); once claimed they
+    /// join every future run's weapon pool.
+    private var claimedTrophyNames: Set<String> {
+        get { Set(UserDefaults.standard.stringArray(forKey: "claimedTrophies") ?? []) }
+        set { UserDefaults.standard.set(Array(newValue).sorted(), forKey: "claimedTrophies") }
+    }
+    /// Milestone weapons earned across runs (by weapon name).
+    private var unlockedWeaponNames: Set<String> {
+        get { Set(UserDefaults.standard.stringArray(forKey: "unlockedWeapons") ?? []) }
+        set { UserDefaults.standard.set(Array(newValue).sorted(), forKey: "unlockedWeapons") }
+    }
+    /// Lifetime credited-kill tallies that gate the milestones.
+    private var lifetimeTallies: [String: Int] {
+        get { (UserDefaults.standard.dictionary(forKey: "lifetimeTallies") as? [String: Int]) ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: "lifetimeTallies") }
+    }
+    /// Lifetime tallies as they stood when this run began; the run's own
+    /// tallies are folded on top after every turn.
+    private var tallyBaseline: [String: Int] = [:]
+    /// The launch title screen; input is captive while it's up.
+    private var titleOverlay: SKNode?
+    /// The right column's pages, switched by the nav bar. HOME shows the
+    /// title overlay instead of a page.
+    private enum HUDPage {
+        case board, milestones
+    }
+    private var hudPage: HUDPage = .board
+    private let boardPageNode = SKNode()
+    private let milestonesPageNode = SKNode()
+    private var navTabLabels: [String: SKLabelNode] = [:]
     private let playerColor = SKColor(red: 0.35, green: 0.85, blue: 0.95, alpha: 1.0)
     private let armorFlashColor = SKColor(red: 0.65, green: 0.75, blue: 0.95, alpha: 1.0)
     private static let goButtonName = "goButton"
     private static let weaponButtonName = "weaponButton"
     /// Prophecies that "explain" the ultimate, delivered by an oracle who is
-    /// trying very hard to sound mystical and not quite managing it.
+    /// trying very hard to sound mystical and not quite managing it. Each "|"
+    /// toggles the voice — grand script, deflated plain type, grand again —
+    /// so a line can lose its nerve, rally, and collapse twice.
     private static let ultimateChatter = [
-        "hearken! the heavens shall... um. basically the sky is going to land on them. verily.",
-        "lo, a great doom approaches, borne on wings of... it's fire. it's a lot of fire.",
-        "the stars align! well. most of them. enough. close your eyes anyway.",
-        "i have consulted the bones. the bones said 'ka-boom'. i don't make the rules.",
-        "thus spake the void: 'run'. then something i couldn't make out. probably also 'run'.",
-        "behold: a second sun! brief. localized. do not behold it directly, actually.",
-        "an omen! doom shall rain from... above, i want to say? yes. above. definitely above.",
-        "as foretold in the elder scrolls. not those ones. legally distinct ones.",
-        "so it is written. in pencil, but still. so it lands.",
+        "hearken! the heavens shall...| um. basically the sky is going to land on them. verily.",
+        "lo, a great doom approaches, borne on wings of...| it's fire. it's a lot of fire.",
+        "the stars align!| well. most of them. enough. close your eyes anyway.",
+        "i have consulted the bones.| the bones said 'ka-boom'. i don't make the rules.",
+        "thus spake the void: 'run'.| then something i couldn't make out. probably also 'run'.",
+        "behold: a second sun!| brief. localized. do not behold it directly, actually.",
+        "an omen! doom shall rain from...| above, i want to say? yes. above. definitely above.",
+        "as foretold in the elder scrolls.| not those ones. legally distinct ones.",
+        "so it is written.| in pencil, but still. |so it lands.",
     ]
     /// Prophecies for the level's gatekeeper stomping in, same oracle.
     private static let eliteChatter = [
-        "dark portents gather! something huge this way... comes? cometh? it's coming.",
-        "i foresaw this! (i did not.) slay the big one and the road shall, um, open. mystically.",
-        "hark! the gate walks in flesh most foul! yes, the massive one. kill that.",
+        "dark portents gather! something huge this way...| comes? cometh? it's coming.",
+        "i foresaw this!| definitely | slay the big one and the road shall, |um, open. mystically.",
+        "hark! the gate walks in flesh most foul!| yes, the massive one. kill that.",
     ]
-    private static let weaponButtonSize = CGSize(width: 200, height: 44)
+    private static let weaponButtonSize = CGSize(width: 208, height: 56)
 
     // MARK: - Setup
 
     override func didMove(to view: SKView) {
         backgroundColor = SKColor(white: 0.10, alpha: 1.0)
+        state = makeRunState()
         setUpScene()
+        showTitleScreen()
 
         // Keyboard events only reach the scene when the SKView is first responder.
         view.window?.makeFirstResponder(view)
@@ -117,8 +158,8 @@ class GameScene: SKScene {
         setUpPlayer()
         setUpEnemies()
         setUpObstacles()
-        setUpGoButton()
         setUpHUD()
+        setUpGoButton()
         setUpControlsLegend()
         updateEnemyPlanArrows()
         updateSpawnMarkers()
@@ -371,52 +412,106 @@ class GameScene: SKScene {
     }
 
     private func setUpGoButton() {
-        let button = SKShapeNode(rectOf: CGSize(width: 110, height: 40), cornerRadius: 8)
+        let boardSide = min(size.width, size.height) * boardScale
+        // Centered over the status bars, whatever the margin width.
+        let columnCenter = (size.width + boardSide) / 2 + 16 + 104
+        let columnTop = (size.height + boardSide) / 2
+
+        let button = SKShapeNode(rectOf: CGSize(width: 150, height: 56), cornerRadius: 10)
         button.fillColor = SKColor(red: 0.20, green: 0.55, blue: 0.35, alpha: 1.0)
         button.strokeColor = .white
         button.lineWidth = 1.5
         button.zPosition = 20
         button.name = Self.goButtonName
-
-        // Centered in the margin between the board's bottom edge and the screen.
-        let boardSide = min(size.width, size.height) * boardScale
-        button.position = CGPoint(x: size.width / 2, y: (size.height - boardSide) / 4)
+        button.position = CGPoint(x: columnCenter, y: columnTop - 452)
 
         let label = SKLabelNode(text: "GO")
         label.fontName = "HelveticaNeue-Bold"
-        label.fontSize = 18
+        label.fontSize = 22
         label.fontColor = .white
         label.verticalAlignmentMode = .center
         label.name = Self.goButtonName
         button.addChild(label)
 
-        addChild(button)
+        boardPageNode.addChild(button)
         goButton = button
     }
 
+    /// The right column: a nav bar (BOARD · MILESTONES · HOME) over paged
+    /// content. The board page holds health/armor pips, the ultimate bar,
+    /// dodge chip, contextual hint, and the weapon and GO buttons; the
+    /// milestones page lists the whole arsenal and how to earn it.
     private func setUpHUD() {
         let boardSide = min(size.width, size.height) * boardScale
-        let hudY = (size.height - boardSide) / 4
+        let columnLeft = (size.width + boardSide) / 2 + 16
+        let columnTop = (size.height + boardSide) / 2
 
-        statsLabel = SKLabelNode()
-        statsLabel.fontName = "HelveticaNeue-Bold"
-        statsLabel.fontSize = 16
-        statsLabel.fontColor = .white
-        statsLabel.horizontalAlignmentMode = .left
-        statsLabel.verticalAlignmentMode = .center
-        statsLabel.position = CGPoint(x: (size.width - boardSide) / 2, y: hudY + 12)
-        statsLabel.zPosition = 20
-        addChild(statsLabel)
+        for container in [boardPageNode, milestonesPageNode] {
+            container.removeAllChildren()
+            container.removeFromParent()
+            container.zPosition = 20
+            addChild(container)
+        }
+
+        // The nav bar across the top of the column.
+        navTabLabels = [:]
+        var tabX = columnLeft
+        for (title, key) in [("BOARD", "board"), ("MILESTONES", "milestones"), ("HOME", "home")] {
+            let tab = SKLabelNode(text: title)
+            tab.fontName = "HelveticaNeue-Bold"
+            tab.fontSize = 14
+            tab.horizontalAlignmentMode = .left
+            tab.verticalAlignmentMode = .top
+            tab.position = CGPoint(x: tabX, y: columnTop + 2)
+            tab.zPosition = 20
+            tab.name = "navTab:\(key)"
+            addChild(tab)
+            navTabLabels[key] = tab
+            tabX += tab.frame.width + 26
+        }
+
+        // — Board page —
+        // Captions sit above their rows; updateHUD redraws the contents.
+        for (caption, container, rowY) in [
+            ("HP", healthBarNode, columnTop - 64),
+            ("ARMOR", armorBarNode, columnTop - 116),
+            ("ULT", ultimateBarNode, columnTop - 168),
+        ] {
+            let label = SKLabelNode(text: caption)
+            label.fontName = "HelveticaNeue-Bold"
+            label.fontSize = 11
+            label.fontColor = SKColor(white: 0.55, alpha: 1.0)
+            label.horizontalAlignmentMode = .left
+            label.verticalAlignmentMode = .bottom
+            label.position = CGPoint(x: columnLeft, y: rowY + 12)
+            boardPageNode.addChild(label)
+            container.removeFromParent()
+            container.position = CGPoint(x: columnLeft, y: rowY)
+            boardPageNode.addChild(container)
+        }
+
+        dodgeChipLabel = SKLabelNode(text: "DODGE ✓")
+        dodgeChipLabel.fontName = "HelveticaNeue-Bold"
+        dodgeChipLabel.fontSize = 12
+        dodgeChipLabel.fontColor = playerColor
+        dodgeChipLabel.horizontalAlignmentMode = .left
+        dodgeChipLabel.verticalAlignmentMode = .center
+        dodgeChipLabel.position = CGPoint(x: columnLeft, y: columnTop - 212)
+        boardPageNode.addChild(dodgeChipLabel)
 
         itemsLabel = SKLabelNode()
         itemsLabel.fontName = "HelveticaNeue"
         itemsLabel.fontSize = 12
         itemsLabel.fontColor = SKColor(white: 0.8, alpha: 1.0)
         itemsLabel.horizontalAlignmentMode = .left
-        itemsLabel.verticalAlignmentMode = .center
-        itemsLabel.position = CGPoint(x: (size.width - boardSide) / 2, y: hudY - 10)
-        itemsLabel.zPosition = 20
-        addChild(itemsLabel)
+        itemsLabel.verticalAlignmentMode = .top
+        itemsLabel.numberOfLines = 0
+        itemsLabel.preferredMaxLayoutWidth = size.width - columnLeft - 16
+        itemsLabel.position = CGPoint(x: columnLeft, y: columnTop - 242)
+        boardPageNode.addChild(itemsLabel)
+
+        rebuildMilestonesPage()
+        setHUDPage(hudPage)
 
         scoreLabel = SKLabelNode()
         scoreLabel.fontName = "HelveticaNeue-Bold"
@@ -436,28 +531,120 @@ class GameScene: SKScene {
         buffsLabel.zPosition = 20
         addChild(buffsLabel)
 
-        setUpWeaponButton(rightEdge: (size.width + boardSide) / 2, y: hudY)
+        setUpWeaponButton(center: CGPoint(x: columnLeft + 104, y: columnTop - 362))
         updateHUD()
+    }
+
+    /// Every weapon and how it's earned — the MILESTONES page.
+    private func rebuildMilestonesPage() {
+        milestonesPageNode.removeAllChildren()
+        let boardSide = min(size.width, size.height) * boardScale
+        let columnLeft = (size.width + boardSide) / 2 + 16
+        let columnTop = (size.height + boardSide) / 2
+        var y = columnTop - 56
+
+        func addLine(_ text: String, font: String, size fontSize: CGFloat, color: SKColor, drop: CGFloat) {
+            let label = SKLabelNode(text: text)
+            label.fontName = font
+            label.fontSize = fontSize
+            label.fontColor = color
+            label.horizontalAlignmentMode = .left
+            label.verticalAlignmentMode = .top
+            label.position = CGPoint(x: columnLeft, y: y)
+            milestonesPageNode.addChild(label)
+            y -= drop
+        }
+
+        let gold = SKColor(red: 0.93, green: 0.80, blue: 0.45, alpha: 1.0)
+        let earned = SKColor(white: 0.75, alpha: 1.0)
+        let locked = SKColor(white: 0.45, alpha: 1.0)
+        addLine("THE ARSENAL", font: "HelveticaNeue-Bold", size: 15, color: gold, drop: 28)
+
+        // A slim progress bar for a locked milestone, count at its right end.
+        func addProgressBar(progress: Int, total: Int) {
+            let width: CGFloat = 172
+            let height: CGFloat = 8
+            let bar = SKNode()
+            bar.position = CGPoint(x: columnLeft, y: y - height / 2)
+            let back = SKShapeNode(rectOf: CGSize(width: width, height: height), cornerRadius: 4)
+            back.fillColor = SKColor(white: 0.18, alpha: 1.0)
+            back.strokeColor = SKColor(white: 0.35, alpha: 1.0)
+            back.lineWidth = 1
+            back.position = CGPoint(x: width / 2, y: 0)
+            bar.addChild(back)
+            if progress > 0 {
+                let fillWidth = max(height, width * CGFloat(progress) / CGFloat(total)) - 3
+                let fill = SKShapeNode(rectOf: CGSize(width: fillWidth, height: height - 3), cornerRadius: 2.5)
+                fill.fillColor = gold.withAlphaComponent(0.85)
+                fill.strokeColor = .clear
+                fill.position = CGPoint(x: fillWidth / 2 + 1.5, y: 0)
+                bar.addChild(fill)
+            }
+            let count = SKLabelNode(text: "\(progress)/\(total)")
+            count.fontName = "HelveticaNeue"
+            count.fontSize = 10
+            count.fontColor = locked
+            count.horizontalAlignmentMode = .left
+            count.verticalAlignmentMode = .center
+            count.position = CGPoint(x: width + 8, y: 0)
+            bar.addChild(count)
+            milestonesPageNode.addChild(bar)
+            y -= 20
+        }
+
+        let available = Set(currentWeaponPool().map(\.name))
+        let lifetime = lifetimeTallies
+        for weapon in Weapon.all {
+            let owned = available.contains(weapon.name)
+            let nameColor = owned ? earned : locked
+            addLine(owned ? "✓ \(weapon.name)" : "· \(weapon.name)",
+                    font: "HelveticaNeue-Bold", size: 13, color: nameColor, drop: 17)
+            if Weapon.baseArsenal.contains(where: { $0.name == weapon.name }) {
+                addLine("starting arsenal", font: "HelveticaNeue", size: 12, color: nameColor, drop: 21)
+            } else if let milestone = Weapon.milestones.first(where: { $0.weapon.name == weapon.name }) {
+                if owned {
+                    addLine(milestone.requirement + " — done", font: "HelveticaNeue", size: 12, color: nameColor, drop: 21)
+                } else {
+                    addLine(milestone.requirement, font: "HelveticaNeue", size: 12, color: nameColor, drop: 17)
+                    let progress = min(lifetime[milestone.tally, default: 0], milestone.count)
+                    addProgressBar(progress: progress, total: milestone.count)
+                }
+            } else {
+                addLine(owned ? "trophy claimed from a gatekeeper" : "claim one off a fallen gatekeeper",
+                        font: "HelveticaNeue", size: 12, color: nameColor, drop: 21)
+            }
+        }
+    }
+
+    /// Switches the right column's visible page and repaints the nav bar.
+    private func setHUDPage(_ page: HUDPage) {
+        hudPage = page
+        boardPageNode.isHidden = page != .board
+        milestonesPageNode.isHidden = page != .milestones
+        let selected = SKColor(red: 0.55, green: 0.75, blue: 0.95, alpha: 1.0)
+        navTabLabels["board"]?.fontColor = page == .board ? selected : SKColor(white: 0.5, alpha: 1.0)
+        navTabLabels["milestones"]?.fontColor = page == .milestones ? selected : SKColor(white: 0.5, alpha: 1.0)
+        navTabLabels["home"]?.fontColor = SKColor(white: 0.5, alpha: 1.0)
     }
 
     /// A single button showing the equipped weapon; clicking it (or pressing
     /// Tab/Q) swaps to the holstered weapon.
-    private func setUpWeaponButton(rightEdge: CGFloat, y: CGFloat) {
+    private func setUpWeaponButton(center: CGPoint) {
         let buttonSize = Self.weaponButtonSize
-        let button = SKShapeNode(rectOf: buttonSize, cornerRadius: 6)
+        let button = SKShapeNode(rectOf: buttonSize, cornerRadius: 8)
         button.fillColor = SKColor(red: 0.25, green: 0.45, blue: 0.60, alpha: 1.0)
         button.strokeColor = .white
         button.lineWidth = 1.5
         button.zPosition = 20
         button.name = Self.weaponButtonName
-        button.position = CGPoint(x: rightEdge - buttonSize.width / 2, y: y)
+        button.position = center
 
         weaponLabel = SKLabelNode()
         weaponLabel.fontName = "HelveticaNeue-Bold"
-        weaponLabel.fontSize = 14
+        weaponLabel.fontSize = 15
         weaponLabel.fontColor = .white
         weaponLabel.verticalAlignmentMode = .center
-        weaponLabel.position = CGPoint(x: 0, y: 9)
+        weaponLabel.position = CGPoint(x: 0, y: 11)
         weaponLabel.name = Self.weaponButtonName
         button.addChild(weaponLabel)
 
@@ -466,19 +653,20 @@ class GameScene: SKScene {
         weaponSubLabel.fontSize = 11
         weaponSubLabel.fontColor = SKColor(white: 0.85, alpha: 1.0)
         weaponSubLabel.verticalAlignmentMode = .center
-        weaponSubLabel.position = CGPoint(x: 0, y: -11)
+        weaponSubLabel.position = CGPoint(x: 0, y: -13)
         weaponSubLabel.name = Self.weaponButtonName
         button.addChild(weaponSubLabel)
 
-        addChild(button)
+        boardPageNode.addChild(button)
         weaponButton = button
     }
 
     private var legendNode: SKNode?
-    private var expandedLegendSection: LegendSection?
+    private var expandedLegendSections: Set<LegendSection> = [.weapons, .enemies]
 
-    /// The left column: how-to-play primer, keybinds, and collapsible weapon
-    /// and enemy references. Rebuilt whenever a dropdown is toggled.
+    /// The left margin, two columns: weapon/enemy reference dropdowns at the
+    /// far edge, how-to-play primer and keybinds beside them. Rebuilt whenever
+    /// a dropdown is toggled.
     private func setUpControlsLegend() {
         rebuildLegend()
     }
@@ -494,103 +682,229 @@ class GameScene: SKScene {
         addChild(column)
         legendNode = column
 
-        enum LineStyle {
-            case header, body, toggle(String), entry
-        }
-        var lines: [(String, LineStyle)] = [
-            ("HOW TO PLAY", .header),
-            ("Draft a move, aim an attack,", .body),
-            ("then hit GO — enemies commit", .body),
-            ("to the arrows you can see.", .body),
-            ("", .body),
-            ("red tiles · incoming attack", .body),
-            ("! · spawn arriving next turn", .body),
-            ("gold ring · weapon on floor", .body),
-            ("purple ring · elite trophy", .body),
-            ("", .body),
-            ("Move 2+ tiles without acting", .body),
-            ("to dodge one hit. Armor regens", .body),
-            ("on calm turns; HP never does.", .body),
-            ("", .body),
-            ("Hit the score milestone and a", .body),
-            ("gatekeeper spawns — kill it to", .body),
-            ("level up and take its weapons.", .body),
-            ("", .body),
-            ("KEYS", .header),
-            ("click · draft move", .body),
-            ("right-click · aim attack", .body),
-            ("E · pick up weapon underfoot", .body),
-            ("tab/Q · swap weapon", .body),
-            ("F · ultimate when charged", .body),
-            ("esc · cancel draft", .body),
-            ("space/return · GO", .body),
-            ("R×2 · restart · B · boom mode", .body),
-            ("", .body),
-        ]
+        let boardSide = min(size.width, size.height) * boardScale
+        let topEdge = (size.height + boardSide) / 2
+        var y = topEdge
 
-        let weaponsOpen = expandedLegendSection == .weapons
-        lines.append(("\(weaponsOpen ? "▾" : "▸") WEAPONS", .toggle("weapons")))
+        func addLine(
+            _ text: String,
+            x: CGFloat,
+            font: String = "HelveticaNeue",
+            size fontSize: CGFloat = 13,
+            color: SKColor = SKColor(white: 0.7, alpha: 1.0),
+            name: String? = nil,
+            drop: CGFloat = 20
+        ) {
+            let label = SKLabelNode(text: text)
+            label.fontName = font
+            label.fontSize = fontSize
+            label.fontColor = color
+            label.horizontalAlignmentMode = .left
+            label.verticalAlignmentMode = .top
+            label.position = CGPoint(x: x, y: y)
+            label.name = name
+            column.addChild(label)
+            y -= drop
+        }
+
+        // Reference column at the far-left edge.
+        let referenceX: CGFloat = 14
+        let toggleColor = SKColor(red: 0.55, green: 0.75, blue: 0.95, alpha: 1.0)
+        let entryColor = SKColor(white: 0.75, alpha: 1.0)
+        let statColor = SKColor(white: 0.55, alpha: 1.0)
+
+        let weaponsOpen = expandedLegendSections.contains(.weapons)
+        addLine("\(weaponsOpen ? "▾" : "▸") WEAPONS", x: referenceX,
+                font: "HelveticaNeue-Bold", size: 15, color: toggleColor,
+                name: "legendToggle:weapons", drop: 26)
         if weaponsOpen {
-            for weapon in Weapon.all {
-                lines.append((weaponLegendLine(weapon), .entry))
+            // Only the collected arsenal shows here; locked weapons and their
+            // requirements live on the MILESTONES page.
+            let available = Set(currentWeaponPool().map(\.name))
+            for weapon in Weapon.all where available.contains(weapon.name) {
+                let (name, stats) = weaponLegendEntry(weapon)
+                addLine(name, x: referenceX, font: "HelveticaNeue-Bold", size: 13, color: entryColor, drop: 17)
+                addLine(stats, x: referenceX + 10, size: 12, color: statColor, drop: 21)
             }
         }
-        let enemiesOpen = expandedLegendSection == .enemies
-        lines.append(("\(enemiesOpen ? "▾" : "▸") ENEMIES", .toggle("enemies")))
+        y -= 8
+        let enemiesOpen = expandedLegendSections.contains(.enemies)
+        addLine("\(enemiesOpen ? "▾" : "▸") ENEMIES", x: referenceX,
+                font: "HelveticaNeue-Bold", size: 15, color: toggleColor,
+                name: "legendToggle:enemies", drop: 26)
         if enemiesOpen {
             let entries = [
                 "Fighter · any weapon, kites",
                 "Berserker · melee, fearless",
                 "Swift · +1 move",
                 "Bomber · arms at range \(GameState.bomberArmDistance),",
-                "   blast r\(GameState.bomberBlastRadius) — on fuse or death",
-                "Juggernaut · gate, summons waves",
-                "Boss · gate, drafts an intent:",
-                "   volley both weapons, cannon",
-                "   nova r\(GameState.bossNovaRadius), or summon",
+                "   blast r\(GameState.bomberBlastRadius), on fuse or death",
+                "Juggernaut · the gate,",
+                "   summons waves",
+                "Boss · the gate, drafts:",
+                "   volley both weapons,",
+                "   cannon nova r\(GameState.bossNovaRadius), or summon",
             ]
             for entry in entries {
-                lines.append((entry, .entry))
+                addLine(entry, x: referenceX, size: 12.5, color: statColor, drop: 18)
             }
         }
 
-        let boardSide = min(size.width, size.height) * boardScale
-        var y = (size.height + boardSide) / 2
-        for (text, style) in lines {
-            let label = SKLabelNode(text: text)
-            switch style {
-            case .header:
-                label.fontName = "HelveticaNeue-Bold"
-                label.fontSize = 13
-                label.fontColor = SKColor(white: 0.7, alpha: 1.0)
-            case .body:
-                label.fontName = "HelveticaNeue"
-                label.fontSize = 13
-                label.fontColor = SKColor(white: 0.7, alpha: 1.0)
-            case .toggle(let section):
-                label.fontName = "HelveticaNeue-Bold"
-                label.fontSize = 13
-                label.fontColor = SKColor(red: 0.55, green: 0.75, blue: 0.95, alpha: 1.0)
-                label.name = "legendToggle:\(section)"
-            case .entry:
-                label.fontName = "HelveticaNeue"
-                label.fontSize = 11
-                label.fontColor = SKColor(white: 0.55, alpha: 1.0)
-            }
-            label.horizontalAlignmentMode = .left
-            label.verticalAlignmentMode = .top
-            label.position = CGPoint(x: 16, y: y)
-            column.addChild(label)
-            if case .entry = style {
-                y -= 16
-            } else {
-                y -= 20
+        // Instructions column beside the reference, with room to breathe.
+        y = topEdge
+        let instructionsX: CGFloat = 262
+        let lines = [
+            ("HOW TO PLAY", true),
+            ("Draft a move, aim an attack,", false),
+            ("then hit GO — enemies commit", false),
+            ("to the arrows you can see.", false),
+            ("", false),
+            ("red tiles · incoming attack", false),
+            ("! · arrival — hover to see what", false),
+            ("gold ring · weapon on floor", false),
+            ("purple ring · elite trophy", false),
+            ("", false),
+            ("Move 2+ tiles without acting", false),
+            ("to dodge one hit. Armor regens", false),
+            ("on calm turns; HP never does.", false),
+            ("", false),
+            ("Hit the score milestone and a", false),
+            ("gatekeeper spawns — kill it to", false),
+            ("level up and take its weapons.", false),
+            ("", false),
+            ("KEYS", true),
+            ("click · draft move", false),
+            ("right-click · aim attack", false),
+            ("   (reloading ranged? 1 dmg jab)", false),
+            ("E · pick up weapon underfoot", false),
+            ("tab/Q · swap weapon", false),
+            ("F · ultimate when charged", false),
+            ("esc · cancel draft", false),
+            ("space/return · GO", false),
+            ("R×2 · restart · B · boom mode", false),
+        ]
+        for (text, isHeader) in lines {
+            addLine(text, x: instructionsX, font: isHeader ? "HelveticaNeue-Bold" : "HelveticaNeue")
+        }
+        y -= 6
+        addLine("▸ i'm too lazy to read", x: instructionsX, font: "HelveticaNeue-Bold", size: 14,
+                color: SKColor(red: 0.55, green: 0.75, blue: 0.95, alpha: 1.0),
+                name: "tutorialButton", drop: 20)
+    }
+
+    // MARK: - Tutorial
+
+    /// The four-step live coach behind "i'm too lazy to read": each step
+    /// advances off the real input it teaches. Everything past the basics is
+    /// left to the reading.
+    private enum TutorialStep: Int {
+        case hover, move, attack, go, read
+
+        var prompt: String {
+            switch self {
+            case .hover:
+                return "TUTORIAL 1/4 · hover an enemy to inspect it — the red tiles are everything its attack will hit"
+            case .move:
+                return "TUTORIAL 2/4 · left-click a green tile to draft your move — nothing moves until you commit"
+            case .attack:
+                return "TUTORIAL 3/4 · right-click to aim — the orange tiles are your strike, from where you WILL be standing"
+            case .go:
+                return "TUTORIAL 4/4 · press SPACE (or click GO) — the whole turn resolves at once"
+            case .read:
+                return "TUTORIAL 5/4 · go read the rest, it's on the left — if you don't, good luck out there"
             }
         }
     }
 
-    /// One compact stat line per weapon for the legend dropdown.
-    private func weaponLegendLine(_ weapon: Weapon) -> String {
+    private var tutorialStep: TutorialStep?
+    private var tutorialPrompt: SKNode?
+
+    private func startTutorial() {
+        tutorialStep = .hover
+        showTutorialPrompt(TutorialStep.hover.prompt)
+    }
+
+    /// Each step lands as a framed banner dead-center on the board — hard to
+    /// miss — then glides up out of the way while the player performs it.
+    /// Auto-dismissing banners (the 5/4 coda) linger up top, then see
+    /// themselves out.
+    private func showTutorialPrompt(_ text: String, autoDismiss: Bool = false) {
+        tutorialPrompt?.removeFromParent()
+        let boardSide = min(size.width, size.height) * boardScale
+        let container = SKNode()
+        container.zPosition = 75
+
+        let label = SKLabelNode(text: text)
+        label.fontName = "HelveticaNeue-Bold"
+        label.fontSize = 15
+        label.fontColor = SKColor(red: 0.93, green: 0.80, blue: 0.45, alpha: 1.0)
+        label.verticalAlignmentMode = .center
+        label.numberOfLines = 0
+        label.preferredMaxLayoutWidth = boardSide - 60
+
+        let plate = SKShapeNode(
+            rectOf: CGSize(width: label.frame.width + 36, height: label.frame.height + 22),
+            cornerRadius: 9
+        )
+        plate.fillColor = SKColor(white: 0.06, alpha: 0.92)
+        plate.strokeColor = SKColor(red: 0.93, green: 0.80, blue: 0.45, alpha: 0.8)
+        plate.lineWidth = 1.5
+        container.addChild(plate)
+        container.addChild(label)
+
+        container.position = CGPoint(x: size.width / 2, y: size.height / 2)
+        container.setScale(0.6)
+        container.alpha = 0
+        addChild(container)
+        tutorialPrompt = container
+
+        let rest = CGPoint(x: size.width / 2, y: (size.height + boardSide) / 2 + 18)
+        var sequence: [SKAction] = [
+            SKAction.group([
+                SKAction.fadeIn(withDuration: 0.15),
+                SKAction.scale(to: 1.0, duration: 0.18),
+            ]),
+            SKAction.wait(forDuration: 1.4),
+            SKAction.group([
+                SKAction.move(to: rest, duration: 0.35),
+                SKAction.scale(to: 0.8, duration: 0.35),
+            ]),
+        ]
+        if autoDismiss {
+            sequence += [
+                SKAction.wait(forDuration: 3.0),
+                SKAction.fadeOut(withDuration: 0.6),
+                SKAction.removeFromParent(),
+                SKAction.run { [weak self] in
+                    if self?.tutorialPrompt === container {
+                        self?.tutorialPrompt = nil
+                    }
+                },
+            ]
+        }
+        container.run(SKAction.sequence(sequence))
+    }
+
+    /// Steps forward when the taught input actually happened, in order.
+    private func advanceTutorial(after completed: TutorialStep) {
+        guard tutorialStep == completed else { return }
+        guard let next = TutorialStep(rawValue: completed.rawValue + 1) else {
+            tutorialStep = nil
+            return
+        }
+        if next == .read {
+            // The coda: nothing left to detect — it lingers, then sees
+            // itself out.
+            tutorialStep = nil
+            showTutorialPrompt(next.prompt, autoDismiss: true)
+        } else {
+            tutorialStep = next
+            showTutorialPrompt(next.prompt)
+        }
+    }
+
+    /// A name line and a compact stat line per weapon for the reference column.
+    private func weaponLegendEntry(_ weapon: Weapon) -> (name: String, stats: String) {
         var traits: [String] = []
         if let thrown = weapon.thrown {
             traits.append("lob r\(thrown.range)")
@@ -610,19 +924,86 @@ class GameScene: SKScene {
         if weapon.cooldown > 0 {
             traits.append("cd\(weapon.cooldown)")
         }
-        if weapon.name == Weapon.cannon.name {
-            traits.append("(boss drop)")
-        }
+        let name = weapon.name == Weapon.cannon.name ? "\(weapon.name) · boss drop" : weapon.name
         let tail = traits.isEmpty ? "" : " " + traits.joined(separator: " ")
-        return "\(weapon.name) · \(weapon.damage)dmg \(weapon.moveRange)mv\(tail)"
+        return (name, "\(weapon.damage)dmg \(weapon.moveRange)mv\(tail)")
+    }
+
+    /// Redraws a pip row: one cell per point, filled up to `filled`.
+    private func drawPips(in container: SKNode, filled: Int, total: Int, color: SKColor) {
+        container.removeAllChildren()
+        guard total > 0 else { return }
+        let step: CGFloat = min(21, 208 / CGFloat(total))
+        let side = step - 3
+        for index in 0..<total {
+            let cell = SKShapeNode(rectOf: CGSize(width: side, height: 16), cornerRadius: 3)
+            cell.position = CGPoint(x: CGFloat(index) * step + side / 2, y: 0)
+            cell.fillColor = index < filled ? color : SKColor(white: 0.18, alpha: 1.0)
+            cell.strokeColor = index < filled ? color : SKColor(white: 0.35, alpha: 1.0)
+            cell.lineWidth = 1
+            container.addChild(cell)
+        }
+    }
+
+    /// The ultimate as a filling bar; pulses gold once it's ready to call down.
+    private func updateUltimateBar() {
+        ultimateBarNode.removeAllChildren()
+        let width: CGFloat = 208
+        let height: CGFloat = 14
+        let back = SKShapeNode(rectOf: CGSize(width: width, height: height), cornerRadius: 5)
+        back.fillColor = SKColor(white: 0.18, alpha: 1.0)
+        back.strokeColor = SKColor(white: 0.35, alpha: 1.0)
+        back.lineWidth = 1
+        back.position = CGPoint(x: width / 2, y: 0)
+        ultimateBarNode.addChild(back)
+
+        let ready = state.ultimateKillCharge >= GameState.ultimateChargeKills
+        let fraction = min(1, CGFloat(state.ultimateKillCharge) / CGFloat(GameState.ultimateChargeKills))
+        if fraction > 0 {
+            let fillWidth = max(height, width * fraction) - 4
+            let fill = SKShapeNode(rectOf: CGSize(width: fillWidth, height: height - 4), cornerRadius: 3)
+            fill.fillColor = ready
+                ? SKColor(red: 1.0, green: 0.85, blue: 0.30, alpha: 1.0)
+                : SKColor(red: 0.72, green: 0.58, blue: 0.22, alpha: 1.0)
+            fill.strokeColor = .clear
+            fill.position = CGPoint(x: fillWidth / 2 + 2, y: 0)
+            ultimateBarNode.addChild(fill)
+            if ready {
+                fill.run(SKAction.repeatForever(SKAction.sequence([
+                    SKAction.fadeAlpha(to: 0.55, duration: 0.5),
+                    SKAction.fadeAlpha(to: 1.0, duration: 0.5),
+                ])))
+            }
+        }
+
+        // The counter shares the caption row, right-aligned over the bar's end.
+        let hint = SKLabelNode(text: ready ? "F ✦       READY" : "\(state.ultimateKillCharge)/\(GameState.ultimateChargeKills)")
+        hint.fontName = "HelveticaNeue-Bold"
+        hint.fontSize = 11
+        hint.fontColor = ready
+            ? SKColor(red: 1.0, green: 0.9, blue: 0.45, alpha: 1.0)
+            : SKColor(white: 0.65, alpha: 1.0)
+        hint.horizontalAlignmentMode = .right
+        hint.verticalAlignmentMode = .bottom
+        hint.position = CGPoint(x: width, y: 12)
+        ultimateBarNode.addChild(hint)
     }
 
     private func updateHUD() {
-        let dodge = state.plannedDodgeReady ? "   DODGE ✓" : ""
-        let ult = state.ultimateKillCharge >= GameState.ultimateChargeKills
-            ? "   ULT ✦"
-            : "   ULT \(state.ultimateKillCharge)/\(GameState.ultimateChargeKills)"
-        statsLabel.text = "HP \(state.playerHealth)   ARMOR \(state.playerArmor)/\(state.armorCap)\(dodge)\(ult)"
+        drawPips(
+            in: healthBarNode,
+            filled: max(0, state.playerHealth),
+            total: max(state.maxHealth, state.playerHealth),
+            color: SKColor(red: 0.85, green: 0.25, blue: 0.30, alpha: 1.0)
+        )
+        drawPips(
+            in: armorBarNode,
+            filled: max(0, state.playerArmor),
+            total: max(state.armorCap, state.playerArmor),
+            color: armorFlashColor
+        )
+        updateUltimateBar()
+        dodgeChipLabel.isHidden = !state.plannedDodgeReady
         let nextLevel = GameState.scoreThreshold(forLevel: state.level + 1)
         let streak = state.killStreak >= 2 ? " · STREAK ×\(state.killStreak)" : ""
         let progress = state.bossPhase ? "\(state.score) · SLAY THE GATEKEEPER" : "\(state.score)/\(nextLevel)"
@@ -650,8 +1031,10 @@ class GameScene: SKScene {
         weaponLabel.text = "\(state.equippedWeapon.name) · move \(state.moveRange) · dmg \(state.attackDamage)\(readiness)"
         weaponSubLabel.text = "swap ⇄ \(state.holsteredWeapon.name) · costs attack"
 
-        if state.plannedUltimate {
-            itemsLabel.text = "ULTIMATE drafted — smites every enemy on the board"
+        if state.plannedBash {
+            itemsLabel.text = "bash drafted — a 1 dmg jab while the \(state.equippedWeapon.name) reloads"
+        } else if state.plannedUltimate {
+            itemsLabel.text = "omen drafted — the sky falls on every enemy"
         } else if state.plannedSwap {
             itemsLabel.text = "swapping to \(state.holsteredWeapon.name) — no attack or dodge this turn"
         } else if let pickup = state.plannedPickupWeapon {
@@ -718,8 +1101,10 @@ class GameScene: SKScene {
         // Damage per hazard tile, live effects taking precedence over the
         // held-from-last-turn snapshot.
         var hazardDamages = heldHazardTiles ?? [:]
-        for effect in state.lingeringEffects {
-            hazardDamages[effect.position] = effect.damagePerTurn
+        if revealLiveHazards {
+            for effect in state.lingeringEffects {
+                hazardDamages[effect.position] = effect.damagePerTurn
+            }
         }
 
         // Incoming shells and armed bombers always telegraph their zones; while
@@ -902,9 +1287,9 @@ class GameScene: SKScene {
                     at: hovered,
                     color: SKColor(red: 0.95, green: 0.60, blue: 0.25, alpha: 1.0)
                 )
-            } else if state.pendingSpawns.contains(hovered) {
+            } else if let arrival = state.pendingArrivals.first(where: { $0.position == hovered }) {
                 addHoverLabel(
-                    "enemy spawns here next turn · stand here to block (1 dmg)",
+                    "\(arrival.displayName) arrives next turn · stand here to block (1 dmg)",
                     at: hovered,
                     color: SKColor(red: 0.95, green: 0.45, blue: 0.85, alpha: 1.0)
                 )
@@ -1020,6 +1405,7 @@ class GameScene: SKScene {
     /// Stores the chosen tile and points an arrow at it; nothing moves until GO.
     private func planMove(to target: GridPosition) {
         guard !isResolving, state.planMove(to: target) else { return }
+        advanceTutorial(after: .move)
         updatePlanArrow()
         refreshTileHighlights()
         updateHUD()
@@ -1049,14 +1435,23 @@ class GameScene: SKScene {
         heldHazardTiles = Dictionary(
             uniqueKeysWithValues: state.lingeringEffects.map { ($0.position, $0.damagePerTurn) }
         )
+        revealLiveHazards = false
         let ultWasReady = state.ultimateKillCharge >= GameState.ultimateChargeKills
         let resolution = state.resolveTurn()
         pendingUltimateReadyToast = !ultWasReady
             && state.ultimateKillCharge >= GameState.ultimateChargeKills
         if let picked = resolution.pickedUpWeapon {
-            showToast("picked up \(picked.name)", duration: 1.0)
+            // Claiming an elite trophy unlocks it for every future run.
+            if Weapon.eliteTrophies.contains(where: { $0.name == picked.name })
+                && !claimedTrophyNames.contains(picked.name) {
+                claimedTrophyNames.insert(picked.name)
+                showToast("TROPHY CLAIMED: \(picked.name) — now found in the wild", duration: 2.4)
+            } else {
+                showToast("picked up \(picked.name)", duration: 1.0)
+            }
         }
         isResolving = true
+        advanceTutorial(after: .go)
         planArrowNode?.removeFromParent()
         planArrowNode = nil
         enemyPlanArrowNodes.forEach { $0.removeFromParent() }
@@ -1088,7 +1483,7 @@ class GameScene: SKScene {
         }
 
         playerNode.run(resolveAnimation) { [weak self] in
-            self?.animateEnemyMoves(resolution)
+            self?.playSpawns(resolution)
         }
     }
 
@@ -1260,6 +1655,8 @@ class GameScene: SKScene {
     /// Flashes the covered tiles (sweep or blast) and plays hit/death/explosion
     /// effects, then hands off to the enemies' attacks.
     private func playPlayerAttack(_ resolution: TurnResolution) {
+        // Every bolt and lob has visibly flown by now: fresh trails may show.
+        revealLiveHazards = true
         if !resolution.ultimateTiles.isEmpty {
             playUltimate(resolution)
             return
@@ -1432,10 +1829,10 @@ class GameScene: SKScene {
 
     /// Lingering effects burn whoever ended the turn in them; struck enemies
     /// flicker (and any bombers that died to the burn blow up) before the
-    /// reinforcements arrive.
+    /// turn wraps up.
     private func playHazards(_ resolution: TurnResolution) {
         guard !resolution.hazardHits.isEmpty || !resolution.hazardExplosions.isEmpty else {
-            playSpawns(resolution)
+            finishResolvePhase(resolution)
             return
         }
         animateEnemyHits(resolution.hazardHits)
@@ -1443,15 +1840,16 @@ class GameScene: SKScene {
         run(SKAction.wait(forDuration: 0.25)) { [weak self] in
             guard let self else { return }
             self.refreshTileHighlights()
-            self.playSpawns(resolution)
+            self.finishResolvePhase(resolution)
         }
     }
 
-    /// Reinforcements and barrel deliveries pop in on their telegraphed tiles;
-    /// blocked spawns flash the tile instead.
+    /// Reinforcements and barrel deliveries pop in on their telegraphed tiles
+    /// at the head of the turn — before anyone acts — so a pre-aimed attack
+    /// can greet them; blocked spawns flash the tile instead.
     private func playSpawns(_ resolution: TurnResolution) {
         guard !resolution.spawns.isEmpty || !resolution.barrelSpawns.isEmpty else {
-            finishResolvePhase(resolution)
+            animateEnemyMoves(resolution)
             return
         }
         for tile in resolution.barrelSpawns {
@@ -1478,7 +1876,7 @@ class GameScene: SKScene {
             }
         }
         run(SKAction.wait(forDuration: 0.25)) { [weak self] in
-            self?.finishResolvePhase(resolution)
+            self?.animateEnemyMoves(resolution)
         }
     }
 
@@ -1554,19 +1952,21 @@ class GameScene: SKScene {
             showTransmission(Self.eliteChatter.randomElement()!)
         }
 
+        syncLifetimeProgress()
+
         // The charge announcement waits until the kills have visibly happened.
-        if pending ReadyToast {
+        if pendingUltimateReadyToast {
             pendingUltimateReadyToast = false
-            showToast("ULTIMATE CHARGED — press F to unleash it", duration: 2.2)
+            showToast("THE OMEN IS RIPE — press F to bring down the sky", duration: 2.2)
         }
 
         // The combo callout waits until the kills have visibly happened.
         if resolution.killsThisTurn >= 2 {
             let callout: String
             switch resolution.killsThisTurn {
-            case 2: callout = "DOUBLE KILL"
-            case 3: callout = "TRIPLE KILL"
-            default: callout = "RAMPAGE ×\(resolution.killsThisTurn)"
+            case 2: callout = "COMBO x2"
+            case 3: callout = "COMBO x3"
+            default: callout = "COMBO ×\(resolution.killsThisTurn)"
             }
             showToast(callout, duration: 1.4)
         }
@@ -1588,6 +1988,7 @@ class GameScene: SKScene {
         }
 
         heldHazardTiles = nil
+        revealLiveHazards = true
         isResolving = false
         goButton.alpha = 1.0
         updateHUD()
@@ -1600,13 +2001,82 @@ class GameScene: SKScene {
         updateEnemyHoverInfo()
         refreshTileHighlights()
         if state.isGameOver {
-            if state.score > highScore {
-                highScore = state.score
-                showBanner("DEFEATED — NEW BEST \(state.score)! — press R to restart")
-            } else {
-                showBanner("DEFEATED — score \(state.score) · best \(highScore) — press R to restart")
-            }
+            showDeathRecap()
         }
+    }
+
+    // MARK: - Death recap
+
+    private static let deathEpitaphs = [
+        "as foretold. (it was not foretold.)",
+        "the bones did warn you. vaguely.",
+        "the prophecy said 'beware'. it declined to say of what.",
+        "written in the stars: 'oops'.",
+        "the oracle maintains this is somehow character growth.",
+    ]
+
+    /// Full-screen end-of-run summary: what got you, and the numbers the run
+    /// leaves behind. Dismissed by the usual single-R restart.
+    private func showDeathRecap() {
+        let wasBest = state.score > highScore
+        if wasBest {
+            highScore = state.score
+        }
+
+        let overlay = SKNode()
+        overlay.zPosition = 55
+
+        let dim = SKSpriteNode(color: SKColor(white: 0, alpha: 0.82), size: size)
+        dim.position = CGPoint(x: size.width / 2, y: size.height / 2)
+        overlay.addChild(dim)
+
+        let centerX = size.width / 2
+        var y = size.height / 2 + 190
+
+        func addLine(_ text: String, font: String, size fontSize: CGFloat, color: SKColor, drop: CGFloat) {
+            let label = SKLabelNode(text: text)
+            label.fontName = font
+            label.fontSize = fontSize
+            label.fontColor = color
+            label.verticalAlignmentMode = .center
+            label.position = CGPoint(x: centerX, y: y)
+            overlay.addChild(label)
+            y -= drop
+        }
+
+        let gold = SKColor(red: 0.93, green: 0.80, blue: 0.45, alpha: 1.0)
+        addLine("SLAIN", font: "Papyrus", size: 46, color: gold, drop: 44)
+        addLine(Self.deathEpitaphs.randomElement()!,
+                font: "Baskerville-Italic", size: 16, color: SKColor(white: 0.65, alpha: 1.0), drop: 52)
+        addLine("undone by \(state.causeOfDeath ?? "causes unknown")",
+                font: "HelveticaNeue-Bold", size: 20, color: SKColor(red: 0.90, green: 0.35, blue: 0.30, alpha: 1.0), drop: 56)
+
+        let statColor = SKColor(white: 0.85, alpha: 1.0)
+        let scoreLine = wasBest ? "SCORE \(state.score) — NEW BEST ✦" : "SCORE \(state.score) · best \(highScore)"
+        addLine(scoreLine, font: "HelveticaNeue-Bold", size: 22,
+                color: wasBest ? gold : statColor, drop: 40)
+        addLine("level \(state.level) · \(state.turnNumber) turns survived",
+                font: "HelveticaNeue", size: 16, color: statColor, drop: 28)
+        addLine("\(state.totalKills) foes felled · \(state.elitesSlain) gatekeeper\(state.elitesSlain == 1 ? "" : "s")",
+                font: "HelveticaNeue", size: 16, color: statColor, drop: 28)
+        addLine("best turn - ×\(state.bestCombo) kills · longest streak - x\(state.bestStreak)",
+                font: "HelveticaNeue", size: 16, color: statColor, drop: 28)
+        addLine("\(state.totalDamageTaken) damage endured",
+                font: "HelveticaNeue", size: 16, color: statColor, drop: 48)
+
+        let prompt = SKLabelNode(text: "press R to defy fate again")
+        prompt.fontName = "HelveticaNeue-Bold"
+        prompt.fontSize = 15
+        prompt.fontColor = SKColor(white: 0.7, alpha: 1.0)
+        prompt.verticalAlignmentMode = .center
+        prompt.position = CGPoint(x: centerX, y: y)
+        prompt.run(SKAction.repeatForever(SKAction.sequence([
+            SKAction.fadeAlpha(to: 0.35, duration: 0.7),
+            SKAction.fadeAlpha(to: 1.0, duration: 0.7),
+        ])))
+        overlay.addChild(prompt)
+
+        addChild(overlay)
     }
 
     // MARK: - Level up
@@ -1702,29 +2172,91 @@ class GameScene: SKScene {
         addChild(label)
     }
 
-    /// Incoming radio traffic: monospaced comms-green text over the board,
-    /// revealed character by character like a teletype, then held and faded.
+    /// The oracle's pronouncements, typed out letter by letter: grand gold
+    /// Papyrus up to the "|" break, where the mysticism runs out (with a
+    /// hesitation beat) and the rest arrives in deflated plain type.
     private func showTransmission(_ text: String) {
         let boardSide = min(size.width, size.height) * boardScale
         let label = SKLabelNode(text: "")
-        label.fontName = "Menlo-Bold"
-        label.fontSize = 15
-        label.fontColor = SKColor(red: 0.55, green: 0.95, blue: 0.55, alpha: 1.0)
         label.verticalAlignmentMode = .center
-        // Long transmissions wrap instead of overhanging the board.
+        // Long pronouncements wrap instead of overhanging the board.
         label.numberOfLines = 0
         label.preferredMaxLayoutWidth = boardSide - 24
         label.position = CGPoint(x: size.width / 2, y: size.height / 2 + boardSide * 0.28)
         label.zPosition = 60
         addChild(label)
 
-        let characters = Array(text.uppercased())
-        var actions: [SKAction] = []
-        for index in characters.indices {
-            actions.append(SKAction.run { label.text = String(characters[0...index]) + "_" })
-            actions.append(SKAction.wait(forDuration: 0.016))
+        // Every "|" toggles the voice: grand, deflated, grand again… so one
+        // line can lose its nerve, rally, and lose it twice.
+        let segments = text.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        let grandAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont(name: "Papyrus", size: 19) ?? NSFont.systemFont(ofSize: 19),
+            .foregroundColor: NSColor(red: 0.93, green: 0.80, blue: 0.45, alpha: 1.0),
+            .paragraphStyle: paragraph,
+        ]
+        let deflatedAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont(name: "HelveticaNeue", size: 14) ?? NSFont.systemFont(ofSize: 14),
+            .foregroundColor: NSColor(white: 0.78, alpha: 1.0),
+            .paragraphStyle: paragraph,
+        ]
+        func attributes(forSegment index: Int) -> [NSAttributedString.Key: Any] {
+            index.isMultiple(of: 2) ? grandAttributes : deflatedAttributes
         }
-        actions.append(SKAction.run { label.text = String(characters) })
+        // The segment owning the character at `position` (or the last one).
+        func segmentIndex(at position: Int) -> Int {
+            var cumulative = 0
+            for (index, segment) in segments.enumerated() {
+                cumulative += segment.count
+                if position < cumulative {
+                    return index
+                }
+            }
+            return max(0, segments.count - 1)
+        }
+
+        func rendered(upTo count: Int, cursor: Bool) -> NSAttributedString {
+            let result = NSMutableAttributedString()
+            var remaining = count
+            for (index, segment) in segments.enumerated() {
+                guard remaining > 0 else { break }
+                let take = min(remaining, segment.count)
+                if take > 0 {
+                    result.append(NSAttributedString(
+                        string: String(segment.prefix(take)),
+                        attributes: attributes(forSegment: index)
+                    ))
+                }
+                remaining -= take
+            }
+            if cursor {
+                // The cursor wears the style of whatever comes next, so it
+                // visibly deflates (or rallies) right at each break.
+                result.append(NSAttributedString(
+                    string: " ✦",
+                    attributes: attributes(forSegment: segmentIndex(at: count))
+                ))
+            }
+            return result
+        }
+
+        let total = segments.reduce(0) { $0 + $1.count }
+        var breakPoints: Set<Int> = []
+        var cumulative = 0
+        for segment in segments.dropLast() {
+            cumulative += segment.count
+            breakPoints.insert(cumulative)
+        }
+
+        var actions: [SKAction] = []
+        for index in 1...max(1, total) {
+            actions.append(SKAction.run { label.attributedText = rendered(upTo: index, cursor: true) })
+            // The oracle falters at every break before soldiering on.
+            actions.append(SKAction.wait(forDuration: breakPoints.contains(index) ? 0.45 : 0.018))
+        }
+        actions.append(SKAction.run { label.attributedText = rendered(upTo: total, cursor: false) })
         actions.append(SKAction.wait(forDuration: 1.8))
         actions.append(SKAction.fadeOut(withDuration: 0.5))
         actions.append(SKAction.removeFromParent())
@@ -1756,6 +2288,10 @@ class GameScene: SKScene {
 
     private func restartGame() {
         lastRestartKeyTime = 0
+        revealLiveHazards = true
+        tutorialStep = nil
+        tutorialPrompt = nil
+        devPanel = nil
         // Kill any in-flight resolve callbacks (they run on the scene itself and
         // would otherwise fire into the freshly rebuilt board).
         removeAllActions()
@@ -1777,8 +2313,228 @@ class GameScene: SKScene {
         heldHazardTiles = nil
         buffChoiceOverlay = nil
         isResolving = false
-        state = allBarrelsMode ? GameState(walls: 0, barrels: 14) : GameState()
+        state = makeRunState()
         setUpScene()
+    }
+
+    /// This profile's arsenal: the base weapons, plus milestone unlocks, plus
+    /// claimed elite trophies.
+    private func currentWeaponPool() -> [Weapon] {
+        Weapon.baseArsenal
+            + Weapon.milestones.map(\.weapon).filter { unlockedWeaponNames.contains($0.name) }
+            + Weapon.eliteTrophies.filter { claimedTrophyNames.contains($0.name) }
+    }
+
+    private func makeRunState() -> GameState {
+        tallyBaseline = lifetimeTallies
+        return GameState(
+            weapon: devNextEquipped,
+            holsteredWeapon: devNextHolstered,
+            playerHealth: devNextMaxHealth,
+            maxArmor: devNextMaxArmor,
+            walls: allBarrelsMode ? 0 : 10,
+            barrels: allBarrelsMode ? 14 : 4,
+            weaponPool: currentWeaponPool()
+        )
+    }
+
+    // MARK: - Dev panel
+
+    /// God mode, behind the time-honored backtick. "Next" values apply on the
+    /// next restart; the rest is immediate.
+    private var devPanel: SKNode?
+    private var devNextEquipped: Weapon?
+    private var devNextHolstered: Weapon?
+    private var devNextMaxHealth = 5
+    private var devNextMaxArmor = 3
+
+    private func toggleDevPanel() {
+        if devPanel != nil {
+            devPanel?.removeFromParent()
+            devPanel = nil
+            return
+        }
+        showToast("oh no! its the real god! quick! hide!", duration: 1.4)
+        rebuildDevPanel()
+    }
+
+    private func rebuildDevPanel() {
+        devPanel?.removeFromParent()
+        let overlay = SKNode()
+        overlay.zPosition = 85
+
+        let rows: [(String, String)] = [
+            ("DEV MODE — click a row · ` or esc closes", ""),
+            ("next equipped: \(devNextEquipped?.name ?? "random") ▸", "dev:equipped"),
+            ("next holstered: \(devNextHolstered?.name ?? "random") ▸", "dev:holstered"),
+            ("next max HP: \(devNextMaxHealth) ▸", "dev:hp"),
+            ("next armor cap: \(devNextMaxArmor) ▸", "dev:armor"),
+            ("— the four above apply on R restart —", ""),
+            ("fill ultimate", "dev:ultFill"),
+            ("zero ultimate", "dev:ultZero"),
+            ("heal fully", "dev:heal"),
+            ("+100 score", "dev:score"),
+            ("invincible: \(state.devInvincible ? "ON" : "off")", "dev:invincible"),
+            ("unlock entire arsenal", "dev:unlockAll"),
+            ("reset profile (unlocks, tallies, best)", "dev:resetProfile"),
+        ]
+
+        let rowHeight: CGFloat = 26
+        let panelSize = CGSize(width: 430, height: CGFloat(rows.count) * rowHeight + 28)
+        let plate = SKShapeNode(rectOf: panelSize, cornerRadius: 10)
+        plate.fillColor = SKColor(white: 0.05, alpha: 0.95)
+        plate.strokeColor = SKColor(red: 0.55, green: 0.75, blue: 0.95, alpha: 0.9)
+        plate.lineWidth = 1.5
+        plate.position = CGPoint(x: size.width / 2, y: size.height / 2)
+        overlay.addChild(plate)
+
+        var y = size.height / 2 + panelSize.height / 2 - 26
+        for (text, action) in rows {
+            let label = SKLabelNode(text: text)
+            label.fontName = action.isEmpty ? "HelveticaNeue-Bold" : "HelveticaNeue"
+            label.fontSize = 14
+            label.fontColor = action.isEmpty
+                ? SKColor(white: 0.55, alpha: 1.0)
+                : SKColor(white: 0.85, alpha: 1.0)
+            label.verticalAlignmentMode = .center
+            label.position = CGPoint(x: size.width / 2, y: y)
+            if !action.isEmpty {
+                label.name = action
+            }
+            overlay.addChild(label)
+            y -= rowHeight
+        }
+
+        addChild(overlay)
+        devPanel = overlay
+    }
+
+    /// Cycles a next-run weapon slot through random and the whole arsenal.
+    private func cycleDevWeapon(_ current: Weapon?) -> Weapon? {
+        guard let current else { return Weapon.all.first }
+        guard let index = Weapon.all.firstIndex(where: { $0.name == current.name }),
+              index + 1 < Weapon.all.count else { return nil }
+        return Weapon.all[index + 1]
+    }
+
+    private func handleDevAction(_ action: String) {
+        switch action {
+        case "dev:equipped": devNextEquipped = cycleDevWeapon(devNextEquipped)
+        case "dev:holstered": devNextHolstered = cycleDevWeapon(devNextHolstered)
+        case "dev:hp": devNextMaxHealth = devNextMaxHealth >= 20 ? 1 : devNextMaxHealth + 1
+        case "dev:armor": devNextMaxArmor = devNextMaxArmor >= 8 ? 0 : devNextMaxArmor + 1
+        case "dev:ultFill": state.devSetUltimateCharge(GameState.ultimateChargeKills)
+        case "dev:ultZero": state.devSetUltimateCharge(0)
+        case "dev:heal": state.devHealFully()
+        case "dev:score": state.devAddScore(100)
+        case "dev:invincible": state.devInvincible.toggle()
+        case "dev:unlockAll":
+            unlockedWeaponNames = Set(Weapon.milestones.map(\.weapon.name))
+            claimedTrophyNames = Set(Weapon.eliteTrophies.map(\.name))
+            rebuildLegend()
+            rebuildMilestonesPage()
+        case "dev:resetProfile":
+            for key in ["claimedTrophies", "unlockedWeapons", "lifetimeTallies", "highScore"] {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
+            tallyBaseline = [:]
+            rebuildLegend()
+            rebuildMilestonesPage()
+        default:
+            break
+        }
+        rebuildDevPanel()
+        updateHUD()
+    }
+
+    /// Folds this run's credited kills into the lifetime record and announces
+    /// any milestone that just cleared (its weapon joins the next run's pool).
+    private func syncLifetimeProgress() {
+        var lifetime = tallyBaseline
+        for (key, count) in state.progressTallies {
+            lifetime[key, default: 0] += count
+        }
+        lifetimeTallies = lifetime
+        for milestone in Weapon.milestones
+        where !unlockedWeaponNames.contains(milestone.weapon.name)
+            && lifetime[milestone.tally, default: 0] >= milestone.count {
+            unlockedWeaponNames.insert(milestone.weapon.name)
+            showToast("UNLOCKED: \(milestone.weapon.name) — found in the wild from your next run", duration: 2.6)
+            rebuildLegend()
+        }
+        if !milestonesPageNode.isHidden {
+            rebuildMilestonesPage()
+        }
+    }
+
+    // MARK: - Title screen
+
+    /// The front door: shown on launch over a fresh board, dismissed by any
+    /// key or click.
+    private func showTitleScreen() {
+        let overlay = SKNode()
+        overlay.zPosition = 90
+
+        let dim = SKSpriteNode(color: SKColor(white: 0.04, alpha: 0.96), size: size)
+        dim.position = CGPoint(x: size.width / 2, y: size.height / 2)
+        overlay.addChild(dim)
+
+        let centerX = size.width / 2
+        let gold = SKColor(red: 0.93, green: 0.80, blue: 0.45, alpha: 1.0)
+
+        let title = SKLabelNode(text: "FORETOLD")
+        title.fontName = "Papyrus"
+        title.fontSize = 82
+        title.fontColor = gold
+        title.position = CGPoint(x: centerX, y: size.height / 2 + 120)
+        overlay.addChild(title)
+
+        let subtitle = SKLabelNode(text: "every turn is drafted. every death, foretold.")
+        subtitle.fontName = "Baskerville-Italic"
+        subtitle.fontSize = 19
+        subtitle.fontColor = SKColor(white: 0.7, alpha: 1.0)
+        subtitle.position = CGPoint(x: centerX, y: size.height / 2 + 62)
+        overlay.addChild(subtitle)
+
+        let best = SKLabelNode(text: highScore > 0 ? "best score \(highScore)" : "no runs yet — the bones are optimistic")
+        best.fontName = "HelveticaNeue"
+        best.fontSize = 15
+        best.fontColor = SKColor(white: 0.75, alpha: 1.0)
+        best.position = CGPoint(x: centerX, y: size.height / 2 - 10)
+        overlay.addChild(best)
+
+        let claimed = claimedTrophyNames.sorted().joined(separator: ", ")
+        let trophies = SKLabelNode(text: claimed.isEmpty
+            ? "elite trophies claimed: none — take one off a gatekeeper's corpse"
+            : "elite trophies claimed: \(claimed) — now found in the wild")
+        trophies.fontName = "HelveticaNeue"
+        trophies.fontSize = 13
+        trophies.fontColor = gold.withAlphaComponent(0.85)
+        trophies.position = CGPoint(x: centerX, y: size.height / 2 - 38)
+        overlay.addChild(trophies)
+
+        let prompt = SKLabelNode(text: "click — or any key — to begin")
+        prompt.fontName = "HelveticaNeue-Bold"
+        prompt.fontSize = 16
+        prompt.fontColor = SKColor(white: 0.8, alpha: 1.0)
+        prompt.position = CGPoint(x: centerX, y: size.height / 2 - 110)
+        prompt.run(SKAction.repeatForever(SKAction.sequence([
+            SKAction.fadeAlpha(to: 0.3, duration: 0.8),
+            SKAction.fadeAlpha(to: 1.0, duration: 0.8),
+        ])))
+        overlay.addChild(prompt)
+
+        addChild(overlay)
+        titleOverlay = overlay
+    }
+
+    private func dismissTitleScreen() {
+        guard let overlay = titleOverlay else { return }
+        titleOverlay = nil
+        overlay.run(SKAction.sequence([
+            SKAction.fadeOut(withDuration: 0.35),
+            SKAction.removeFromParent(),
+        ]))
     }
 
     // MARK: - Input
@@ -1787,6 +2543,9 @@ class GameScene: SKScene {
         let newHover = gridPosition(at: event.location(in: self))
         guard newHover != hoveredTile else { return }
         hoveredTile = newHover
+        if tutorialStep == .hover, let hovered = newHover, state.enemy(at: hovered) != nil {
+            advanceTutorial(after: .hover)
+        }
         // Mid-resolve, a hover repaint would wipe the attack/blast tile
         // flashes; finishResolvePhase refreshes with the new hover anyway.
         guard !isResolving else { return }
@@ -1795,8 +2554,21 @@ class GameScene: SKScene {
     }
 
     override func mouseDown(with event: NSEvent) {
+        if titleOverlay != nil {
+            dismissTitleScreen()
+            return
+        }
         let location = event.location(in: self)
         let clickedNames = nodes(at: location).compactMap(\.name)
+        if devPanel != nil {
+            // The dev panel is modal: rows act, anything else closes it.
+            if let action = clickedNames.first(where: { $0.hasPrefix("dev:") }) {
+                handleDevAction(action)
+            } else {
+                toggleDevPanel()
+            }
+            return
+        }
         if buffChoiceOverlay != nil {
             // The boon chooser is modal: only its buttons respond.
             if let choice = clickedNames.first(where: { $0.hasPrefix("buffChoice:") }),
@@ -1813,9 +2585,27 @@ class GameScene: SKScene {
             swapWeapons()
             return
         }
+        if clickedNames.contains("tutorialButton") {
+            startTutorial()
+            return
+        }
+        if let tab = clickedNames.first(where: { $0.hasPrefix("navTab:") }) {
+            switch tab {
+            case "navTab:board": setHUDPage(.board)
+            case "navTab:milestones":
+                rebuildMilestonesPage()
+                setHUDPage(.milestones)
+            default: showTitleScreen()
+            }
+            return
+        }
         if let toggle = clickedNames.first(where: { $0.hasPrefix("legendToggle:") }) {
             let section: LegendSection = toggle.hasSuffix("weapons") ? .weapons : .enemies
-            expandedLegendSection = expandedLegendSection == section ? nil : section
+            if expandedLegendSections.contains(section) {
+                expandedLegendSections.remove(section)
+            } else {
+                expandedLegendSections.insert(section)
+            }
             rebuildLegend()
             return
         }
@@ -1827,18 +2617,36 @@ class GameScene: SKScene {
     /// the clicked tile, thrown weapons land on it. Right-clicking the planned
     /// destination itself cancels the draft.
     override func rightMouseDown(with event: NSEvent) {
+        guard titleOverlay == nil else { return }
         guard !isResolving, !state.isGameOver, buffChoiceOverlay == nil else { return }
         guard let tile = gridPosition(at: event.location(in: self)) else { return }
         if tile == state.attackOrigin && state.equippedWeapon.thrown == nil {
             state.clearPlannedAttack()
         } else {
             state.planAttack(toward: tile)
+            if state.plannedAttackDirection != nil || state.plannedThrowTarget != nil {
+                advanceTutorial(after: .attack)
+            }
         }
         refreshTileHighlights()
         updateHUD()
     }
 
     override func keyDown(with event: NSEvent) {
+        if titleOverlay != nil {
+            dismissTitleScreen()
+            return
+        }
+        if event.keyCode == 0x32 { // ` — the time-honored dev console key.
+            toggleDevPanel()
+            return
+        }
+        if devPanel != nil {
+            if event.keyCode == 0x35 { // Esc also closes it.
+                toggleDevPanel()
+            }
+            return
+        }
         if buffChoiceOverlay != nil {
             // The boon chooser is modal: 1/2 pick, everything else waits.
             switch event.keyCode {
@@ -1869,7 +2677,7 @@ class GameScene: SKScene {
                 state.clearPlannedUltimate()
             } else if !state.planUltimate() {
                 let needed = GameState.ultimateChargeKills - state.ultimateKillCharge
-                showToast("ultimate needs \(needed) more kill\(needed == 1 ? "" : "s")")
+                showToast("the omen needs \(needed) more soul\(needed == 1 ? "" : "s")")
             }
             updatePickupHint()
             refreshTileHighlights()

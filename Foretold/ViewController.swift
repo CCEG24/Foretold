@@ -24,8 +24,8 @@ class ViewController: NSViewController {
         hasPresentedScene = true
 
         // Wider than tall: the board keys off the height, leaving roomy side
-        // columns for instructions and HUD.
-        let scene = GameScene(size: CGSize(width: 1200, height: 900))
+        // columns for the reference dropdowns, instructions, and HUD.
+        let scene = GameScene(size: CGSize(width: 1680, height: 900))
         scene.scaleMode = .aspectFit
         view.presentScene(scene)
 
