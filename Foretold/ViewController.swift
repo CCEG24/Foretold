@@ -23,7 +23,9 @@ class ViewController: NSViewController {
         guard !hasPresentedScene, let view = skView else { return }
         hasPresentedScene = true
 
-        let scene = GameScene(size: CGSize(width: 900, height: 900))
+        // Wider than tall: the board keys off the height, leaving roomy side
+        // columns for instructions and HUD.
+        let scene = GameScene(size: CGSize(width: 1200, height: 900))
         scene.scaleMode = .aspectFit
         view.presentScene(scene)
 

@@ -23,17 +23,24 @@ class GameScene: SKScene {
     private var statsLabel: SKLabelNode!
     private var itemsLabel: SKLabelNode!
     private var scoreLabel: SKLabelNode!
+    private var buffsLabel: SKLabelNode!
     private var spawnMarkerNodes: [SKNode] = []
+    private var weaponDropNodes: [SKNode] = []
+    /// Lob beads; rebuilt from state after every turn.
+    private var projectileNodes: [SKNode] = []
+    /// Bolt slivers, keyed by bolt id — persistent so the resolve phase can
+    /// glide them along their flight.
+    private var boltNodes: [Int: SKShapeNode] = [:]
     private var weaponButton: SKShapeNode!
     private var weaponLabel: SKLabelNode!
     private var weaponSubLabel: SKLabelNode!
     private var tileSize: CGFloat = 0
 
     private var hoveredTile: GridPosition?
-    /// Hazard tiles as they looked before the current resolve; kept tinted
-    /// through the animation phases so expired pools only visually dissipate at
-    /// the end of the turn.
-    private var heldHazardTiles: Set<GridPosition>?
+    /// Hazard tiles (and their damage) as they looked before the current
+    /// resolve; kept tinted through the animation phases so expired pools only
+    /// visually dissipate at the end of the turn.
+    private var heldHazardTiles: [GridPosition: Int]?
     /// True while the resolve phase animates; input is ignored until planning resumes.
     private var isResolving = false
 
@@ -45,6 +52,15 @@ class GameScene: SKScene {
     private var lastRestartKeyTime: TimeInterval = 0
     /// Chaos toggle: the next restart replaces every wall with an explosive barrel.
     private var allBarrelsMode = false
+    /// The level-up boon chooser; input is captive while it's up.
+    private var buffChoiceOverlay: SKNode?
+    /// Floating "E · pick up" prompt above the weapon the player is standing on.
+    private var pickupHintLabel: SKLabelNode?
+    /// Best score across runs, persisted in UserDefaults.
+    private var highScore: Int {
+        get { UserDefaults.standard.integer(forKey: "highScore") }
+        set { UserDefaults.standard.set(newValue, forKey: "highScore") }
+    }
     private let playerColor = SKColor(red: 0.35, green: 0.85, blue: 0.95, alpha: 1.0)
     private let armorFlashColor = SKColor(red: 0.65, green: 0.75, blue: 0.95, alpha: 1.0)
     private static let goButtonName = "goButton"
@@ -81,6 +97,8 @@ class GameScene: SKScene {
         setUpControlsLegend()
         updateEnemyPlanArrows()
         updateSpawnMarkers()
+        updateWeaponDropNodes()
+        updatePickupHint()
         refreshTileHighlights()
     }
 
@@ -133,16 +151,98 @@ class GameScene: SKScene {
         return node
     }
 
+    /// Shells in flight: a dark bead partway between thrower and target, further
+    /// along the closer it is to landing. Rebuilt from state after every turn.
+    private func updateProjectileNodes() {
+        projectileNodes.forEach { $0.removeFromParent() }
+        projectileNodes.removeAll()
+        for shell in state.projectiles {
+            let coordinates = state.lobBeadCoordinates(of: shell)
+            let bead = SKShapeNode(circleOfRadius: tileSize * 0.14)
+            bead.fillColor = SKColor(red: 0.25, green: 0.25, blue: 0.28, alpha: 1.0)
+            bead.strokeColor = .white
+            bead.lineWidth = 1.5
+            bead.position = CGPoint(
+                x: (CGFloat(coordinates.x) - CGFloat(state.columns - 1) / 2) * tileSize,
+                y: (CGFloat(coordinates.y) - CGFloat(state.rows - 1) / 2) * tileSize
+            )
+            bead.zPosition = 16
+            boardNode.addChild(bead)
+            projectileNodes.append(bead)
+        }
+
+        // Bolts: a steel sliver on the bolt's actual tile (the red path ahead
+        // shows where it flies next). Nodes persist across turns so the resolve
+        // phase can glide them; flights normally create them, so the fallback
+        // here just places one.
+        let liveBoltIDs = Set(state.bolts.map(\.id))
+        for (id, node) in boltNodes where !liveBoltIDs.contains(id) {
+            node.removeFromParent()
+            boltNodes[id] = nil
+        }
+        for bolt in state.bolts {
+            let node: SKShapeNode
+            if let existing = boltNodes[bolt.id] {
+                node = existing
+            } else {
+                node = makeBoltSliver(direction: bolt.direction)
+                boardNode.addChild(node)
+                boltNodes[bolt.id] = node
+            }
+            node.position = point(for: bolt.position)
+        }
+    }
+
+    private func makeBoltSliver(direction: Direction) -> SKShapeNode {
+        let sliver = SKShapeNode(rectOf: CGSize(width: tileSize * 0.45, height: tileSize * 0.12), cornerRadius: 2)
+        sliver.fillColor = SKColor(red: 0.75, green: 0.78, blue: 0.82, alpha: 1.0)
+        sliver.strokeColor = SKColor(white: 0.3, alpha: 1.0)
+        sliver.lineWidth = 1
+        let step = direction.unitStep
+        sliver.zRotation = atan2(CGFloat(step.y), CGFloat(step.x))
+        sliver.zPosition = 16
+        return sliver
+    }
+
+    /// Gold rings (with the weapon's initial) marking weapons lying on the
+    /// ground; rebuilt from state after every turn.
+    private func updateWeaponDropNodes() {
+        weaponDropNodes.forEach { $0.removeFromParent() }
+        weaponDropNodes.removeAll()
+        let gold = SKColor(red: 0.95, green: 0.85, blue: 0.35, alpha: 1.0)
+        for drop in state.weaponDrops {
+            let ring = SKShapeNode(circleOfRadius: tileSize * 0.30)
+            ring.strokeColor = gold
+            ring.lineWidth = 2
+            ring.fillColor = gold.withAlphaComponent(0.12)
+            ring.position = point(for: drop.position)
+            ring.zPosition = 7
+
+            let letter = SKLabelNode(text: String(drop.weapon.name.prefix(1)))
+            letter.fontName = "HelveticaNeue-Bold"
+            letter.fontSize = 14
+            letter.fontColor = gold
+            letter.verticalAlignmentMode = .center
+            ring.addChild(letter)
+
+            boardNode.addChild(ring)
+            weaponDropNodes.append(ring)
+        }
+    }
+
     /// "!" markers on the tiles where next turn's reinforcements will appear.
     private func updateSpawnMarkers() {
         spawnMarkerNodes.forEach { $0.removeFromParent() }
         spawnMarkerNodes.removeAll()
         guard !state.isGameOver else { return }
-        for tile in state.pendingSpawns {
+        // Pink for incoming enemies, barrel-orange for incoming barrels.
+        let markers = state.pendingSpawns.map { ($0, SKColor(red: 0.95, green: 0.45, blue: 0.85, alpha: 1.0)) }
+            + state.pendingBarrelSpawns.map { ($0, SKColor(red: 0.90, green: 0.55, blue: 0.15, alpha: 1.0)) }
+        for (tile, color) in markers {
             let marker = SKLabelNode(text: "!")
             marker.fontName = "HelveticaNeue-Bold"
             marker.fontSize = 20
-            marker.fontColor = SKColor(red: 0.95, green: 0.45, blue: 0.85, alpha: 1.0)
+            marker.fontColor = color
             marker.verticalAlignmentMode = .center
             marker.position = point(for: tile)
             marker.zPosition = 12
@@ -153,25 +253,31 @@ class GameScene: SKScene {
 
     private func setUpObstacles() {
         for obstacle in state.obstacles {
-            let node: SKNode
-            switch obstacle.kind {
-            case .wall:
-                node = SKSpriteNode(
-                    color: SKColor(white: 0.45, alpha: 1.0),
-                    size: CGSize(width: tileSize - 2, height: tileSize - 2)
-                )
-            case .barrel:
-                let barrel = SKShapeNode(circleOfRadius: tileSize * 0.30)
-                barrel.fillColor = SKColor(red: 0.85, green: 0.50, blue: 0.15, alpha: 1.0)
-                barrel.strokeColor = SKColor(red: 0.40, green: 0.22, blue: 0.05, alpha: 1.0)
-                barrel.lineWidth = 2
-                node = barrel
-            }
-            node.position = point(for: obstacle.position)
-            node.zPosition = 8
-            boardNode.addChild(node)
-            obstacleNodes[obstacle.position] = node
+            addObstacleNode(for: obstacle)
         }
+    }
+
+    @discardableResult
+    private func addObstacleNode(for obstacle: Obstacle) -> SKNode {
+        let node: SKNode
+        switch obstacle.kind {
+        case .wall:
+            node = SKSpriteNode(
+                color: SKColor(white: 0.45, alpha: 1.0),
+                size: CGSize(width: tileSize - 2, height: tileSize - 2)
+            )
+        case .barrel:
+            let barrel = SKShapeNode(circleOfRadius: tileSize * 0.30)
+            barrel.fillColor = SKColor(red: 0.85, green: 0.50, blue: 0.15, alpha: 1.0)
+            barrel.strokeColor = SKColor(red: 0.40, green: 0.22, blue: 0.05, alpha: 1.0)
+            barrel.lineWidth = 2
+            node = barrel
+        }
+        node.position = point(for: obstacle.position)
+        node.zPosition = 8
+        boardNode.addChild(node)
+        obstacleNodes[obstacle.position] = node
+        return node
     }
 
     private func setUpGoButton() {
@@ -231,6 +337,15 @@ class GameScene: SKScene {
         scoreLabel.zPosition = 20
         addChild(scoreLabel)
 
+        buffsLabel = SKLabelNode()
+        buffsLabel.fontName = "HelveticaNeue"
+        buffsLabel.fontSize = 12
+        buffsLabel.fontColor = SKColor(red: 0.65, green: 0.85, blue: 0.65, alpha: 1.0)
+        buffsLabel.verticalAlignmentMode = .center
+        buffsLabel.position = CGPoint(x: size.width / 2, y: size.height - (size.height - boardSide) / 4 - 22)
+        buffsLabel.zPosition = 20
+        addChild(buffsLabel)
+
         setUpWeaponButton(rightEdge: (size.width + boardSide) / 2, y: hudY)
         updateHUD()
     }
@@ -269,28 +384,46 @@ class GameScene: SKScene {
         weaponButton = button
     }
 
-    /// Keybind reference stacked down the left margin beside the board.
+    /// How-to-play primer and keybind reference filling the left column.
     private func setUpControlsLegend() {
         let lines = [
+            "HOW TO PLAY",
+            "Draft a move, aim an attack,",
+            "then hit GO — enemies commit",
+            "to the arrows you can see.",
+            "",
+            "red tiles · incoming attack",
+            "! · spawn arriving next turn",
+            "gold ring · weapon on floor",
+            "stand on it + E to swap",
+            "(spends your attack)",
+            "",
+            "Move 2+ tiles without",
+            "attacking to dodge one hit.",
+            "Armor regens on calm turns;",
+            "HP never does.",
+            "",
             "KEYS",
-            "click · move",
-            "rclick · aim",
-            "esc · cancel",
-            "space · go",
-            "tab · swap",
-            "r×2 · restart",
-            "b · boom mode",
+            "click · draft move",
+            "right-click · aim attack",
+            "E · pick up weapon",
+            "esc · cancel draft",
+            "space/return · GO",
+            "tab/Q · swap weapon (turn)",
+            "R×2 · restart",
+            "B · boom mode",
         ]
         let boardSide = min(size.width, size.height) * boardScale
         let topEdge = (size.height + boardSide) / 2
         for (index, text) in lines.enumerated() {
             let label = SKLabelNode(text: text)
-            label.fontName = index == 0 ? "HelveticaNeue-Bold" : "HelveticaNeue"
-            label.fontSize = 10
-            label.fontColor = SKColor(white: 0.65, alpha: 1.0)
+            let isHeader = text == "HOW TO PLAY" || text == "KEYS"
+            label.fontName = isHeader ? "HelveticaNeue-Bold" : "HelveticaNeue"
+            label.fontSize = 13
+            label.fontColor = SKColor(white: 0.7, alpha: 1.0)
             label.horizontalAlignmentMode = .left
             label.verticalAlignmentMode = .top
-            label.position = CGPoint(x: 6, y: topEdge - CGFloat(index) * 16)
+            label.position = CGPoint(x: 16, y: topEdge - CGFloat(index) * 21)
             label.zPosition = 20
             addChild(label)
         }
@@ -298,15 +431,40 @@ class GameScene: SKScene {
 
     private func updateHUD() {
         let dodge = state.plannedDodgeReady ? "   DODGE ✓" : ""
-        statsLabel.text = "HP \(state.playerHealth)   ARMOR \(state.playerArmor)/\(state.maxArmor)\(dodge)"
-        scoreLabel.text = "SCORE \(state.score) · TURN \(state.turnNumber)"
+        statsLabel.text = "HP \(state.playerHealth)   ARMOR \(state.playerArmor)/\(state.armorCap)\(dodge)"
+        let nextLevel = GameState.scoreThreshold(forLevel: state.level + 1)
+        let streak = state.killStreak >= 2 ? " · STREAK ×\(state.killStreak)" : ""
+        scoreLabel.text = "LVL \(state.level) · SCORE \(state.score)/\(nextLevel)\(streak) · TURN \(state.turnNumber) · BEST \(max(highScore, state.score))"
+
+        // Held buffs, deduplicated into "name ×2 (3 lv)" style in pickup order;
+        // the level count shows the soonest expiry of the stack.
+        var buffTexts: [String] = []
+        var seenBuffs: [Buff] = []
+        for held in state.heldBuffs where !seenBuffs.contains(held.buff) {
+            seenBuffs.append(held.buff)
+            let stack = state.heldBuffs.filter { $0.buff == held.buff }
+            var text = held.buff.name
+            if stack.count > 1 {
+                text += " ×\(stack.count)"
+            }
+            if let soonest = stack.compactMap(\.levelsRemaining).min() {
+                text += " (\(soonest) lv)"
+            }
+            buffTexts.append(text)
+        }
+        buffsLabel.text = buffTexts.joined(separator: " · ")
         let cooldown = state.attackCooldownRemaining(of: state.equippedWeapon)
         let readiness = cooldown > 0 ? " · ready in \(cooldown)" : ""
-        weaponLabel.text = "\(state.equippedWeapon.name) · move \(state.moveRange) · dmg \(state.equippedWeapon.damage)\(readiness)"
+        weaponLabel.text = "\(state.equippedWeapon.name) · move \(state.moveRange) · dmg \(state.attackDamage)\(readiness)"
         weaponSubLabel.text = "swap ⇄ \(state.holsteredWeapon.name) · costs turn"
 
-        if let thrown = state.equippedWeapon.thrown {
-            itemsLabel.text = "thrown · rclick a tile in range (\(thrown.range))"
+        if let pickup = state.plannedPickupWeapon {
+            itemsLabel.text = "picking up \(pickup.name) — no attack or dodge this turn"
+        } else if let underfoot = state.weaponDrop(at: state.playerPosition) {
+            itemsLabel.text = "E · pick up \(underfoot.weapon.name) (costs your attack)"
+        } else if let thrown = state.equippedWeapon.thrown {
+            let flight = thrown.flightTurns > 0 ? " · lands in \(thrown.flightTurns)" : ""
+            itemsLabel.text = "thrown · rclick a tile in range (\(thrown.range))\(flight)"
         } else if let lingering = state.equippedWeapon.lingering {
             itemsLabel.text = "leaves hazard: \(lingering.damagePerTurn) dmg for \(lingering.duration) turns"
         } else {
@@ -357,13 +515,20 @@ class GameScene: SKScene {
         // Thrown weapons show their landing range while planning so right-click
         // targeting is readable.
         let throwRange = planning ? state.throwTargets() : []
-        let spawnTiles = planning ? Set(state.pendingSpawns) : []
-        var hazardTiles = Set(state.lingeringEffects.map(\.position))
-        if let held = heldHazardTiles {
-            hazardTiles.formUnion(held)
+        let spawnTiles = planning ? Set(state.pendingSpawns).union(state.pendingBarrelSpawns) : []
+        // Damage per hazard tile, live effects taking precedence over the
+        // held-from-last-turn snapshot.
+        var hazardDamages = heldHazardTiles ?? [:]
+        for effect in state.lingeringEffects {
+            hazardDamages[effect.position] = effect.damagePerTurn
         }
 
-        var threatTiles: Set<GridPosition> = []
+        // Incoming shells always telegraph their impact zones; while aiming a
+        // bolt weapon, the trajectory beyond the first window reads as red too.
+        var threatTiles: Set<GridPosition> = planning ? Set(state.projectileThreatTiles) : []
+        if planning {
+            threatTiles.formUnion(state.plannedAttackLaterTiles)
+        }
         if planning, let hovered = hoveredTile {
             if let enemy = state.enemy(at: hovered) {
                 // Show the enemy's drafted attack; fall back to an indicative
@@ -371,14 +536,14 @@ class GameScene: SKScene {
                 // isn't attacking this turn.
                 let drafted = state.threatTiles(of: enemy)
                 if !drafted.isEmpty {
-                    threatTiles = Set(drafted)
+                    threatTiles.formUnion(drafted)
                 } else if let pattern = enemy.weapon.attackPattern {
-                    threatTiles = Set(pattern.tiles(from: enemy.position, facing: .up).filter(state.contains))
+                    threatTiles.formUnion(pattern.tiles(from: enemy.position, facing: .up).filter(state.contains))
                 } else if let thrown = enemy.weapon.thrown {
-                    threatTiles = Set(state.blastTiles(around: enemy.position, radius: thrown.blastRadius, includeCenter: true))
+                    threatTiles.formUnion(state.blastTiles(around: enemy.position, radius: thrown.blastRadius, includeCenter: true))
                 }
             } else if let obstacle = state.obstacle(at: hovered), obstacle.kind == .barrel {
-                threatTiles = Set(state.blastTiles(around: hovered, radius: GameState.barrelBlastRadius))
+                threatTiles.formUnion(state.blastTiles(around: hovered, radius: GameState.barrelBlastRadius))
             }
         }
 
@@ -388,7 +553,7 @@ class GameScene: SKScene {
                 isLegalTarget: legalTargets.contains(position),
                 isPlannedAttack: attackTiles.contains(position),
                 isEnemyThreat: threatTiles.contains(position),
-                isHazard: hazardTiles.contains(position),
+                hazardDamage: hazardDamages[position],
                 isThrowRange: throwRange.contains(position),
                 isSpawnTelegraph: spawnTiles.contains(position)
             )
@@ -400,7 +565,7 @@ class GameScene: SKScene {
         isLegalTarget: Bool,
         isPlannedAttack: Bool,
         isEnemyThreat: Bool,
-        isHazard: Bool,
+        hazardDamage: Int?,
         isThrowRange: Bool,
         isSpawnTelegraph: Bool
     ) -> SKColor {
@@ -417,8 +582,16 @@ class GameScene: SKScene {
         if isSpawnTelegraph {
             return SKColor(red: 0.42, green: 0.16, blue: 0.46, alpha: 1.0)
         }
-        if isHazard {
-            return SKColor(red: isDarkTile ? 0.55 : 0.60, green: 0.30, blue: 0.06, alpha: 1.0)
+        if let hazardDamage {
+            // Hotter pools burn brighter and redder: 1 dmg is ember orange,
+            // 4+ approaches open flame.
+            let heat = min(CGFloat(hazardDamage), 4) / 4
+            return SKColor(
+                red: (isDarkTile ? 0.42 : 0.46) + 0.32 * heat,
+                green: 0.36 - 0.20 * heat,
+                blue: 0.06,
+                alpha: 1.0
+            )
         }
         // Legal moves draw over the throw-range hint: left-click movement stays
         // readable while a thrown weapon is equipped.
@@ -432,12 +605,117 @@ class GameScene: SKScene {
         return SKColor(white: isDarkTile ? 0.16 : 0.20, alpha: 1.0)
     }
 
-    /// Shows the hovered enemy's health above it; the red threat tiles are
-    /// handled by refreshTileHighlights.
+    /// Full mid-flight readout for a bolt: heading, damage, speed, and how much
+    /// further it can travel measured from the inspected tile.
+    private func boltHoverText(_ bolt: Bolt, at tile: GridPosition) -> String {
+        let travelled = max(abs(tile.x - bolt.position.x), abs(tile.y - bolt.position.y))
+        let remaining = bolt.remainingRange - travelled
+        let range = remaining <= 0 ? "expires here" : "\(remaining) tiles past here"
+        let blast = bolt.impactBlastRadius > 0 ? " · bursts r\(bolt.impactBlastRadius)" : ""
+        return "bolt \(bolt.direction.arrow) · \(bolt.damage) dmg · \(bolt.speed) tiles/turn\(blast) · \(range)"
+    }
+
+    /// Pulsing prompt above the player when they're standing on a weapon drop,
+    /// so the pickup option is discoverable without reading the HUD.
+    private func updatePickupHint() {
+        pickupHintLabel?.removeFromParent()
+        pickupHintLabel = nil
+        guard !isResolving, !state.isGameOver,
+              let drop = state.weaponDrop(at: state.playerPosition) else { return }
+
+        let text = state.plannedPickup
+            ? "picking up \(drop.weapon.name)"
+            : "E · pick up \(drop.weapon.name)"
+        let label = SKLabelNode(text: text)
+        label.fontName = "HelveticaNeue-Bold"
+        label.fontSize = 13
+        label.fontColor = SKColor(red: 0.95, green: 0.85, blue: 0.35, alpha: 1.0)
+        label.verticalAlignmentMode = .bottom
+        let anchor = point(for: state.playerPosition)
+        label.position = CGPoint(x: anchor.x, y: anchor.y + tileSize * 0.55)
+        label.zPosition = 30
+        boardNode.addChild(label)
+        if !state.plannedPickup {
+            label.run(SKAction.repeatForever(SKAction.sequence([
+                SKAction.fadeAlpha(to: 0.45, duration: 0.55),
+                SKAction.fadeAlpha(to: 1.0, duration: 0.55),
+            ])))
+        }
+        pickupHintLabel = label
+    }
+
+    /// Floating one-liner above a hovered tile, tracked as the current hover info.
+    private func addHoverLabel(_ text: String, at tile: GridPosition, color: SKColor) {
+        let label = SKLabelNode(text: text)
+        label.fontName = "HelveticaNeue-Bold"
+        label.fontSize = 12
+        label.fontColor = color
+        label.verticalAlignmentMode = .bottom
+        let anchor = point(for: tile)
+        label.position = CGPoint(x: anchor.x, y: anchor.y + tileSize * 0.45)
+        label.zPosition = 30
+        boardNode.addChild(label)
+        enemyInfoLabel = label
+    }
+
+    /// Shows the hovered enemy's health (or a ground weapon's name, or a
+    /// hazard's burn stats) above the tile; the red threat tiles are handled by
+    /// refreshTileHighlights.
     private func updateEnemyHoverInfo() {
         enemyInfoLabel?.removeFromParent()
         enemyInfoLabel = nil
-        guard !isResolving, let hovered = hoveredTile, let enemy = state.enemy(at: hovered) else { return }
+        guard !isResolving, let hovered = hoveredTile else { return }
+
+        guard let enemy = state.enemy(at: hovered) else {
+            if let drop = state.weaponDrop(at: hovered), hovered != state.playerPosition {
+                // (Standing on it already shows the persistent pickup hint.)
+                addHoverLabel(
+                    "\(drop.weapon.name) · stand here + E to swap",
+                    at: hovered,
+                    color: SKColor(red: 0.95, green: 0.85, blue: 0.35, alpha: 1.0)
+                )
+            } else if state.obstacle(at: hovered)?.kind == .barrel {
+                addHoverLabel(
+                    "barrel · \(GameState.barrelDamage) dmg · blast r\(GameState.barrelBlastRadius) · chains",
+                    at: hovered,
+                    color: SKColor(red: 0.90, green: 0.55, blue: 0.15, alpha: 1.0)
+                )
+            } else if let bolt = state.bolt(at: hovered) ?? state.bolt(threatening: hovered) {
+                addHoverLabel(
+                    boltHoverText(bolt, at: hovered),
+                    at: hovered,
+                    color: SKColor(red: 0.95, green: 0.45, blue: 0.35, alpha: 1.0)
+                )
+            } else if let shell = state.lobShell(over: hovered) ?? state.projectileImpact(at: hovered) {
+                let heading = Direction.aiming(from: shell.origin, toward: shell.target, allowDiagonals: true)?.arrow ?? ""
+                let turns = shell.turnsUntilImpact == 1 ? "1 turn" : "\(shell.turnsUntilImpact) turns"
+                addHoverLabel(
+                    "shell \(heading) · \(shell.damage) dmg · lands in \(turns)",
+                    at: hovered,
+                    color: SKColor(red: 0.95, green: 0.45, blue: 0.35, alpha: 1.0)
+                )
+            } else if let effect = state.lingeringEffect(at: hovered) {
+                let turns = effect.turnsRemaining == 1 ? "1 turn" : "\(effect.turnsRemaining) turns"
+                addHoverLabel(
+                    "hazard · \(effect.damagePerTurn) dmg/turn · \(turns) left",
+                    at: hovered,
+                    color: SKColor(red: 0.95, green: 0.60, blue: 0.25, alpha: 1.0)
+                )
+            } else if state.pendingSpawns.contains(hovered) {
+                addHoverLabel(
+                    "enemy spawns here next turn · stand here to block (1 dmg)",
+                    at: hovered,
+                    color: SKColor(red: 0.95, green: 0.45, blue: 0.85, alpha: 1.0)
+                )
+            } else if state.pendingBarrelSpawns.contains(hovered) {
+                addHoverLabel(
+                    "barrel lands here next turn · stand here to block it",
+                    at: hovered,
+                    color: SKColor(red: 0.90, green: 0.55, blue: 0.15, alpha: 1.0)
+                )
+            }
+            return
+        }
 
         // Cooldown weapons always show their status so reload windows are readable.
         var status = ""
@@ -549,8 +827,22 @@ class GameScene: SKScene {
         guard !isResolving, !state.isGameOver else { return }
         // Snapshot the pools before the state ticks them, so expired ones stay
         // visible until the hazard phase wraps up.
-        heldHazardTiles = Set(state.lingeringEffects.map(\.position))
+        heldHazardTiles = Dictionary(
+            uniqueKeysWithValues: state.lingeringEffects.map { ($0.position, $0.damagePerTurn) }
+        )
         let resolution = state.resolveTurn()
+        if let picked = resolution.pickedUpWeapon {
+            showToast("picked up \(picked.name)", duration: 1.0)
+        }
+        if resolution.killsThisTurn >= 2 {
+            let callout: String
+            switch resolution.killsThisTurn {
+            case 2: callout = "DOUBLE KILL"
+            case 3: callout = "TRIPLE KILL"
+            default: callout = "RAMPAGE ×\(resolution.killsThisTurn)"
+            }
+            showToast(callout, duration: 1.2)
+        }
         isResolving = true
         planArrowNode?.removeFromParent()
         planArrowNode = nil
@@ -558,8 +850,12 @@ class GameScene: SKScene {
         enemyPlanArrowNodes.removeAll()
         enemyInfoLabel?.removeFromParent()
         enemyInfoLabel = nil
+        pickupHintLabel?.removeFromParent()
+        pickupHintLabel = nil
         spawnMarkerNodes.forEach { $0.removeFromParent() }
         spawnMarkerNodes.removeAll()
+        projectileNodes.forEach { $0.removeFromParent() }
+        projectileNodes.removeAll()
         goButton.alpha = 0.4
         refreshTileHighlights()
 
@@ -602,7 +898,61 @@ class GameScene: SKScene {
         }
 
         run(SKAction.wait(forDuration: longestDuration)) { [weak self] in
-            self?.playPlayerAttack(resolution)
+            self?.playProjectileImpacts(resolution)
+        }
+    }
+
+    /// Bolts glide along the stretch they flew, then anything that landed or
+    /// struck blows up — all before anyone attacks.
+    private func playProjectileImpacts(_ resolution: TurnResolution) {
+        guard !resolution.projectileImpacts.isEmpty || !resolution.boltFlights.isEmpty else {
+            playPlayerAttack(resolution)
+            return
+        }
+
+        var longestFlight: TimeInterval = 0
+        for flight in resolution.boltFlights {
+            let node: SKShapeNode
+            if let existing = boltNodes[flight.boltID] {
+                node = existing
+            } else {
+                // Fired this very turn: the sliver enters at the shooter's tile.
+                node = makeBoltSliver(direction: flight.direction)
+                node.position = point(for: flight.from)
+                boardNode.addChild(node)
+                boltNodes[flight.boltID] = node
+            }
+
+            let destination = point(for: flight.to)
+            let distanceInTiles = hypot(destination.x - node.position.x,
+                                        destination.y - node.position.y) / tileSize
+            let duration = 0.06 * TimeInterval(distanceInTiles) + 0.08
+            longestFlight = max(longestFlight, duration)
+            let glide = SKAction.move(to: destination, duration: duration)
+            glide.timingMode = .easeIn
+            if state.bolts.contains(where: { $0.id == flight.boltID }) {
+                node.run(glide)
+            } else {
+                // Struck something or expired: finish the flight and vanish.
+                boltNodes[flight.boltID] = nil
+                node.run(SKAction.sequence([
+                    glide,
+                    SKAction.fadeOut(withDuration: 0.08),
+                    SKAction.removeFromParent(),
+                ]))
+            }
+        }
+
+        run(SKAction.wait(forDuration: longestFlight)) { [weak self] in
+            guard let self else { return }
+            self.animateExplosions(resolution.projectileImpacts)
+            self.animateEnemyHits(resolution.projectileHits)
+            let pause: TimeInterval = resolution.projectileImpacts.isEmpty ? 0 : 0.3
+            self.run(SKAction.wait(forDuration: pause)) { [weak self] in
+                guard let self else { return }
+                self.refreshTileHighlights()
+                self.playPlayerAttack(resolution)
+            }
         }
     }
 
@@ -737,12 +1087,22 @@ class GameScene: SKScene {
         }
     }
 
-    /// Reinforcements pop in on their telegraphed tiles; blocked spawns flash
-    /// the tile instead.
+    /// Reinforcements and barrel deliveries pop in on their telegraphed tiles;
+    /// blocked spawns flash the tile instead.
     private func playSpawns(_ resolution: TurnResolution) {
-        guard !resolution.spawns.isEmpty else {
-            finishResolvePhase()
+        guard !resolution.spawns.isEmpty || !resolution.barrelSpawns.isEmpty else {
+            finishResolvePhase(resolution)
             return
+        }
+        for tile in resolution.barrelSpawns {
+            guard let barrel = state.obstacle(at: tile) else { continue }
+            let node = addObstacleNode(for: barrel)
+            node.setScale(0.1)
+            node.alpha = 0
+            node.run(SKAction.group([
+                SKAction.scale(to: 1.0, duration: 0.20),
+                SKAction.fadeIn(withDuration: 0.20),
+            ]))
         }
         for spawn in resolution.spawns {
             if let id = spawn.enemyID, let enemy = state.enemies.first(where: { $0.id == id }) {
@@ -758,7 +1118,7 @@ class GameScene: SKScene {
             }
         }
         run(SKAction.wait(forDuration: 0.25)) { [weak self] in
-            self?.finishResolvePhase()
+            self?.finishResolvePhase(resolution)
         }
     }
 
@@ -813,18 +1173,121 @@ class GameScene: SKScene {
         ]))
     }
 
-    private func finishResolvePhase() {
+    /// Tears down and rebuilds the moving pieces after a level-up regenerated
+    /// the board (the tiles stay; enemies and obstacles are re-created).
+    private func rebuildBoardEntities() {
+        enemyNodes.values.forEach { $0.removeFromParent() }
+        enemyNodes.removeAll()
+        obstacleNodes.values.forEach { $0.removeFromParent() }
+        obstacleNodes.removeAll()
+        setUpEnemies()
+        setUpObstacles()
+    }
+
+    private func finishResolvePhase(_ resolution: TurnResolution) {
+        if let newLevel = resolution.leveledUpTo {
+            rebuildBoardEntities()
+            showBuffChoice(forLevel: newLevel)
+        }
         heldHazardTiles = nil
         isResolving = false
         goButton.alpha = 1.0
         updateHUD()
         updateEnemyPlanArrows()
         updateSpawnMarkers()
+        updateWeaponDropNodes()
+        updateProjectileNodes()
+        updatePickupHint()
         updateEnemyHoverInfo()
         refreshTileHighlights()
         if state.isGameOver {
-            showBanner("DEFEATED — score \(state.score) — press R to restart")
+            if state.score > highScore {
+                highScore = state.score
+                showBanner("DEFEATED — NEW BEST \(state.score)! — press R to restart")
+            } else {
+                showBanner("DEFEATED — score \(state.score) · best \(highScore) — press R to restart")
+            }
         }
+    }
+
+    // MARK: - Level up
+
+    /// Full-screen level-up moment, styled like the death banner: dimmed board,
+    /// big title, and a choice of two boons that pauses play until picked.
+    private func showBuffChoice(forLevel level: Int) {
+        let overlay = SKNode()
+        overlay.zPosition = 50
+
+        let dim = SKSpriteNode(color: SKColor(white: 0, alpha: 0.75), size: size)
+        dim.position = CGPoint(x: size.width / 2, y: size.height / 2)
+        overlay.addChild(dim)
+
+        let title = SKLabelNode(text: "LEVEL \(level)")
+        title.fontName = "HelveticaNeue-Bold"
+        title.fontSize = 46
+        title.fontColor = .white
+        title.verticalAlignmentMode = .center
+        title.position = CGPoint(x: size.width / 2, y: size.height / 2 + 110)
+        overlay.addChild(title)
+
+        let subtitle = SKLabelNode(text: "choose a boon")
+        subtitle.fontName = "HelveticaNeue"
+        subtitle.fontSize = 18
+        subtitle.fontColor = SKColor(white: 0.8, alpha: 1.0)
+        subtitle.verticalAlignmentMode = .center
+        subtitle.position = CGPoint(x: size.width / 2, y: size.height / 2 + 62)
+        overlay.addChild(subtitle)
+
+        let choices = state.pendingBuffChoices
+        for (index, buff) in choices.enumerated() {
+            let offset: CGFloat = choices.count == 1 ? 0 : (index == 0 ? -160 : 160)
+            let button = SKShapeNode(rectOf: CGSize(width: 280, height: 76), cornerRadius: 10)
+            button.fillColor = SKColor(red: 0.20, green: 0.40, blue: 0.55, alpha: 1.0)
+            button.strokeColor = .white
+            button.lineWidth = 1.5
+            button.name = "buffChoice:\(index)"
+            button.position = CGPoint(x: size.width / 2 + offset, y: size.height / 2 - 20)
+            overlay.addChild(button)
+
+            let name = SKLabelNode(text: buff.name)
+            name.fontName = "HelveticaNeue-Bold"
+            name.fontSize = 18
+            name.fontColor = .white
+            name.verticalAlignmentMode = .center
+            name.position = CGPoint(x: 0, y: 12)
+            name.name = button.name
+            button.addChild(name)
+
+            let durationText: String
+            if let levels = buff.levelDuration {
+                durationText = levels == 1 ? "this level only" : "lasts \(levels) levels"
+            } else {
+                durationText = buff.isInstantOnly ? "right away" : "whole run"
+            }
+            let detail = SKLabelNode(text: "\(durationText) · press \(index + 1)")
+            detail.fontName = "HelveticaNeue"
+            detail.fontSize = 12
+            detail.fontColor = SKColor(white: 0.8, alpha: 1.0)
+            detail.verticalAlignmentMode = .center
+            detail.position = CGPoint(x: 0, y: -14)
+            detail.name = button.name
+            button.addChild(detail)
+        }
+
+        addChild(overlay)
+        buffChoiceOverlay = overlay
+    }
+
+    /// Applies the picked boon, tears down the overlay, and resumes play.
+    private func chooseBuff(_ index: Int) {
+        guard buffChoiceOverlay != nil, state.pendingBuffChoices.indices.contains(index) else { return }
+        let name = state.pendingBuffChoices[index].name
+        state.chooseBuff(at: index)
+        buffChoiceOverlay?.removeFromParent()
+        buffChoiceOverlay = nil
+        showToast("gained \(name)", duration: 1.2)
+        updateHUD()
+        refreshTileHighlights()
     }
 
     // MARK: - Game over
@@ -871,10 +1334,15 @@ class GameScene: SKScene {
         obstacleNodes.removeAll()
         enemyPlanArrowNodes.removeAll()
         spawnMarkerNodes.removeAll()
+        weaponDropNodes.removeAll()
+        projectileNodes.removeAll()
+        boltNodes.removeAll()
         planArrowNode = nil
         enemyInfoLabel = nil
+        pickupHintLabel = nil
         hoveredTile = nil
         heldHazardTiles = nil
+        buffChoiceOverlay = nil
         isResolving = false
         state = allBarrelsMode ? GameState(walls: 0, barrels: 14) : GameState()
         setUpScene()
@@ -893,6 +1361,14 @@ class GameScene: SKScene {
     override func mouseDown(with event: NSEvent) {
         let location = event.location(in: self)
         let clickedNames = nodes(at: location).compactMap(\.name)
+        if buffChoiceOverlay != nil {
+            // The boon chooser is modal: only its buttons respond.
+            if let choice = clickedNames.first(where: { $0.hasPrefix("buffChoice:") }),
+               let index = Int(choice.dropFirst("buffChoice:".count)) {
+                chooseBuff(index)
+            }
+            return
+        }
         if clickedNames.contains(Self.goButtonName) {
             resolveTurn()
             return
@@ -909,7 +1385,7 @@ class GameScene: SKScene {
     /// the clicked tile, thrown weapons land on it. Right-clicking the planned
     /// destination itself cancels the draft.
     override func rightMouseDown(with event: NSEvent) {
-        guard !isResolving, !state.isGameOver else { return }
+        guard !isResolving, !state.isGameOver, buffChoiceOverlay == nil else { return }
         guard let tile = gridPosition(at: event.location(in: self)) else { return }
         if tile == state.attackOrigin && state.equippedWeapon.thrown == nil {
             state.clearPlannedAttack()
@@ -921,14 +1397,35 @@ class GameScene: SKScene {
     }
 
     override func keyDown(with event: NSEvent) {
+        if buffChoiceOverlay != nil {
+            // The boon chooser is modal: 1/2 pick, everything else waits.
+            switch event.keyCode {
+            case 0x12: chooseBuff(0)
+            case 0x13: chooseBuff(1)
+            default: break
+            }
+            return
+        }
         switch event.keyCode {
         case 0x31, 0x24: // Space or Return: resolve the planned turn.
             resolveTurn()
         case 0x30, 0x0C: // Tab or Q: swap to the holstered weapon.
             swapWeapons()
-        case 0x35: // Escape: cancel the drafted attack or throw.
+        case 0x0E: // E: toggle picking up the weapon underfoot (costs the attack).
+            guard !isResolving, !state.isGameOver else { return }
+            if state.plannedPickup {
+                state.clearPlannedPickup()
+            } else {
+                state.planPickup()
+            }
+            updatePickupHint()
+            refreshTileHighlights()
+            updateHUD()
+        case 0x35: // Escape: cancel the drafted attack, throw, or pickup.
             guard !isResolving else { return }
             state.clearPlannedAttack()
+            state.clearPlannedPickup()
+            updatePickupHint()
             refreshTileHighlights()
             updateHUD()
         case 0x0F: // R: restart — instant once the run is over, double-tap mid-run.
