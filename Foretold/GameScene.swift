@@ -81,6 +81,12 @@ class GameScene: SKScene {
         "this is fox actual. delivery inbound. signature not required. out.",
         "danger close waiver granted. by whom? unclear. splash imminent. out.",
     ]
+    /// Radio traffic for the level's gatekeeper stomping in.
+    private static let eliteChatter = [
+        "all stations, heavy signature on the grid. it is not one of ours. out.",
+        "be advised: something big just woke up. hold what you've got. over.",
+        "priority target inbound. kill it and the road opens. command out.",
+    ]
     private static let weaponButtonSize = CGSize(width: 200, height: 44)
 
     // MARK: - Setup
@@ -154,17 +160,57 @@ class GameScene: SKScene {
 
     @discardableResult
     private func addEnemyNode(for enemy: Enemy) -> SKShapeNode {
-        let side = tileSize * 0.5
+        // Placeholder art: archetypes differ by size and color until sprites exist.
+        let side: CGFloat
+        let fill: SKColor
+        var stroke = SKColor.white
+        var lineWidth: CGFloat = 1.5
+        switch enemy.archetype {
+        case .fighter:
+            side = tileSize * 0.5
+            fill = SKColor(red: 0.90, green: 0.30, blue: 0.25, alpha: 1.0)
+        case .berserker:
+            side = tileSize * 0.5
+            fill = SKColor(red: 0.95, green: 0.45, blue: 0.05, alpha: 1.0)
+        case .swift:
+            side = tileSize * 0.45
+            fill = SKColor(red: 0.35, green: 0.70, blue: 0.95, alpha: 1.0)
+        case .bomber:
+            side = tileSize * 0.45
+            fill = SKColor(white: 0.15, alpha: 1.0)
+            stroke = SKColor(red: 0.90, green: 0.55, blue: 0.15, alpha: 1.0)
+        case .juggernaut:
+            side = tileSize * 0.7
+            fill = SKColor(red: 0.60, green: 0.25, blue: 0.75, alpha: 1.0)
+        case .boss:
+            side = tileSize * 0.85
+            fill = SKColor(red: 0.45, green: 0.10, blue: 0.60, alpha: 1.0)
+            lineWidth = 3
+        }
         let node = SKShapeNode(rectOf: CGSize(width: side, height: side), cornerRadius: 2)
         node.zRotation = .pi / 4
-        node.fillColor = SKColor(red: 0.90, green: 0.30, blue: 0.25, alpha: 1.0)
-        node.strokeColor = .white
-        node.lineWidth = 1.5
+        node.fillColor = fill
+        node.strokeColor = stroke
+        node.lineWidth = lineWidth
         node.zPosition = 10
         node.position = point(for: enemy.position)
         boardNode.addChild(node)
         enemyNodes[enemy.id] = node
         return node
+    }
+
+    /// Armed bombers pulse angrily so the lit fuse is unmistakable.
+    private func updateBomberFuses() {
+        for enemy in state.enemies where enemy.archetype == .bomber {
+            guard let node = enemyNodes[enemy.id] else { continue }
+            if enemy.fuse != nil, node.action(forKey: "armed") == nil {
+                node.strokeColor = SKColor(red: 1.0, green: 0.30, blue: 0.20, alpha: 1.0)
+                node.run(SKAction.repeatForever(SKAction.sequence([
+                    SKAction.scale(to: 1.25, duration: 0.25),
+                    SKAction.scale(to: 1.0, duration: 0.25),
+                ])), withKey: "armed")
+            }
+        }
     }
 
     /// Fractional board coordinates → scene point (for lob beads between tiles).
@@ -248,18 +294,21 @@ class GameScene: SKScene {
         weaponDropNodes.forEach { $0.removeFromParent() }
         weaponDropNodes.removeAll()
         let gold = SKColor(red: 0.95, green: 0.85, blue: 0.35, alpha: 1.0)
+        let bossPurple = SKColor(red: 0.75, green: 0.45, blue: 0.95, alpha: 1.0)
         for drop in state.weaponDrops {
-            let ring = SKShapeNode(circleOfRadius: tileSize * 0.30)
-            ring.strokeColor = gold
-            ring.lineWidth = 2
-            ring.fillColor = gold.withAlphaComponent(0.12)
+            // Boss trophies gleam purple and slightly larger.
+            let tint = drop.isBossDrop ? bossPurple : gold
+            let ring = SKShapeNode(circleOfRadius: tileSize * (drop.isBossDrop ? 0.34 : 0.30))
+            ring.strokeColor = tint
+            ring.lineWidth = drop.isBossDrop ? 3 : 2
+            ring.fillColor = tint.withAlphaComponent(0.12)
             ring.position = point(for: drop.position)
             ring.zPosition = 7
 
             let letter = SKLabelNode(text: String(drop.weapon.name.prefix(1)))
             letter.fontName = "HelveticaNeue-Bold"
             letter.fontSize = 14
-            letter.fontColor = gold
+            letter.fontColor = tint
             letter.verticalAlignmentMode = .center
             ring.addChild(letter)
 
@@ -448,7 +497,7 @@ class GameScene: SKScene {
             "F · ultimate",
             "esc · cancel draft",
             "space/return · GO",
-            "tab/Q · swap weapon (turn)",
+            "tab/Q · swap weapon (costs attack)",
             "R×2 · restart",
             "B · boom mode",
         ]
@@ -476,7 +525,8 @@ class GameScene: SKScene {
         statsLabel.text = "HP \(state.playerHealth)   ARMOR \(state.playerArmor)/\(state.armorCap)\(dodge)\(ult)"
         let nextLevel = GameState.scoreThreshold(forLevel: state.level + 1)
         let streak = state.killStreak >= 2 ? " · STREAK ×\(state.killStreak)" : ""
-        scoreLabel.text = "LVL \(state.level) · SCORE \(state.score)/\(nextLevel)\(streak) · TURN \(state.turnNumber) · BEST \(max(highScore, state.score))"
+        let progress = state.bossPhase ? "\(state.score) · SLAY THE GATEKEEPER" : "\(state.score)/\(nextLevel)"
+        scoreLabel.text = "LVL \(state.level) · SCORE \(progress)\(streak) · TURN \(state.turnNumber) · BEST \(max(highScore, state.score))"
 
         // Held buffs, deduplicated into "name ×2 (3 lv)" style in pickup order;
         // the level count shows the soonest expiry of the stack.
@@ -498,10 +548,12 @@ class GameScene: SKScene {
         let cooldown = state.attackCooldownRemaining(of: state.equippedWeapon)
         let readiness = cooldown > 0 ? " · ready in \(cooldown)" : ""
         weaponLabel.text = "\(state.equippedWeapon.name) · move \(state.moveRange) · dmg \(state.attackDamage)\(readiness)"
-        weaponSubLabel.text = "swap ⇄ \(state.holsteredWeapon.name) · costs turn"
+        weaponSubLabel.text = "swap ⇄ \(state.holsteredWeapon.name) · costs attack"
 
         if state.plannedUltimate {
             itemsLabel.text = "ULTIMATE drafted — smites every enemy on the board"
+        } else if state.plannedSwap {
+            itemsLabel.text = "swapping to \(state.holsteredWeapon.name) — no attack or dodge this turn"
         } else if let pickup = state.plannedPickupWeapon {
             itemsLabel.text = "picking up \(pickup.name) — no attack or dodge this turn"
         } else if let underfoot = state.weaponDrop(at: state.playerPosition) {
@@ -570,11 +622,13 @@ class GameScene: SKScene {
             hazardDamages[effect.position] = effect.damagePerTurn
         }
 
-        // Incoming shells always telegraph their impact zones; while aiming a
-        // bolt weapon, the trajectory beyond the first window reads as red too.
+        // Incoming shells and armed bombers always telegraph their zones; while
+        // aiming a bolt weapon, the trajectory beyond the first window reads as
+        // red too.
         var threatTiles: Set<GridPosition> = planning ? Set(state.projectileThreatTiles) : []
         if planning {
             threatTiles.formUnion(state.plannedAttackLaterTiles)
+            threatTiles.formUnion(state.bomberThreatTiles)
         }
         if planning, let hovered = hoveredTile {
             if let enemy = state.enemy(at: hovered) {
@@ -766,12 +820,23 @@ class GameScene: SKScene {
 
         // Cooldown weapons always show their status so the attack windows are
         // readable — ranged weapons reload, melee ones recover their swing.
+        // Bombers show their fuse instead.
         var status = ""
-        if enemy.weapon.cooldown > 0 {
+        if enemy.archetype == .bomber {
+            status = enemy.fuse.map { " · DETONATES in \($0)" } ?? " · unarmed"
+        } else if enemy.weapon.cooldown > 0 {
             let waiting = enemy.weapon.isMelee ? "ready in" : "reloading"
             status = enemy.cooldownRemaining > 0 ? " · \(waiting) \(enemy.cooldownRemaining)" : " · ready"
         }
-        let label = SKLabelNode(text: "\(enemy.weapon.name) · HP \(enemy.health)\(status)")
+        // The boss telegraphs which of its three plays comes next resolve.
+        if let intent = enemy.plannedIntent {
+            switch intent {
+            case .volley: status += " · NEXT: FULL VOLLEY"
+            case .nova: status += " · NEXT: CANNON NOVA"
+            case .summon: status += " · NEXT: SUMMONING"
+            }
+        }
+        let label = SKLabelNode(text: "\(enemy.displayName) · HP \(enemy.health)\(status)")
         label.fontName = "HelveticaNeue-Bold"
         label.fontSize = 12
         label.fontColor = .white
@@ -860,13 +925,18 @@ class GameScene: SKScene {
         updateHUD()
     }
 
-    /// Swapping weapons costs the whole turn: the swap commits, any drafted move
-    /// and attack are discarded, and the turn resolves immediately.
+    /// Toggles a drafted weapon swap: like a pickup it spends the turn's attack
+    /// and dodge, but the drafted move still happens and the exchange lands on
+    /// resolve.
     private func swapWeapons() {
         guard !isResolving, !state.isGameOver else { return }
-        state.swapWeapons()
+        if state.plannedSwap {
+            state.clearPlannedSwap()
+        } else {
+            state.planSwap()
+        }
+        refreshTileHighlights()
         updateHUD()
-        resolveTurn()
     }
 
     /// Plays the resolve phase: the player moves to the planned tile (staying put
@@ -1055,8 +1125,22 @@ class GameScene: SKScene {
     /// swells and vanishes.
     private func animateExplosions(_ explosions: [TurnResolution.Explosion]) {
         for explosion in explosions {
+            // Overlay flashes rather than tile repaints: they survive any
+            // refreshTileHighlights that lands mid-animation.
             for tile in explosion.tiles {
-                tileNodes[tile]?.color = SKColor(red: 0.95, green: 0.55, blue: 0.10, alpha: 1.0)
+                guard let tileNode = tileNodes[tile] else { continue }
+                let flash = SKSpriteNode(
+                    color: SKColor(red: 0.95, green: 0.55, blue: 0.10, alpha: 1.0),
+                    size: tileNode.size
+                )
+                flash.position = tileNode.position
+                flash.zPosition = 5
+                boardNode.addChild(flash)
+                flash.run(SKAction.sequence([
+                    SKAction.wait(forDuration: 0.25),
+                    SKAction.fadeOut(withDuration: 0.20),
+                    SKAction.removeFromParent(),
+                ]))
             }
             if let barrel = obstacleNodes.removeValue(forKey: explosion.center) {
                 barrel.run(SKAction.sequence([
@@ -1176,7 +1260,10 @@ class GameScene: SKScene {
     /// out here too.
     private func playEnemyAttacks(_ resolution: TurnResolution) {
         let playerWasDamaged = resolution.healthLost > 0 || resolution.armorLost > 0
-        guard !resolution.enemyAttacks.isEmpty || playerWasDamaged else {
+        // Bomber fuses can blow with no attack drafted anywhere: friendly-fire
+        // hits and explosions alone still need this phase to play.
+        guard !resolution.enemyAttacks.isEmpty || playerWasDamaged
+            || !resolution.friendlyFireHits.isEmpty || !resolution.enemyExplosions.isEmpty else {
             playHazards(resolution)
             return
         }
@@ -1227,15 +1314,19 @@ class GameScene: SKScene {
     }
 
     /// Lingering effects burn whoever ended the turn in them; struck enemies
-    /// flicker before the reinforcements arrive.
+    /// flicker (and any bombers that died to the burn blow up) before the
+    /// reinforcements arrive.
     private func playHazards(_ resolution: TurnResolution) {
-        guard !resolution.hazardHits.isEmpty else {
+        guard !resolution.hazardHits.isEmpty || !resolution.hazardExplosions.isEmpty else {
             playSpawns(resolution)
             return
         }
         animateEnemyHits(resolution.hazardHits)
+        animateExplosions(resolution.hazardExplosions)
         run(SKAction.wait(forDuration: 0.25)) { [weak self] in
-            self?.playSpawns(resolution)
+            guard let self else { return }
+            self.refreshTileHighlights()
+            self.playSpawns(resolution)
         }
     }
 
@@ -1337,6 +1428,15 @@ class GameScene: SKScene {
     }
 
     private func finishResolvePhase(_ resolution: TurnResolution) {
+        // An elite stepping onto the field earns a transmission.
+        let arrivedElite = resolution.spawns.contains { event in
+            guard let id = event.enemyID, let enemy = state.enemies.first(where: { $0.id == id }) else { return false }
+            return enemy.archetype == .juggernaut || enemy.archetype == .boss
+        }
+        if arrivedElite {
+            showTransmission(Self.eliteChatter.randomElement()!)
+        }
+
         // The combo callout waits until the kills have visibly happened.
         if resolution.killsThisTurn >= 2 {
             let callout: String
@@ -1351,6 +1451,14 @@ class GameScene: SKScene {
             rebuildBoardEntities()
             showBuffChoice(forLevel: newLevel)
         }
+        // Sweep any sprite whose enemy left the state without a death event —
+        // insurance against ghosts lingering on the board.
+        let alive = Set(state.enemies.map(\.id))
+        for (id, node) in enemyNodes where !alive.contains(id) {
+            enemyNodes[id] = nil
+            node.removeFromParent()
+        }
+
         heldHazardTiles = nil
         isResolving = false
         goButton.alpha = 1.0
@@ -1359,6 +1467,7 @@ class GameScene: SKScene {
         updateSpawnMarkers()
         updateWeaponDropNodes()
         updateProjectileNodes()
+        updateBomberFuses()
         updatePickupHint()
         updateEnemyHoverInfo()
         refreshTileHighlights()
@@ -1550,6 +1659,9 @@ class GameScene: SKScene {
         let newHover = gridPosition(at: event.location(in: self))
         guard newHover != hoveredTile else { return }
         hoveredTile = newHover
+        // Mid-resolve, a hover repaint would wipe the attack/blast tile
+        // flashes; finishResolvePhase refreshes with the new hover anyway.
+        guard !isResolving else { return }
         updateEnemyHoverInfo()
         refreshTileHighlights()
     }
@@ -1628,11 +1740,12 @@ class GameScene: SKScene {
             updatePickupHint()
             refreshTileHighlights()
             updateHUD()
-        case 0x35: // Escape: cancel the drafted attack, throw, pickup, or ultimate.
+        case 0x35: // Escape: cancel the drafted attack, throw, pickup, swap, or ultimate.
             guard !isResolving else { return }
             state.clearPlannedAttack()
             state.clearPlannedPickup()
             state.clearPlannedUltimate()
+            state.clearPlannedSwap()
             updatePickupHint()
             refreshTileHighlights()
             updateHUD()
