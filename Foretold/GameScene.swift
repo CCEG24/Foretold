@@ -59,6 +59,9 @@ class GameScene: SKScene {
     private var buffChoiceOverlay: SKNode?
     /// Floating "E · pick up" prompt above the weapon the player is standing on.
     private var pickupHintLabel: SKLabelNode?
+    /// Set when this resolve's kills finished charging the ultimate; announced
+    /// once the animations wrap up.
+    private var pendingUltimateReadyToast = false
     /// Best score across runs, persisted in UserDefaults.
     private var highScore: Int {
         get { UserDefaults.standard.integer(forKey: "highScore") }
@@ -68,24 +71,24 @@ class GameScene: SKScene {
     private let armorFlashColor = SKColor(red: 0.65, green: 0.75, blue: 0.95, alpha: 1.0)
     private static let goButtonName = "goButton"
     private static let weaponButtonName = "weaponButton"
-    /// Radio traffic that "explains" the ultimate. A fox 4 is not a real
-    /// designation, which is exactly why it can be a massive nuke.
+    /// Prophecies that "explain" the ultimate, delivered by an oracle who is
+    /// trying very hard to sound mystical and not quite managing it.
     private static let ultimateChatter = [
-        "alpha charlie 3, we have a rogue fox 4 headed your direction, over",
-        "fire mission approved — danger close, get small, out",
-        "bird away. i say again, bird away.",
-        "command copies. forecast: sunshine, brief and total, over",
-        "Incoming payload detected: High Command reminds you that looking directly at the blast violates your non-disclosure agreement.",
-        "negative on abort. fox 4 does not abort.. out.",
-        "requesting fox 4... approved?? who approved that. all stations get down.",
-        "this is fox actual. delivery inbound. signature not required. out.",
-        "danger close waiver granted. by whom? unclear. splash imminent. out.",
+        "hearken! the heavens shall... um. basically the sky is going to land on them. verily.",
+        "lo, a great doom approaches, borne on wings of... it's fire. it's a lot of fire.",
+        "the stars align! well. most of them. enough. close your eyes anyway.",
+        "i have consulted the bones. the bones said 'ka-boom'. i don't make the rules.",
+        "thus spake the void: 'run'. then something i couldn't make out. probably also 'run'.",
+        "behold: a second sun! brief. localized. do not behold it directly, actually.",
+        "an omen! doom shall rain from... above, i want to say? yes. above. definitely above.",
+        "as foretold in the elder scrolls. not those ones. legally distinct ones.",
+        "so it is written. in pencil, but still. so it lands.",
     ]
-    /// Radio traffic for the level's gatekeeper stomping in.
+    /// Prophecies for the level's gatekeeper stomping in, same oracle.
     private static let eliteChatter = [
-        "all stations, heavy signature on the grid. it is not one of ours. out.",
-        "be advised: something big just woke up. hold what you've got. over.",
-        "priority target inbound. kill it and the road opens. command out.",
+        "dark portents gather! something huge this way... comes? cometh? it's coming.",
+        "i foresaw this! (i did not.) slay the big one and the road shall, um, open. mystically.",
+        "hark! the gate walks in flesh most foul! yes, the massive one. kill that.",
     ]
     private static let weaponButtonSize = CGSize(width: 200, height: 44)
 
@@ -471,50 +474,147 @@ class GameScene: SKScene {
         weaponButton = button
     }
 
-    /// How-to-play primer and keybind reference filling the left column.
+    private var legendNode: SKNode?
+    private var expandedLegendSection: LegendSection?
+
+    /// The left column: how-to-play primer, keybinds, and collapsible weapon
+    /// and enemy references. Rebuilt whenever a dropdown is toggled.
     private func setUpControlsLegend() {
-        let lines = [
-            "HOW TO PLAY",
-            "Draft a move, aim an attack,",
-            "then hit GO — enemies commit",
-            "to the arrows you can see.",
-            "",
-            "red tiles · incoming attack",
-            "! · spawn arriving next turn",
-            "gold ring · weapon on floor",
-            "stand on it + E to swap",
-            "(spends your attack)",
-            "",
-            "Move 2+ tiles without",
-            "attacking to dodge one hit.",
-            "Armor regens on calm turns;",
-            "HP never does.",
-            "",
-            "KEYS",
-            "click · draft move",
-            "right-click · aim attack",
-            "E · pick up weapon",
-            "F · ultimate",
-            "esc · cancel draft",
-            "space/return · GO",
-            "tab/Q · swap weapon (costs attack)",
-            "R×2 · restart",
-            "B · boom mode",
+        rebuildLegend()
+    }
+
+    private enum LegendSection {
+        case weapons, enemies
+    }
+
+    private func rebuildLegend() {
+        legendNode?.removeFromParent()
+        let column = SKNode()
+        column.zPosition = 20
+        addChild(column)
+        legendNode = column
+
+        enum LineStyle {
+            case header, body, toggle(String), entry
+        }
+        var lines: [(String, LineStyle)] = [
+            ("HOW TO PLAY", .header),
+            ("Draft a move, aim an attack,", .body),
+            ("then hit GO — enemies commit", .body),
+            ("to the arrows you can see.", .body),
+            ("", .body),
+            ("red tiles · incoming attack", .body),
+            ("! · spawn arriving next turn", .body),
+            ("gold ring · weapon on floor", .body),
+            ("purple ring · elite trophy", .body),
+            ("", .body),
+            ("Move 2+ tiles without acting", .body),
+            ("to dodge one hit. Armor regens", .body),
+            ("on calm turns; HP never does.", .body),
+            ("", .body),
+            ("Hit the score milestone and a", .body),
+            ("gatekeeper spawns — kill it to", .body),
+            ("level up and take its weapons.", .body),
+            ("", .body),
+            ("KEYS", .header),
+            ("click · draft move", .body),
+            ("right-click · aim attack", .body),
+            ("E · pick up weapon underfoot", .body),
+            ("tab/Q · swap weapon", .body),
+            ("F · ultimate when charged", .body),
+            ("esc · cancel draft", .body),
+            ("space/return · GO", .body),
+            ("R×2 · restart · B · boom mode", .body),
+            ("", .body),
         ]
+
+        let weaponsOpen = expandedLegendSection == .weapons
+        lines.append(("\(weaponsOpen ? "▾" : "▸") WEAPONS", .toggle("weapons")))
+        if weaponsOpen {
+            for weapon in Weapon.all {
+                lines.append((weaponLegendLine(weapon), .entry))
+            }
+        }
+        let enemiesOpen = expandedLegendSection == .enemies
+        lines.append(("\(enemiesOpen ? "▾" : "▸") ENEMIES", .toggle("enemies")))
+        if enemiesOpen {
+            let entries = [
+                "Fighter · any weapon, kites",
+                "Berserker · melee, fearless",
+                "Swift · +1 move",
+                "Bomber · arms at range \(GameState.bomberArmDistance),",
+                "   blast r\(GameState.bomberBlastRadius) — on fuse or death",
+                "Juggernaut · gate, summons waves",
+                "Boss · gate, drafts an intent:",
+                "   volley both weapons, cannon",
+                "   nova r\(GameState.bossNovaRadius), or summon",
+            ]
+            for entry in entries {
+                lines.append((entry, .entry))
+            }
+        }
+
         let boardSide = min(size.width, size.height) * boardScale
-        let topEdge = (size.height + boardSide) / 2
-        for (index, text) in lines.enumerated() {
+        var y = (size.height + boardSide) / 2
+        for (text, style) in lines {
             let label = SKLabelNode(text: text)
-            let isHeader = text == "HOW TO PLAY" || text == "KEYS"
-            label.fontName = isHeader ? "HelveticaNeue-Bold" : "HelveticaNeue"
-            label.fontSize = 13
-            label.fontColor = SKColor(white: 0.7, alpha: 1.0)
+            switch style {
+            case .header:
+                label.fontName = "HelveticaNeue-Bold"
+                label.fontSize = 13
+                label.fontColor = SKColor(white: 0.7, alpha: 1.0)
+            case .body:
+                label.fontName = "HelveticaNeue"
+                label.fontSize = 13
+                label.fontColor = SKColor(white: 0.7, alpha: 1.0)
+            case .toggle(let section):
+                label.fontName = "HelveticaNeue-Bold"
+                label.fontSize = 13
+                label.fontColor = SKColor(red: 0.55, green: 0.75, blue: 0.95, alpha: 1.0)
+                label.name = "legendToggle:\(section)"
+            case .entry:
+                label.fontName = "HelveticaNeue"
+                label.fontSize = 11
+                label.fontColor = SKColor(white: 0.55, alpha: 1.0)
+            }
             label.horizontalAlignmentMode = .left
             label.verticalAlignmentMode = .top
-            label.position = CGPoint(x: 16, y: topEdge - CGFloat(index) * 21)
-            label.zPosition = 20
-            addChild(label)
+            label.position = CGPoint(x: 16, y: y)
+            column.addChild(label)
+            if case .entry = style {
+                y -= 16
+            } else {
+                y -= 20
+            }
         }
+    }
+
+    /// One compact stat line per weapon for the legend dropdown.
+    private func weaponLegendLine(_ weapon: Weapon) -> String {
+        var traits: [String] = []
+        if let thrown = weapon.thrown {
+            traits.append("lob r\(thrown.range)")
+        }
+        if weapon.projectileSpeed != nil {
+            traits.append("bolt")
+        }
+        if weapon.impactBlastRadius > 0 {
+            traits.append("burst")
+        }
+        if weapon.pierces {
+            traits.append("pierce")
+        }
+        if weapon.lingering != nil {
+            traits.append("trail")
+        }
+        if weapon.cooldown > 0 {
+            traits.append("cd\(weapon.cooldown)")
+        }
+        if weapon.name == Weapon.cannon.name {
+            traits.append("(boss drop)")
+        }
+        let tail = traits.isEmpty ? "" : " " + traits.joined(separator: " ")
+        return "\(weapon.name) · \(weapon.damage)dmg \(weapon.moveRange)mv\(tail)"
     }
 
     private func updateHUD() {
@@ -949,7 +1049,10 @@ class GameScene: SKScene {
         heldHazardTiles = Dictionary(
             uniqueKeysWithValues: state.lingeringEffects.map { ($0.position, $0.damagePerTurn) }
         )
+        let ultWasReady = state.ultimateKillCharge >= GameState.ultimateChargeKills
         let resolution = state.resolveTurn()
+        pendingUltimateReadyToast = !ultWasReady
+            && state.ultimateKillCharge >= GameState.ultimateChargeKills
         if let picked = resolution.pickedUpWeapon {
             showToast("picked up \(picked.name)", duration: 1.0)
         }
@@ -1161,7 +1264,10 @@ class GameScene: SKScene {
             playUltimate(resolution)
             return
         }
-        guard !resolution.attackTiles.isEmpty else {
+        // Bolt shots sweep no tiles, but a bomber dying to one still blasts:
+        // its explosion (and the barrels it popped) must play regardless.
+        guard !resolution.attackTiles.isEmpty
+            || !resolution.playerExplosions.isEmpty || !resolution.enemyHits.isEmpty else {
             playEnemyAttacks(resolution)
             return
         }
@@ -1247,7 +1353,18 @@ class GameScene: SKScene {
             }
         }
 
-        run(SKAction.wait(forDuration: longestDelay + 0.4)) { [weak self] in
+        // Chained blasts (dying bombers, popped barrels) flash once the wave
+        // has passed; without this an ult turn played no explosions at all.
+        if !resolution.playerExplosions.isEmpty {
+            run(SKAction.sequence([
+                SKAction.wait(forDuration: longestDelay),
+                SKAction.run { [weak self] in
+                    self?.animateExplosions(resolution.playerExplosions)
+                },
+            ]))
+        }
+
+        run(SKAction.wait(forDuration: longestDelay + 0.6)) { [weak self] in
             guard let self else { return }
             self.refreshTileHighlights()
             self.playEnemyAttacks(resolution)
@@ -1437,6 +1554,12 @@ class GameScene: SKScene {
             showTransmission(Self.eliteChatter.randomElement()!)
         }
 
+        // The charge announcement waits until the kills have visibly happened.
+        if pending ReadyToast {
+            pendingUltimateReadyToast = false
+            showToast("ULTIMATE CHARGED — press F to unleash it", duration: 2.2)
+        }
+
         // The combo callout waits until the kills have visibly happened.
         if resolution.killsThisTurn >= 2 {
             let callout: String
@@ -1451,11 +1574,16 @@ class GameScene: SKScene {
             rebuildBoardEntities()
             showBuffChoice(forLevel: newLevel)
         }
-        // Sweep any sprite whose enemy left the state without a death event —
-        // insurance against ghosts lingering on the board.
+        // Sweep any sprite whose enemy or obstacle left the state without a
+        // death event — insurance against ghosts lingering on the board.
         let alive = Set(state.enemies.map(\.id))
         for (id, node) in enemyNodes where !alive.contains(id) {
             enemyNodes[id] = nil
+            node.removeFromParent()
+        }
+        let solid = Set(state.obstacles.map(\.position))
+        for (position, node) in obstacleNodes where !solid.contains(position) {
+            obstacleNodes[position] = nil
             node.removeFromParent()
         }
 
@@ -1683,6 +1811,12 @@ class GameScene: SKScene {
         }
         if clickedNames.contains(Self.weaponButtonName) {
             swapWeapons()
+            return
+        }
+        if let toggle = clickedNames.first(where: { $0.hasPrefix("legendToggle:") }) {
+            let section: LegendSection = toggle.hasSuffix("weapons") ? .weapons : .enemies
+            expandedLegendSection = expandedLegendSection == section ? nil : section
+            rebuildLegend()
             return
         }
         guard let target = gridPosition(at: location) else { return }
