@@ -26,8 +26,11 @@ class GameScene: SKScene {
     private var buffsLabel: SKLabelNode!
     private var spawnMarkerNodes: [SKNode] = []
     private var weaponDropNodes: [SKNode] = []
-    /// Lob beads; rebuilt from state after every turn.
-    private var projectileNodes: [SKNode] = []
+    /// Lob shell beads, keyed by projectile id — persistent so the resolve
+    /// phase can glide them along their arc.
+    private var lobNodes: [Int: SKShapeNode] = [:]
+    /// Where each airborne lob will land, for the landing dive animation.
+    private var lobTargets: [Int: CGPoint] = [:]
     /// Bolt slivers, keyed by bolt id — persistent so the resolve phase can
     /// glide them along their flight.
     private var boltNodes: [Int: SKShapeNode] = [:]
@@ -65,6 +68,19 @@ class GameScene: SKScene {
     private let armorFlashColor = SKColor(red: 0.65, green: 0.75, blue: 0.95, alpha: 1.0)
     private static let goButtonName = "goButton"
     private static let weaponButtonName = "weaponButton"
+    /// Radio traffic that "explains" the ultimate. A fox 4 is not a real
+    /// designation, which is exactly why it can be a massive nuke.
+    private static let ultimateChatter = [
+        "alpha charlie 3, we have a rogue fox 4 headed your direction, over",
+        "fire mission approved — danger close, get small, out",
+        "bird away. i say again, bird away.",
+        "command copies. forecast: sunshine, brief and total, over",
+        "Incoming payload detected: High Command reminds you that looking directly at the blast violates your non-disclosure agreement.",
+        "negative on abort. fox 4 does not abort.. out.",
+        "requesting fox 4... approved?? who approved that. all stations get down.",
+        "this is fox actual. delivery inbound. signature not required. out.",
+        "danger close waiver granted. by whom? unclear. splash imminent. out.",
+    ]
     private static let weaponButtonSize = CGSize(width: 200, height: 44)
 
     // MARK: - Setup
@@ -151,24 +167,46 @@ class GameScene: SKScene {
         return node
     }
 
+    /// Fractional board coordinates → scene point (for lob beads between tiles).
+    private func boardPoint(x: Double, y: Double) -> CGPoint {
+        CGPoint(
+            x: (CGFloat(x) - CGFloat(state.columns - 1) / 2) * tileSize,
+            y: (CGFloat(y) - CGFloat(state.rows - 1) / 2) * tileSize
+        )
+    }
+
     /// Shells in flight: a dark bead partway between thrower and target, further
-    /// along the closer it is to landing. Rebuilt from state after every turn.
+    /// along the closer it is to landing. Beads persist across turns; a freshly
+    /// thrown one glides out of the thrower's hand.
     private func updateProjectileNodes() {
-        projectileNodes.forEach { $0.removeFromParent() }
-        projectileNodes.removeAll()
+        let liveShellIDs = Set(state.projectiles.map(\.id))
+        for (id, node) in lobNodes where !liveShellIDs.contains(id) {
+            node.removeFromParent()
+            lobNodes[id] = nil
+            lobTargets[id] = nil
+        }
         for shell in state.projectiles {
             let coordinates = state.lobBeadCoordinates(of: shell)
-            let bead = SKShapeNode(circleOfRadius: tileSize * 0.14)
-            bead.fillColor = SKColor(red: 0.25, green: 0.25, blue: 0.28, alpha: 1.0)
-            bead.strokeColor = .white
-            bead.lineWidth = 1.5
-            bead.position = CGPoint(
-                x: (CGFloat(coordinates.x) - CGFloat(state.columns - 1) / 2) * tileSize,
-                y: (CGFloat(coordinates.y) - CGFloat(state.rows - 1) / 2) * tileSize
-            )
-            bead.zPosition = 16
-            boardNode.addChild(bead)
-            projectileNodes.append(bead)
+            let destination = boardPoint(x: coordinates.x, y: coordinates.y)
+            if let existing = lobNodes[shell.id] {
+                existing.position = destination
+            } else {
+                let bead = SKShapeNode(circleOfRadius: tileSize * 0.14)
+                bead.fillColor = SKColor(red: 0.25, green: 0.25, blue: 0.28, alpha: 1.0)
+                bead.strokeColor = .white
+                bead.lineWidth = 1.5
+                bead.position = point(for: shell.origin)
+                bead.zPosition = 16
+                boardNode.addChild(bead)
+                lobNodes[shell.id] = bead
+                lobTargets[shell.id] = point(for: shell.target)
+
+                let distanceInTiles = hypot(destination.x - bead.position.x,
+                                            destination.y - bead.position.y) / tileSize
+                let launch = SKAction.move(to: destination, duration: 0.06 * TimeInterval(distanceInTiles) + 0.08)
+                launch.timingMode = .easeOut
+                bead.run(launch)
+            }
         }
 
         // Bolts: a steel sliver on the bolt's actual tile (the red path ahead
@@ -407,6 +445,7 @@ class GameScene: SKScene {
             "click · draft move",
             "right-click · aim attack",
             "E · pick up weapon",
+            "F · ultimate",
             "esc · cancel draft",
             "space/return · GO",
             "tab/Q · swap weapon (turn)",
@@ -431,7 +470,10 @@ class GameScene: SKScene {
 
     private func updateHUD() {
         let dodge = state.plannedDodgeReady ? "   DODGE ✓" : ""
-        statsLabel.text = "HP \(state.playerHealth)   ARMOR \(state.playerArmor)/\(state.armorCap)\(dodge)"
+        let ult = state.ultimateKillCharge >= GameState.ultimateChargeKills
+            ? "   ULT ✦"
+            : "   ULT \(state.ultimateKillCharge)/\(GameState.ultimateChargeKills)"
+        statsLabel.text = "HP \(state.playerHealth)   ARMOR \(state.playerArmor)/\(state.armorCap)\(dodge)\(ult)"
         let nextLevel = GameState.scoreThreshold(forLevel: state.level + 1)
         let streak = state.killStreak >= 2 ? " · STREAK ×\(state.killStreak)" : ""
         scoreLabel.text = "LVL \(state.level) · SCORE \(state.score)/\(nextLevel)\(streak) · TURN \(state.turnNumber) · BEST \(max(highScore, state.score))"
@@ -458,7 +500,9 @@ class GameScene: SKScene {
         weaponLabel.text = "\(state.equippedWeapon.name) · move \(state.moveRange) · dmg \(state.attackDamage)\(readiness)"
         weaponSubLabel.text = "swap ⇄ \(state.holsteredWeapon.name) · costs turn"
 
-        if let pickup = state.plannedPickupWeapon {
+        if state.plannedUltimate {
+            itemsLabel.text = "ULTIMATE drafted — smites every enemy on the board"
+        } else if let pickup = state.plannedPickupWeapon {
             itemsLabel.text = "picking up \(pickup.name) — no attack or dodge this turn"
         } else if let underfoot = state.weaponDrop(at: state.playerPosition) {
             itemsLabel.text = "E · pick up \(underfoot.weapon.name) (costs your attack)"
@@ -511,7 +555,10 @@ class GameScene: SKScene {
     private func refreshTileHighlights() {
         let planning = !isResolving && !state.isGameOver
         let legalTargets = planning ? state.legalMoveTargets() : []
-        let attackTiles = planning ? Set(state.plannedAttackTiles) : []
+        var attackTiles = planning ? Set(state.plannedAttackTiles) : []
+        if planning && state.plannedUltimate {
+            attackTiles.formUnion(state.enemies.map(\.position))
+        }
         // Thrown weapons show their landing range while planning so right-click
         // targeting is readable.
         let throwRange = planning ? state.throwTargets() : []
@@ -717,10 +764,12 @@ class GameScene: SKScene {
             return
         }
 
-        // Cooldown weapons always show their status so reload windows are readable.
+        // Cooldown weapons always show their status so the attack windows are
+        // readable — ranged weapons reload, melee ones recover their swing.
         var status = ""
         if enemy.weapon.cooldown > 0 {
-            status = enemy.cooldownRemaining > 0 ? " · reloading \(enemy.cooldownRemaining)" : " · ready"
+            let waiting = enemy.weapon.isMelee ? "ready in" : "reloading"
+            status = enemy.cooldownRemaining > 0 ? " · \(waiting) \(enemy.cooldownRemaining)" : " · ready"
         }
         let label = SKLabelNode(text: "\(enemy.weapon.name) · HP \(enemy.health)\(status)")
         label.fontName = "HelveticaNeue-Bold"
@@ -834,15 +883,6 @@ class GameScene: SKScene {
         if let picked = resolution.pickedUpWeapon {
             showToast("picked up \(picked.name)", duration: 1.0)
         }
-        if resolution.killsThisTurn >= 2 {
-            let callout: String
-            switch resolution.killsThisTurn {
-            case 2: callout = "DOUBLE KILL"
-            case 3: callout = "TRIPLE KILL"
-            default: callout = "RAMPAGE ×\(resolution.killsThisTurn)"
-            }
-            showToast(callout, duration: 1.2)
-        }
         isResolving = true
         planArrowNode?.removeFromParent()
         planArrowNode = nil
@@ -854,8 +894,6 @@ class GameScene: SKScene {
         pickupHintLabel = nil
         spawnMarkerNodes.forEach { $0.removeFromParent() }
         spawnMarkerNodes.removeAll()
-        projectileNodes.forEach { $0.removeFromParent() }
-        projectileNodes.removeAll()
         goButton.alpha = 0.4
         refreshTileHighlights()
 
@@ -902,15 +940,50 @@ class GameScene: SKScene {
         }
     }
 
-    /// Bolts glide along the stretch they flew, then anything that landed or
-    /// struck blows up — all before anyone attacks.
+    /// Bolts glide along the stretch they flew and lob shells arc onward (or
+    /// dive into their targets), then anything that landed or struck blows up —
+    /// all before anyone attacks.
     private func playProjectileImpacts(_ resolution: TurnResolution) {
-        guard !resolution.projectileImpacts.isEmpty || !resolution.boltFlights.isEmpty else {
+        guard !resolution.projectileImpacts.isEmpty || !resolution.boltFlights.isEmpty || !lobNodes.isEmpty else {
             playPlayerAttack(resolution)
             return
         }
 
         var longestFlight: TimeInterval = 0
+
+        // Airborne shells advance along their arc; landed ones dive into the
+        // target and vanish just before the blast flash.
+        for (id, node) in lobNodes {
+            let destination: CGPoint
+            let landing: Bool
+            if let shell = state.projectiles.first(where: { $0.id == id }) {
+                let coordinates = state.lobBeadCoordinates(of: shell)
+                destination = boardPoint(x: coordinates.x, y: coordinates.y)
+                landing = false
+            } else if let target = lobTargets[id] {
+                destination = target
+                landing = true
+            } else {
+                continue
+            }
+            let distanceInTiles = hypot(destination.x - node.position.x,
+                                        destination.y - node.position.y) / tileSize
+            let duration = 0.06 * TimeInterval(distanceInTiles) + 0.08
+            longestFlight = max(longestFlight, duration)
+            let glide = SKAction.move(to: destination, duration: duration)
+            glide.timingMode = landing ? .easeIn : .easeInEaseOut
+            if landing {
+                lobNodes[id] = nil
+                lobTargets[id] = nil
+                node.run(SKAction.sequence([
+                    glide,
+                    SKAction.fadeOut(withDuration: 0.06),
+                    SKAction.removeFromParent(),
+                ]))
+            } else {
+                node.run(glide)
+            }
+        }
         for flight in resolution.boltFlights {
             let node: SKShapeNode
             if let existing = boltNodes[flight.boltID] {
@@ -1000,6 +1073,10 @@ class GameScene: SKScene {
     /// Flashes the covered tiles (sweep or blast) and plays hit/death/explosion
     /// effects, then hands off to the enemies' attacks.
     private func playPlayerAttack(_ resolution: TurnResolution) {
+        if !resolution.ultimateTiles.isEmpty {
+            playUltimate(resolution)
+            return
+        }
         guard !resolution.attackTiles.isEmpty else {
             playEnemyAttacks(resolution)
             return
@@ -1012,6 +1089,81 @@ class GameScene: SKScene {
         animateExplosions(resolution.playerExplosions)
 
         run(SKAction.wait(forDuration: 0.3)) { [weak self] in
+            guard let self else { return }
+            self.refreshTileHighlights()
+            self.playEnemyAttacks(resolution)
+        }
+    }
+
+    /// The smite: a radio transmission "explains" the incoming strike, then a
+    /// shockwave races outward from the player, tiles flaring and victims
+    /// falling in order of distance.
+    private func playUltimate(_ resolution: TurnResolution) {
+        let center = point(for: resolution.playerDestination)
+        /// Seconds of shockwave travel per tile of distance.
+        let wavePace: TimeInterval = 0.05
+        /// A beat for the transmission to type out before the sky falls.
+        let leadIn: TimeInterval = 1.1
+
+        showTransmission(Self.ultimateChatter.randomElement()!)
+
+        let ring = SKShapeNode(circleOfRadius: tileSize * 0.4)
+        ring.strokeColor = .white
+        ring.lineWidth = 4
+        ring.fillColor = .clear
+        ring.position = center
+        ring.zPosition = 25
+        ring.alpha = 0
+        boardNode.addChild(ring)
+        let boardSpan = CGFloat(max(state.columns, state.rows))
+        ring.run(SKAction.sequence([
+            SKAction.wait(forDuration: leadIn),
+            SKAction.fadeIn(withDuration: 0.01),
+            SKAction.group([
+                SKAction.scale(to: boardSpan * 2.5, duration: wavePace * TimeInterval(boardSpan)),
+                SKAction.fadeOut(withDuration: wavePace * TimeInterval(boardSpan)),
+            ]),
+            SKAction.removeFromParent(),
+        ]))
+
+        var longestDelay: TimeInterval = 0
+        for tile in resolution.ultimateTiles {
+            let tilePoint = point(for: tile)
+            let distance = hypot(tilePoint.x - center.x, tilePoint.y - center.y) / tileSize
+            let delay = leadIn + wavePace * TimeInterval(distance)
+            longestDelay = max(longestDelay, delay)
+            run(SKAction.sequence([
+                SKAction.wait(forDuration: delay),
+                SKAction.run { [weak self] in
+                    self?.tileNodes[tile]?.color = .white
+                },
+            ]))
+        }
+        for hit in resolution.enemyHits {
+            guard let node = enemyNodes[hit.enemyID] else { continue }
+            let distance = hypot(node.position.x - center.x, node.position.y - center.y) / tileSize
+            let delay = leadIn + wavePace * TimeInterval(distance)
+            longestDelay = max(longestDelay, delay)
+            if hit.died {
+                enemyNodes[hit.enemyID] = nil
+                node.run(SKAction.sequence([
+                    SKAction.wait(forDuration: delay),
+                    SKAction.group([
+                        SKAction.fadeOut(withDuration: 0.25),
+                        SKAction.scale(to: 0.3, duration: 0.25),
+                    ]),
+                    SKAction.removeFromParent(),
+                ]))
+            } else {
+                node.run(SKAction.sequence([
+                    SKAction.wait(forDuration: delay),
+                    SKAction.fadeAlpha(to: 0.2, duration: 0.08),
+                    SKAction.fadeAlpha(to: 1.0, duration: 0.08),
+                ]))
+            }
+        }
+
+        run(SKAction.wait(forDuration: longestDelay + 0.4)) { [weak self] in
             guard let self else { return }
             self.refreshTileHighlights()
             self.playEnemyAttacks(resolution)
@@ -1185,6 +1337,16 @@ class GameScene: SKScene {
     }
 
     private func finishResolvePhase(_ resolution: TurnResolution) {
+        // The combo callout waits until the kills have visibly happened.
+        if resolution.killsThisTurn >= 2 {
+            let callout: String
+            switch resolution.killsThisTurn {
+            case 2: callout = "DOUBLE KILL"
+            case 3: callout = "TRIPLE KILL"
+            default: callout = "RAMPAGE ×\(resolution.killsThisTurn)"
+            }
+            showToast(callout, duration: 1.4)
+        }
         if let newLevel = resolution.leveledUpTo {
             rebuildBoardEntities()
             showBuffChoice(forLevel: newLevel)
@@ -1303,17 +1465,50 @@ class GameScene: SKScene {
         addChild(label)
     }
 
+    /// Incoming radio traffic: monospaced comms-green text over the board,
+    /// revealed character by character like a teletype, then held and faded.
+    private func showTransmission(_ text: String) {
+        let boardSide = min(size.width, size.height) * boardScale
+        let label = SKLabelNode(text: "")
+        label.fontName = "Menlo-Bold"
+        label.fontSize = 15
+        label.fontColor = SKColor(red: 0.55, green: 0.95, blue: 0.55, alpha: 1.0)
+        label.verticalAlignmentMode = .center
+        // Long transmissions wrap instead of overhanging the board.
+        label.numberOfLines = 0
+        label.preferredMaxLayoutWidth = boardSide - 24
+        label.position = CGPoint(x: size.width / 2, y: size.height / 2 + boardSide * 0.28)
+        label.zPosition = 60
+        addChild(label)
+
+        let characters = Array(text.uppercased())
+        var actions: [SKAction] = []
+        for index in characters.indices {
+            actions.append(SKAction.run { label.text = String(characters[0...index]) + "_" })
+            actions.append(SKAction.wait(forDuration: 0.016))
+        }
+        actions.append(SKAction.run { label.text = String(characters) })
+        actions.append(SKAction.wait(forDuration: 1.8))
+        actions.append(SKAction.fadeOut(withDuration: 0.5))
+        actions.append(SKAction.removeFromParent())
+        label.run(SKAction.sequence(actions))
+    }
+
     /// Transient status message just below the board (restart confirmation,
-    /// mode toggles, and the like).
+    /// mode toggles, and the like). Concurrent toasts stack downward.
     private func showToast(_ text: String, duration: TimeInterval = 0.6) {
         let toast = SKLabelNode(text: text)
+        toast.name = "toast"
         toast.fontName = "HelveticaNeue"
         toast.fontSize = 13
         toast.fontColor = SKColor(white: 0.85, alpha: 1.0)
         toast.verticalAlignmentMode = .center
         let boardSide = min(size.width, size.height) * boardScale
-        toast.position = CGPoint(x: size.width / 2, y: (size.height - boardSide) / 2 - 14)
-        toast.zPosition = 30
+        let stacked = CGFloat(children.filter { $0.name == "toast" }.count)
+        toast.position = CGPoint(x: size.width / 2, y: (size.height - boardSide) / 2 - 14 - stacked * 20)
+        // Above the level-up overlay, so a combo callout survives leveling up
+        // off the same kills.
+        toast.zPosition = 60
         addChild(toast)
         toast.run(SKAction.sequence([
             SKAction.wait(forDuration: duration),
@@ -1335,7 +1530,8 @@ class GameScene: SKScene {
         enemyPlanArrowNodes.removeAll()
         spawnMarkerNodes.removeAll()
         weaponDropNodes.removeAll()
-        projectileNodes.removeAll()
+        lobNodes.removeAll()
+        lobTargets.removeAll()
         boltNodes.removeAll()
         planArrowNode = nil
         enemyInfoLabel = nil
@@ -1421,10 +1617,22 @@ class GameScene: SKScene {
             updatePickupHint()
             refreshTileHighlights()
             updateHUD()
-        case 0x35: // Escape: cancel the drafted attack, throw, or pickup.
+        case 0x03: // F: draft the ultimate — smites every enemy (long cooldown).
+            guard !isResolving, !state.isGameOver else { return }
+            if state.plannedUltimate {
+                state.clearPlannedUltimate()
+            } else if !state.planUltimate() {
+                let needed = GameState.ultimateChargeKills - state.ultimateKillCharge
+                showToast("ultimate needs \(needed) more kill\(needed == 1 ? "" : "s")")
+            }
+            updatePickupHint()
+            refreshTileHighlights()
+            updateHUD()
+        case 0x35: // Escape: cancel the drafted attack, throw, pickup, or ultimate.
             guard !isResolving else { return }
             state.clearPlannedAttack()
             state.clearPlannedPickup()
+            state.clearPlannedUltimate()
             updatePickupHint()
             refreshTileHighlights()
             updateHUD()

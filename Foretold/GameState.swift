@@ -469,7 +469,7 @@ extension Buff {
     static let secondWind = Buff(name: "+2 HP", instantHeal: 2)
     static let longStride = Buff(name: "+1 move", levelDuration: 1, bonusMoveRange: 1)
     static let whetstone = Buff(name: "+1 dmg", levelDuration: 1, bonusDamage: 1)
-    static let hardenedArmour = Buff(name: "+1 armour", levelDuration: 1, instantArmorRepair: 1, bonusArmor: 1)
+    static let hardenedArmour = Buff(name: "+1 max armour", levelDuration: 1, instantArmorRepair: 1, bonusArmor: 1)
     /// The pool level-ups draw from.
     static let all: [Buff] = [.barrelImmune, .thickSkin, .secondWind, .longStride, .whetstone, .hardenedArmour]
 }
@@ -581,6 +581,8 @@ struct TurnResolution {
     /// Tiles the player's attack covered — a directional sweep or a throw's
     /// blast; empty when no attack was drafted.
     let attackTiles: [GridPosition]
+    /// Enemy tiles smitten by the ultimate this turn.
+    let ultimateTiles: [GridPosition]
     /// Enemies damaged during the player's phase (weapon and explosions).
     let enemyHits: [EnemyHit]
     let playerExplosions: [Explosion]
@@ -651,6 +653,12 @@ struct GameState {
     static let comboKillBonus = 5
     /// Extra points per kill for each consecutive prior turn with a kill.
     static let streakKillBonus = 5
+    /// Damage the ultimate deals to every enemy on the board. High enough to
+    /// wipe today's roster; a beefier future enemy would crawl away bloodied.
+    static let ultimateDamage = 5
+    /// Kills needed to charge the ultimate. Its own smite kills don't count
+    /// toward the next charge.
+    static let ultimateChargeKills = 10
     /// Points for surviving a turn.
     static let survivalScore = 1
     /// Waves stop delivering fresh barrels while this many are on the board.
@@ -721,6 +729,11 @@ struct GameState {
     private(set) var weaponDrops: [WeaponDrop] = []
     /// True when the player has drafted picking up the weapon underfoot.
     private(set) var plannedPickup = false
+    /// True when the player has drafted the ultimate for this turn.
+    private(set) var plannedUltimate = false
+    /// Kills banked toward the ultimate; it fires once this reaches
+    /// ultimateChargeKills.
+    private(set) var ultimateKillCharge = 0
     /// Lobbed shots currently in the air, impact zones telegraphed.
     private(set) var projectiles: [Projectile] = []
     /// Arrows and cannonballs currently traveling their lines.
@@ -754,7 +767,7 @@ struct GameState {
     /// no weapon pickup, and a move of at least dodgeDistance tiles.
     var plannedDodgeReady: Bool {
         guard plannedAttackDirection == nil, plannedThrowTarget == nil, !plannedPickup,
-              let target = plannedTarget else { return false }
+              !plannedUltimate, let target = plannedTarget else { return false }
         return playerPosition.distance(to: target) >= Self.dodgeDistance
     }
 
@@ -1038,6 +1051,7 @@ struct GameState {
         plannedAttackDirection = nil
         plannedThrowTarget = nil
         plannedPickup = false
+        plannedUltimate = false
     }
 
     /// Stores the player's chosen destination without moving yet. A drafted
@@ -1062,11 +1076,29 @@ struct GameState {
         plannedPickup = true
         plannedAttackDirection = nil
         plannedThrowTarget = nil
+        plannedUltimate = false
         return true
     }
 
     mutating func clearPlannedPickup() {
         plannedPickup = false
+    }
+
+    /// Drafts the ultimate: a board-wide smite that replaces this turn's attack
+    /// (the drafted move still happens). Fails while recharging.
+    @discardableResult
+    mutating func planUltimate() -> Bool {
+        guard !isGameOver, pendingBuffChoices.isEmpty,
+              ultimateKillCharge >= Self.ultimateChargeKills else { return false }
+        plannedUltimate = true
+        plannedAttackDirection = nil
+        plannedThrowTarget = nil
+        plannedPickup = false
+        return true
+    }
+
+    mutating func clearPlannedUltimate() {
+        plannedUltimate = false
     }
 
     /// Drafts the equipped weapon's attack toward/at the given tile: directional
@@ -1081,6 +1113,7 @@ struct GameState {
             plannedThrowTarget = tile
             plannedAttackDirection = nil
             plannedPickup = false
+            plannedUltimate = false
             return true
         }
         guard let direction = Direction.aiming(
@@ -1091,6 +1124,7 @@ struct GameState {
         plannedAttackDirection = direction
         plannedThrowTarget = nil
         plannedPickup = false
+        plannedUltimate = false
         return true
     }
 
@@ -1210,6 +1244,17 @@ struct GameState {
         var playerPhaseHits: [TurnResolution.EnemyHit] = []
         var playerExplosions: [TurnResolution.Explosion] = []
         var didAttack = false
+
+        // The ultimate smites every enemy on the board at once, wherever they
+        // ended up after moving.
+        var ultimateTiles: [GridPosition] = []
+        let ultimateFired = plannedUltimate
+        if ultimateFired {
+            ultimateTiles = enemies.map(\.position)
+            ultimateKillCharge -= Self.ultimateChargeKills
+            playerPhaseHits += damageEnemies(on: Set(ultimateTiles), damage: Self.ultimateDamage, chargesUltimate: false)
+        }
+        plannedUltimate = false
         if let direction = plannedAttackDirection, let pattern = equippedWeapon.attackPattern {
             didAttack = true
             if let speed = equippedWeapon.projectileSpeed {
@@ -1277,7 +1322,7 @@ struct GameState {
 
         // Moving far without attacking (or grabbing a weapon) earns one dodge:
         // the first enemy hit this turn misses.
-        var dodgeCharges = (!didAttack && pickedUp == nil
+        var dodgeCharges = (!didAttack && pickedUp == nil && !ultimateFired
             && playerStart.distance(to: playerPosition) >= Self.dodgeDistance) ? 1 : 0
 
         var enemyAttacks: [TurnResolution.EnemyAttack] = []
@@ -1481,6 +1526,7 @@ struct GameState {
         return TurnResolution(
             playerDestination: playerPosition,
             attackTiles: attackTiles,
+            ultimateTiles: ultimateTiles,
             enemyHits: playerPhaseHits,
             playerExplosions: playerExplosions,
             enemyMoves: moves,
@@ -1506,7 +1552,7 @@ struct GameState {
 
     /// Damages every enemy standing on the given tiles and removes the dead.
     /// Returns the hits for animation.
-    private mutating func damageEnemies(on tiles: Set<GridPosition>, damage: Int) -> [TurnResolution.EnemyHit] {
+    private mutating func damageEnemies(on tiles: Set<GridPosition>, damage: Int, chargesUltimate: Bool = true) -> [TurnResolution.EnemyHit] {
         var hits: [TurnResolution.EnemyHit] = []
         for index in enemies.indices where tiles.contains(enemies[index].position) {
             enemies[index].health -= damage
@@ -1517,6 +1563,9 @@ struct GameState {
                     + Self.comboKillBonus * killsThisTurn
                     + Self.streakKillBonus * killStreak
                 killsThisTurn += 1
+                if chargesUltimate {
+                    ultimateKillCharge += 1
+                }
             }
             hits.append(TurnResolution.EnemyHit(
                 enemyID: enemies[index].id,
