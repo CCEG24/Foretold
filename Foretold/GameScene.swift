@@ -25,6 +25,7 @@ class GameScene: SKScene {
     private let armorBarNode = SKNode()
     private let ultimateBarNode = SKNode()
     private var dodgeChipLabel: SKLabelNode!
+    private var afflictionLabel: SKLabelNode!
     private var itemsLabel: SKLabelNode!
     private var scoreLabel: SKLabelNode!
     private var buffsLabel: SKLabelNode!
@@ -202,40 +203,37 @@ class GameScene: SKScene {
         }
     }
 
+    /// The placeholder art per archetype — a rotated square that differs by size
+    /// and colour. Shared by the board sprites and the ENEMIES index so the two
+    /// never drift apart.
+    private func enemyStyle(_ archetype: Archetype) -> (fill: SKColor, stroke: SKColor, lineWidth: CGFloat, sizeFactor: CGFloat) {
+        switch archetype {
+        case .fighter:
+            return (SKColor(red: 0.90, green: 0.30, blue: 0.25, alpha: 1.0), .white, 1.5, 0.5)
+        case .berserker:
+            return (SKColor(red: 0.95, green: 0.45, blue: 0.05, alpha: 1.0), .white, 1.5, 0.5)
+        case .swift:
+            return (SKColor(red: 0.35, green: 0.70, blue: 0.95, alpha: 1.0), .white, 1.5, 0.45)
+        case .bomber:
+            return (SKColor(white: 0.15, alpha: 1.0), SKColor(red: 0.90, green: 0.55, blue: 0.15, alpha: 1.0), 1.5, 0.45)
+        case .shieldbearer:
+            return (SKColor(red: 0.42, green: 0.48, blue: 0.55, alpha: 1.0), SKColor(red: 0.80, green: 0.85, blue: 0.90, alpha: 1.0), 2.5, 0.55)
+        case .juggernaut:
+            return (SKColor(red: 0.60, green: 0.25, blue: 0.75, alpha: 1.0), .white, 1.5, 0.7)
+        case .boss:
+            return (SKColor(red: 0.45, green: 0.10, blue: 0.60, alpha: 1.0), .white, 3, 0.85)
+        }
+    }
+
     @discardableResult
     private func addEnemyNode(for enemy: Enemy) -> SKShapeNode {
-        // Placeholder art: archetypes differ by size and color until sprites exist.
-        let side: CGFloat
-        let fill: SKColor
-        var stroke = SKColor.white
-        var lineWidth: CGFloat = 1.5
-        switch enemy.archetype {
-        case .fighter:
-            side = tileSize * 0.5
-            fill = SKColor(red: 0.90, green: 0.30, blue: 0.25, alpha: 1.0)
-        case .berserker:
-            side = tileSize * 0.5
-            fill = SKColor(red: 0.95, green: 0.45, blue: 0.05, alpha: 1.0)
-        case .swift:
-            side = tileSize * 0.45
-            fill = SKColor(red: 0.35, green: 0.70, blue: 0.95, alpha: 1.0)
-        case .bomber:
-            side = tileSize * 0.45
-            fill = SKColor(white: 0.15, alpha: 1.0)
-            stroke = SKColor(red: 0.90, green: 0.55, blue: 0.15, alpha: 1.0)
-        case .juggernaut:
-            side = tileSize * 0.7
-            fill = SKColor(red: 0.60, green: 0.25, blue: 0.75, alpha: 1.0)
-        case .boss:
-            side = tileSize * 0.85
-            fill = SKColor(red: 0.45, green: 0.10, blue: 0.60, alpha: 1.0)
-            lineWidth = 3
-        }
+        let style = enemyStyle(enemy.archetype)
+        let side = tileSize * style.sizeFactor
         let node = SKShapeNode(rectOf: CGSize(width: side, height: side), cornerRadius: 2)
         node.zRotation = .pi / 4
-        node.fillColor = fill
-        node.strokeColor = stroke
-        node.lineWidth = lineWidth
+        node.fillColor = style.fill
+        node.strokeColor = style.stroke
+        node.lineWidth = style.lineWidth
         node.zPosition = 10
         node.position = point(for: enemy.position)
         boardNode.addChild(node)
@@ -399,8 +397,15 @@ class GameScene: SKScene {
             )
         case .barrel:
             let barrel = SKShapeNode(circleOfRadius: tileSize * 0.30)
-            barrel.fillColor = SKColor(red: 0.85, green: 0.50, blue: 0.15, alpha: 1.0)
-            barrel.strokeColor = SKColor(red: 0.40, green: 0.22, blue: 0.05, alpha: 1.0)
+            // Boss-primed barrels burn red so the player can tell them (and the
+            // detonate threat they carry) from ordinary orange powder.
+            if obstacle.volatile {
+                barrel.fillColor = SKColor(red: 0.85, green: 0.18, blue: 0.15, alpha: 1.0)
+                barrel.strokeColor = SKColor(red: 0.45, green: 0.05, blue: 0.05, alpha: 1.0)
+            } else {
+                barrel.fillColor = SKColor(red: 0.85, green: 0.50, blue: 0.15, alpha: 1.0)
+                barrel.strokeColor = SKColor(red: 0.40, green: 0.22, blue: 0.05, alpha: 1.0)
+            }
             barrel.lineWidth = 2
             node = barrel
         }
@@ -489,6 +494,16 @@ class GameScene: SKScene {
             container.position = CGPoint(x: columnLeft, y: rowY)
             boardPageNode.addChild(container)
         }
+
+        // Sits just under the HP pips: the bleed/poison currently ticking away.
+        afflictionLabel = SKLabelNode(text: "")
+        afflictionLabel.fontName = "HelveticaNeue-Bold"
+        afflictionLabel.fontSize = 11
+        afflictionLabel.fontColor = SKColor(red: 0.85, green: 0.30, blue: 0.45, alpha: 1.0)
+        afflictionLabel.horizontalAlignmentMode = .left
+        afflictionLabel.verticalAlignmentMode = .center
+        afflictionLabel.position = CGPoint(x: columnLeft, y: columnTop - 88)
+        boardPageNode.addChild(afflictionLabel)
 
         dodgeChipLabel = SKLabelNode(text: "DODGE ✓")
         dodgeChipLabel.fontName = "HelveticaNeue-Bold"
@@ -662,7 +677,7 @@ class GameScene: SKScene {
     }
 
     private var legendNode: SKNode?
-    private var expandedLegendSections: Set<LegendSection> = [.weapons, .enemies]
+    private var expandedLegendSections: Set<LegendSection> = []
 
     /// The left margin, two columns: weapon/enemy reference dropdowns at the
     /// far edge, how-to-play primer and keybinds beside them. Rebuilt whenever
@@ -672,7 +687,7 @@ class GameScene: SKScene {
     }
 
     private enum LegendSection {
-        case weapons, enemies
+        case weapons, enemies, tiles
     }
 
     private func rebuildLegend() {
@@ -723,8 +738,8 @@ class GameScene: SKScene {
             let available = Set(currentWeaponPool().map(\.name))
             for weapon in Weapon.all where available.contains(weapon.name) {
                 let (name, stats) = weaponLegendEntry(weapon)
-                addLine(name, x: referenceX, font: "HelveticaNeue-Bold", size: 13, color: entryColor, drop: 17)
-                addLine(stats, x: referenceX + 10, size: 12, color: statColor, drop: 21)
+                addLine(name, x: referenceX, font: "HelveticaNeue-Bold", size: 15, color: entryColor, drop: 20)
+                addLine(stats, x: referenceX + 12, size: 13.5, color: statColor, drop: 26)
             }
         }
         y -= 8
@@ -733,20 +748,62 @@ class GameScene: SKScene {
                 font: "HelveticaNeue-Bold", size: 15, color: toggleColor,
                 name: "legendToggle:enemies", drop: 26)
         if enemiesOpen {
-            let entries = [
-                "Fighter · any weapon, kites",
-                "Berserker · melee, fearless",
-                "Swift · +1 move",
-                "Bomber · arms at range \(GameState.bomberArmDistance),",
-                "   blast r\(GameState.bomberBlastRadius), on fuse or death",
-                "Juggernaut · the gate,",
-                "   summons waves",
-                "Boss · the gate, drafts:",
-                "   volley both weapons,",
-                "   cannon nova r\(GameState.bossNovaRadius), or summon",
+            // Name gets the same bold white highlight as the weapon entries;
+            // its behavior lines sit dimmed beneath it.
+            let entries: [(archetype: Archetype, name: String, details: [String])] = [
+                (.fighter, "Fighter", ["any weapon, kites"]),
+                (.berserker, "Berserker", ["melee, fearless"]),
+                (.swift, "Swift", ["+1 move"]),
+                (.bomber, "Bomber", ["arms at range \(GameState.bomberArmDistance),",
+                                     "blast r\(GameState.bomberBlastRadius), on fuse or death"]),
+                (.shieldbearer, "Shieldbearer", ["parries the first head-on",
+                                                 "swing; flank it or blast it"]),
+                (.juggernaut, "Juggernaut", ["the gate,", "summons waves"]),
+                (.boss, "Boss", ["the gate, drafts:",
+                                 "volley, cannon nova, summon,",
+                                 "or lob red barrels then",
+                                 "detonate — all scale w/ depth"]),
             ]
-            for entry in entries {
-                addLine(entry, x: referenceX, size: 12.5, color: statColor, drop: 18)
+            for (archetype, name, details) in entries {
+                // A little rotated-square swatch in the archetype's colour and
+                // relative size — the same art the board draws.
+                let style = enemyStyle(archetype)
+                let swatchSize = max(9, 9 + (style.sizeFactor - 0.45) * 20)
+                let swatch = SKShapeNode(rectOf: CGSize(width: swatchSize, height: swatchSize), cornerRadius: 1)
+                swatch.zRotation = .pi / 4
+                swatch.fillColor = style.fill
+                swatch.strokeColor = style.stroke
+                swatch.lineWidth = 1.5
+                swatch.position = CGPoint(x: referenceX + 10, y: y - 8)
+                column.addChild(swatch)
+                addLine(name, x: referenceX + 26, font: "HelveticaNeue-Bold", size: 15, color: entryColor, drop: 20)
+                for detail in details {
+                    addLine(detail, x: referenceX + 26, size: 13.5, color: statColor, drop: 20)
+                }
+                y -= 6
+            }
+        }
+        y -= 8
+        let tilesOpen = expandedLegendSections.contains(.tiles)
+        addLine("\(tilesOpen ? "▾" : "▸") TILES", x: referenceX,
+                font: "HelveticaNeue-Bold", size: 15, color: toggleColor,
+                name: "legendToggle:tiles", drop: 24)
+        if tilesOpen {
+            let swatches: [(SKColor, String)] = [
+                (SKColor(red: 0.18, green: 0.36, blue: 0.25, alpha: 1.0), "tiles you can move to"),
+                (SKColor(red: 0.80, green: 0.62, blue: 0.22, alpha: 1.0), "your drafted destination"),
+                (SKColor(red: 0.68, green: 0.32, blue: 0.12, alpha: 1.0), "your attack lands here"),
+                (SKColor(red: 0.58, green: 0.12, blue: 0.10, alpha: 1.0), "enemy attack / incoming"),
+                (SKColor(red: 0.42, green: 0.16, blue: 0.46, alpha: 1.0), "arrival materializes here"),
+                (SKColor(red: 0.62, green: 0.26, blue: 0.06, alpha: 1.0), "burning pool — hotter is redder"),
+                (SKColor(red: 0.18, green: 0.36, blue: 0.48, alpha: 1.0), "throw range"),
+                (SKColor(white: 0.95, alpha: 1.0), "ult wave / blocked spawn"),
+            ]
+            for (color, text) in swatches {
+                let swatch = SKSpriteNode(color: color, size: CGSize(width: 13, height: 13))
+                swatch.position = CGPoint(x: referenceX + 7, y: y - 7)
+                column.addChild(swatch)
+                addLine(text, x: referenceX + 20, size: 14, color: statColor, drop: 22)
             }
         }
 
@@ -755,9 +812,14 @@ class GameScene: SKScene {
         let instructionsX: CGFloat = 262
         let lines = [
             ("HOW TO PLAY", true),
-            ("Draft a move, aim an attack,", false),
+            ("Draft a move, aim an attack", false),
+            ("or press the blue button to", false),
+            ("change your weapon,", false),
             ("then hit GO — enemies commit", false),
             ("to the arrows you can see.", false),
+            ("Hover over enemies to see their", false),
+            ("health, their weapon and its attack", false),
+            ("attack pattern.", false),
             ("", false),
             ("red tiles · incoming attack", false),
             ("! · arrival — hover to see what", false),
@@ -921,6 +983,9 @@ class GameScene: SKScene {
         if weapon.lingering != nil {
             traits.append("trail")
         }
+        if let affliction = weapon.affliction {
+            traits.append("bleed \(affliction.damagePerTurn)×\(affliction.duration)")
+        }
         if weapon.cooldown > 0 {
             traits.append("cd\(weapon.cooldown)")
         }
@@ -1003,11 +1068,21 @@ class GameScene: SKScene {
             color: armorFlashColor
         )
         updateUltimateBar()
+        if let wound = state.playerAffliction {
+            afflictionLabel.text = "BLEEDING \(wound.damagePerTurn) dmg/turn for \(wound.turnsRemaining) turns"
+            afflictionLabel.isHidden = false
+        } else {
+            afflictionLabel.isHidden = true
+        }
         dodgeChipLabel.isHidden = !state.plannedDodgeReady
         let nextLevel = GameState.scoreThreshold(forLevel: state.level + 1)
         let streak = state.killStreak >= 2 ? " · STREAK ×\(state.killStreak)" : ""
         let progress = state.bossPhase ? "\(state.score) · SLAY THE GATEKEEPER" : "\(state.score)/\(nextLevel)"
-        scoreLabel.text = "LVL \(state.level) · SCORE \(progress)\(streak) · TURN \(state.turnNumber) · BEST \(max(highScore, state.score))"
+        // While the best is frozen it neither climbs nor persists, and the whole
+        // score line turns blue to make the testing mode unmistakable.
+        let best = devFreezeHighScore ? highScore : max(highScore, state.score)
+        scoreLabel.text = "LVL \(state.level) · SCORE \(progress)\(streak) · TURN \(state.turnNumber) · BEST \(best)"
+        scoreLabel.fontColor = devFreezeHighScore ? SKColor(red: 0.45, green: 0.65, blue: 0.95, alpha: 1.0) : .white
 
         // Held buffs, deduplicated into "name ×2 (3 lv)" style in pickup order;
         // the level count shows the soonest expiry of the stack.
@@ -1197,8 +1272,12 @@ class GameScene: SKScene {
         let travelled = max(abs(tile.x - bolt.position.x), abs(tile.y - bolt.position.y))
         let remaining = bolt.remainingRange - travelled
         let range = remaining <= 0 ? "expires here" : "\(remaining) tiles past here"
+        // Lead with what fired it — weapon and owner — so the bolt's type is
+        // obvious, then tag the traits that tell the flavors apart.
         let blast = bolt.impactBlastRadius > 0 ? " · bursts r\(bolt.impactBlastRadius)" : ""
-        return "bolt \(bolt.direction.arrow) · \(bolt.damage) dmg · \(bolt.speed) tiles/turn\(blast) · \(range)"
+        let fire = bolt.lingering != nil ? " · leaves fire" : ""
+        let bleed = bolt.affliction != nil ? " · bleeds" : ""
+        return "\(bolt.sourceName) \(bolt.direction.arrow) · \(bolt.damage) dmg · \(bolt.speed) tiles/turn\(blast)\(fire)\(bleed) · \(range)"
     }
 
     /// Pulsing prompt above the player when they're standing on a weapon drop,
@@ -1308,16 +1387,25 @@ class GameScene: SKScene {
         // Bombers show their fuse instead.
         var status = ""
         if enemy.archetype == .bomber {
-            status = enemy.fuse.map { " · DETONATES in \($0)" } ?? " · unarmed"
+            let fuse = enemy.fuse.map { "DETONATES in \($0)" } ?? "unarmed"
+            status = " · blast r\(GameState.bomberBlastRadius) · \(GameState.bomberDamage) dmg · \(fuse)"
         } else if enemy.weapon.cooldown > 0 {
             let waiting = enemy.weapon.isMelee ? "ready in" : "reloading"
             status = enemy.cooldownRemaining > 0 ? " · \(waiting) \(enemy.cooldownRemaining)" : " · ready"
+        }
+        if let wound = enemy.affliction {
+            status += " · BLEEDING \(wound.damagePerTurn)/turn ×\(wound.turnsRemaining)"
+        }
+        if enemy.archetype == .shieldbearer, let facing = enemy.facing {
+            status += enemy.shieldReady ? " · shield \(facing.arrow)" : " · shield down"
         }
         // The boss telegraphs which of its three plays comes next resolve.
         if let intent = enemy.plannedIntent {
             switch intent {
             case .volley: status += " · NEXT: FULL VOLLEY"
             case .nova: status += " · NEXT: CANNON NOVA"
+            case .barrage: status += " · NEXT: BARREL BARRAGE"
+            case .detonate: status += " · NEXT: DETONATE"
             case .summon: status += " · NEXT: SUMMONING"
             }
         }
@@ -1397,6 +1485,31 @@ class GameScene: SKScene {
             arrow.zPosition = 14
             boardNode.addChild(arrow)
             enemyPlanArrowNodes.append(arrow)
+        }
+
+        // A steel plank on each shieldbearer's front, at the tile it plans to
+        // stand on, telegraphing the side its parry covers so a flank can be set up.
+        for enemy in state.enemies where enemy.archetype == .shieldbearer {
+            // Only shown while the shield is actually up — a parried shield is
+            // down for a turn, and drawing the plank then would lie.
+            guard enemy.shieldReady, let facing = enemy.facing else { continue }
+            let stand = enemy.plannedTarget ?? enemy.position
+            let step = facing.unitStep
+            let length = hypot(CGFloat(step.x), CGFloat(step.y))
+            guard length > 0 else { continue }
+            let angle = atan2(CGFloat(step.y), CGFloat(step.x))
+            let center = point(for: stand)
+            let plank = SKShapeNode(rectOf: CGSize(width: tileSize * 0.5, height: max(3, tileSize * 0.1)), cornerRadius: 2)
+            plank.fillColor = SKColor(red: 0.82, green: 0.87, blue: 0.93, alpha: 0.95)
+            plank.strokeColor = .clear
+            plank.zRotation = angle + .pi / 2
+            plank.position = CGPoint(
+                x: center.x + CGFloat(step.x) / length * tileSize * 0.34,
+                y: center.y + CGFloat(step.y) / length * tileSize * 0.34
+            )
+            plank.zPosition = 14
+            boardNode.addChild(plank)
+            enemyPlanArrowNodes.append(plank)
         }
     }
 
@@ -1601,7 +1714,14 @@ class GameScene: SKScene {
     private func animateEnemyHits(_ hits: [TurnResolution.EnemyHit]) {
         for hit in hits {
             guard let node = enemyNodes[hit.enemyID] else { continue }
-            if hit.died {
+            if hit.blocked {
+                // A parry, not a wound: a firm little shield-brace, no damage flash.
+                node.run(SKAction.sequence([
+                    SKAction.scale(to: 1.18, duration: 0.06),
+                    SKAction.scale(to: 1.0, duration: 0.10),
+                ]))
+                showBlockCallout(at: node.position)
+            } else if hit.died {
                 enemyNodes[hit.enemyID] = nil
                 node.run(SKAction.sequence([
                     SKAction.group([
@@ -1617,6 +1737,28 @@ class GameScene: SKScene {
                 ]))
             }
         }
+    }
+
+    /// A brief "BLOCKED" that floats up off a parrying shieldbearer.
+    private func showBlockCallout(at position: CGPoint) {
+        let label = SKLabelNode(text: "BLOCKED")
+        label.fontName = "HelveticaNeue-Bold"
+        label.fontSize = 13
+        label.fontColor = SKColor(red: 0.80, green: 0.85, blue: 0.92, alpha: 1.0)
+        label.verticalAlignmentMode = .center
+        label.position = CGPoint(x: position.x, y: position.y + tileSize * 0.4)
+        label.zPosition = 30
+        boardNode.addChild(label)
+        label.run(SKAction.sequence([
+            SKAction.group([
+                SKAction.moveBy(x: 0, y: tileSize * 0.6, duration: 0.6),
+                SKAction.sequence([
+                    SKAction.wait(forDuration: 0.3),
+                    SKAction.fadeOut(withDuration: 0.3),
+                ]),
+            ]),
+            SKAction.removeFromParent(),
+        ]))
     }
 
     /// Orange blast flash on each explosion's tiles, and the barrel sprite
@@ -2018,7 +2160,7 @@ class GameScene: SKScene {
     /// Full-screen end-of-run summary: what got you, and the numbers the run
     /// leaves behind. Dismissed by the usual single-R restart.
     private func showDeathRecap() {
-        let wasBest = state.score > highScore
+        let wasBest = state.score > highScore && !devFreezeHighScore
         if wasBest {
             highScore = state.score
         }
@@ -2087,7 +2229,11 @@ class GameScene: SKScene {
         let overlay = SKNode()
         overlay.zPosition = 50
 
-        let dim = SKSpriteNode(color: SKColor(white: 0, alpha: 0.75), size: size)
+        // Dim only the board square, matching the loadout draft, so the HUD and
+        // nav column stay legible while the boon is chosen.
+        let boardSide = min(size.width, size.height) * boardScale
+        let dim = SKSpriteNode(color: SKColor(white: 0, alpha: 0.75),
+                               size: CGSize(width: boardSide, height: boardSide))
         dim.position = CGPoint(x: size.width / 2, y: size.height / 2)
         overlay.addChild(dim)
 
@@ -2286,12 +2432,19 @@ class GameScene: SKScene {
         ]))
     }
 
+    /// Restarting deals a fresh board, then routes back through the draft.
     private func restartGame() {
+        rebuildRun()
+        showBuildPicker()
+    }
+
+    private func rebuildRun() {
         lastRestartKeyTime = 0
         revealLiveHazards = true
         tutorialStep = nil
         tutorialPrompt = nil
         devPanel = nil
+        buildPickerOverlay = nil
         // Kill any in-flight resolve callbacks (they run on the scene itself and
         // would otherwise fire into the freshly rebuilt board).
         removeAllActions()
@@ -2327,15 +2480,150 @@ class GameScene: SKScene {
 
     private func makeRunState() -> GameState {
         tallyBaseline = lifetimeTallies
+        let pool = currentWeaponPool()
         return GameState(
-            weapon: devNextEquipped,
-            holsteredWeapon: devNextHolstered,
+            weapon: devNextEquipped
+                ?? pickedLoadoutWeapon(loadoutMeleeName, from: pool.filter(\.isMelee)),
+            holsteredWeapon: devNextHolstered
+                ?? pickedLoadoutWeapon(loadoutRangedName, from: pool.filter(\.isRanged)),
             playerHealth: devNextMaxHealth,
             maxArmor: devNextMaxArmor,
             walls: allBarrelsMode ? 0 : 10,
             barrels: allBarrelsMode ? 14 : 4,
             weaponPool: currentWeaponPool()
         )
+    }
+
+    // MARK: - Build picker
+
+    /// The draft before the draft: an overlay over the fresh board where the
+    /// starting melee and ranged slots are picked from the unlocked arsenal.
+    /// Every restart returns here.
+    private var buildPickerOverlay: SKNode?
+    /// Persisted slot picks; nil = random from the unlocked pool.
+    private var loadoutMeleeName: String? {
+        get { UserDefaults.standard.string(forKey: "loadoutMelee") }
+        set {
+            if let newValue {
+                UserDefaults.standard.set(newValue, forKey: "loadoutMelee")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "loadoutMelee")
+            }
+        }
+    }
+    private var loadoutRangedName: String? {
+        get { UserDefaults.standard.string(forKey: "loadoutRanged") }
+        set {
+            if let newValue {
+                UserDefaults.standard.set(newValue, forKey: "loadoutRanged")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "loadoutRanged")
+            }
+        }
+    }
+
+    /// A persisted pick is honored only while it's actually unlocked.
+    private func pickedLoadoutWeapon(_ name: String?, from options: [Weapon]) -> Weapon? {
+        guard let name else { return nil }
+        return options.first { $0.name == name }
+    }
+
+    /// random → each option in order → back to random.
+    private func cycledLoadoutName(_ current: String?, options: [Weapon]) -> String? {
+        guard let current, let index = options.firstIndex(where: { $0.name == current }) else {
+            return options.first?.name
+        }
+        return index + 1 < options.count ? options[index + 1].name : nil
+    }
+
+    private func showBuildPicker() {
+        buildPickerOverlay?.removeFromParent()
+        let overlay = SKNode()
+        overlay.zPosition = 88
+
+        // Dim only the board square, not the whole screen, so the nav tabs —
+        // and through them the milestones page and title screen — stay reachable
+        // without first starting the run.
+        let boardSide = min(size.width, size.height) * boardScale
+        let dim = SKSpriteNode(color: SKColor(white: 0, alpha: 0.74),
+                               size: CGSize(width: boardSide, height: boardSide))
+        dim.position = CGPoint(x: size.width / 2, y: size.height / 2)
+        overlay.addChild(dim)
+
+        let centerX = size.width / 2
+        let centerY = size.height / 2
+        let gold = SKColor(red: 0.93, green: 0.80, blue: 0.45, alpha: 1.0)
+
+        let title = SKLabelNode(text: "the draft before the draft")
+        title.fontName = "Papyrus"
+        title.fontSize = 30
+        title.fontColor = gold
+        title.position = CGPoint(x: centerX, y: centerY + 126)
+        overlay.addChild(title)
+
+        let hint = SKLabelNode(text: "click a slot to change it")
+        hint.fontName = "HelveticaNeue"
+        hint.fontSize = 13
+        hint.fontColor = SKColor(white: 0.6, alpha: 1.0)
+        hint.position = CGPoint(x: centerX, y: centerY + 92)
+        overlay.addChild(hint)
+
+        let pool = currentWeaponPool()
+        let slots: [(String, String, Weapon?)] = [
+            ("melee", "build:melee", pickedLoadoutWeapon(loadoutMeleeName, from: pool.filter(\.isMelee))),
+            ("ranged", "build:ranged", pickedLoadoutWeapon(loadoutRangedName, from: pool.filter(\.isRanged))),
+        ]
+        var y = centerY + 44
+        for (slot, action, weapon) in slots {
+            let row = SKLabelNode(text: "\(slot): \(weapon?.name ?? "random") ▸")
+            row.fontName = "HelveticaNeue-Bold"
+            row.fontSize = 19
+            row.fontColor = SKColor(white: 0.9, alpha: 1.0)
+            row.verticalAlignmentMode = .center
+            row.position = CGPoint(x: centerX, y: y)
+            row.name = action
+            overlay.addChild(row)
+
+            let stats = SKLabelNode(text: weapon.map { weaponLegendEntry($0).stats } ?? "the bones decide")
+            stats.fontName = "HelveticaNeue"
+            stats.fontSize = 12
+            stats.fontColor = SKColor(white: 0.55, alpha: 1.0)
+            stats.verticalAlignmentMode = .center
+            stats.position = CGPoint(x: centerX, y: y - 22)
+            overlay.addChild(stats)
+            y -= 66
+        }
+
+        let begin = SKShapeNode(rectOf: CGSize(width: 180, height: 54), cornerRadius: 10)
+        begin.fillColor = SKColor(red: 0.20, green: 0.55, blue: 0.35, alpha: 1.0)
+        begin.strokeColor = .white
+        begin.lineWidth = 1.5
+        begin.position = CGPoint(x: centerX, y: centerY - 122)
+        begin.name = "build:start"
+        let beginLabel = SKLabelNode(text: "BEGIN")
+        beginLabel.fontName = "HelveticaNeue-Bold"
+        beginLabel.fontSize = 20
+        beginLabel.fontColor = .white
+        beginLabel.verticalAlignmentMode = .center
+        beginLabel.name = "build:start"
+        begin.addChild(beginLabel)
+        overlay.addChild(begin)
+
+        let spaceHint = SKLabelNode(text: "space also begins")
+        spaceHint.fontName = "HelveticaNeue"
+        spaceHint.fontSize = 12
+        spaceHint.fontColor = SKColor(white: 0.55, alpha: 1.0)
+        spaceHint.position = CGPoint(x: centerX, y: centerY - 162)
+        overlay.addChild(spaceHint)
+
+        addChild(overlay)
+        buildPickerOverlay = overlay
+    }
+
+    /// Locks the picks in: a fresh run is dealt with them applied.
+    private func startRun() {
+        buildPickerOverlay = nil
+        rebuildRun()
     }
 
     // MARK: - Dev panel
@@ -2347,6 +2635,19 @@ class GameScene: SKScene {
     private var devNextHolstered: Weapon?
     private var devNextMaxHealth = 5
     private var devNextMaxArmor = 3
+    /// When on, a run's score never touches the saved best — for testing
+    /// without polluting your records.
+    private var devFreezeHighScore = false
+    /// Next-wave override: how the coming waves spawn, and (in normal mode) the
+    /// forced enemy type and weapon. `.standard` hands back to the normal code.
+    private enum DevSpawnMode { case standard, normal, formation }
+    private var devSpawnMode: DevSpawnMode = .standard
+    private var devSpawnArchetype: Archetype?
+    private var devSpawnWeapon: Weapon?
+    /// Which formation the override forces (nil = random).
+    private var devSpawnFormationIndex: Int?
+    /// The archetypes offered by the spawn-type cycler (nil = roll one).
+    private let devSpawnArchetypes: [Archetype?] = [nil, .fighter, .berserker, .swift, .shieldbearer, .bomber]
 
     private func toggleDevPanel() {
         if devPanel != nil {
@@ -2354,16 +2655,18 @@ class GameScene: SKScene {
             devPanel = nil
             return
         }
-        showToast("oh no! its the real god! quick! hide!", duration: 1.4)
+        showTransmission("oh no! its the real god!| quick! hide!")
         rebuildDevPanel()
     }
 
     private func rebuildDevPanel() {
         devPanel?.removeFromParent()
         let overlay = SKNode()
-        overlay.zPosition = 85
+        // Above the build-picker overlay (88) so opening the dev panel over the
+        // "draft before the draft" isn't hidden behind that overlay's board dim.
+        overlay.zPosition = 95
 
-        let rows: [(String, String)] = [
+        var rows: [(String, String)] = [
             ("DEV MODE — click a row · ` or esc closes", ""),
             ("next equipped: \(devNextEquipped?.name ?? "random") ▸", "dev:equipped"),
             ("next holstered: \(devNextHolstered?.name ?? "random") ▸", "dev:holstered"),
@@ -2375,20 +2678,40 @@ class GameScene: SKScene {
             ("heal fully", "dev:heal"),
             ("+100 score", "dev:score"),
             ("invincible: \(state.devInvincible ? "ON" : "off")", "dev:invincible"),
+            ("freeze high score: \(devFreezeHighScore ? "ON" : "off")", "dev:freezeScore"),
+            ("freeze score gain: \(state.devFreezeScore ? "ON" : "off")", "dev:freezeScoreGain"),
+            ("elites: \(state.devNoElites ? "OFF" : "on")", "dev:noElites"),
+        ]
+        // Next-wave spawn override — standard hands back to the normal roll.
+        rows.append(("next wave: \(devSpawnModeLabel) ▸", "dev:spawnMode"))
+        if devSpawnMode == .normal {
+            rows.append(("  spawn type: \(devArchetypeLabel(devSpawnArchetype)) ▸", "dev:spawnType"))
+            rows.append(("  spawn weapon: \(devSpawnWeapon?.name ?? "random") ▸", "dev:spawnWeapon"))
+        } else if devSpawnMode == .formation {
+            let name = devSpawnFormationIndex.map { Formation.all[$0].name } ?? "random"
+            rows.append(("  formation: \(name) ▸", "dev:spawnFormation"))
+        }
+        rows.append(contentsOf: [
             ("unlock entire arsenal", "dev:unlockAll"),
             ("reset profile (unlocks, tallies, best)", "dev:resetProfile"),
-        ]
+        ])
 
         let rowHeight: CGFloat = 26
         let panelSize = CGSize(width: 430, height: CGFloat(rows.count) * rowHeight + 28)
+        // Keep the panel clear of the "real god" transmission, which types out
+        // just above centre (see showTransmission). Pin the panel's top edge
+        // below that line, then clamp so a tall panel still sits on-screen.
+        let boardSide = min(size.width, size.height) * boardScale
+        let transmissionBottom = size.height / 2 + boardSide * 0.28 - 48
+        let panelCenterY = max(panelSize.height / 2 + 20, transmissionBottom - panelSize.height / 2)
         let plate = SKShapeNode(rectOf: panelSize, cornerRadius: 10)
         plate.fillColor = SKColor(white: 0.05, alpha: 0.95)
         plate.strokeColor = SKColor(red: 0.55, green: 0.75, blue: 0.95, alpha: 0.9)
         plate.lineWidth = 1.5
-        plate.position = CGPoint(x: size.width / 2, y: size.height / 2)
+        plate.position = CGPoint(x: size.width / 2, y: panelCenterY)
         overlay.addChild(plate)
 
-        var y = size.height / 2 + panelSize.height / 2 - 26
+        var y = panelCenterY + panelSize.height / 2 - 26
         for (text, action) in rows {
             let label = SKLabelNode(text: text)
             label.fontName = action.isEmpty ? "HelveticaNeue-Bold" : "HelveticaNeue"
@@ -2409,12 +2732,44 @@ class GameScene: SKScene {
         devPanel = overlay
     }
 
-    /// Cycles a next-run weapon slot through random and the whole arsenal.
+    /// Cycles a next-run weapon slot through random and the whole arsenal,
+    /// including the dev-only toys that never appear in normal pools.
     private func cycleDevWeapon(_ current: Weapon?) -> Weapon? {
-        guard let current else { return Weapon.all.first }
-        guard let index = Weapon.all.firstIndex(where: { $0.name == current.name }),
-              index + 1 < Weapon.all.count else { return nil }
-        return Weapon.all[index + 1]
+        let pool = Weapon.devArsenal
+        guard let current else { return pool.first }
+        guard let index = pool.firstIndex(where: { $0.name == current.name }),
+              index + 1 < pool.count else { return nil }
+        return pool[index + 1]
+    }
+
+    private var devSpawnModeLabel: String {
+        switch devSpawnMode {
+        case .standard: return "standard (normal code)"
+        case .normal: return "normal"
+        case .formation: return "formation"
+        }
+    }
+
+    private func devArchetypeLabel(_ archetype: Archetype?) -> String {
+        switch archetype {
+        case .none: return "random"
+        case .fighter: return "fighter"
+        case .berserker: return "berserker"
+        case .swift: return "swift"
+        case .shieldbearer: return "shieldbearer"
+        case .bomber: return "bomber"
+        default: return "random"
+        }
+    }
+
+    /// Pushes the current dev spawn selections into the game state so the next
+    /// wave honors them (standard mode clears the override).
+    private func syncDevSpawnOverride() {
+        switch devSpawnMode {
+        case .standard: state.devSpawnOverride = nil
+        case .normal: state.devSpawnOverride = .single(archetype: devSpawnArchetype, weapon: devSpawnWeapon)
+        case .formation: state.devSpawnOverride = .formation(index: devSpawnFormationIndex)
+        }
     }
 
     private func handleDevAction(_ action: String) {
@@ -2428,6 +2783,39 @@ class GameScene: SKScene {
         case "dev:heal": state.devHealFully()
         case "dev:score": state.devAddScore(100)
         case "dev:invincible": state.devInvincible.toggle()
+        case "dev:freezeScore": devFreezeHighScore.toggle()
+        case "dev:freezeScoreGain": state.devFreezeScore.toggle()
+        case "dev:noElites": state.devNoElites.toggle()
+        case "dev:spawnMode":
+            switch devSpawnMode {
+            case .standard: devSpawnMode = .normal
+            case .normal: devSpawnMode = .formation
+            case .formation: devSpawnMode = .standard
+            }
+            syncDevSpawnOverride()
+        case "dev:spawnType":
+            let idx = devSpawnArchetypes.firstIndex(where: { $0 == devSpawnArchetype }) ?? 0
+            devSpawnArchetype = devSpawnArchetypes[(idx + 1) % devSpawnArchetypes.count]
+            syncDevSpawnOverride()
+        case "dev:spawnWeapon":
+            // Cycle random → each real weapon (dev-only toys excluded from enemies).
+            if let current = devSpawnWeapon,
+               let i = Weapon.all.firstIndex(where: { $0.name == current.name }), i + 1 < Weapon.all.count {
+                devSpawnWeapon = Weapon.all[i + 1]
+            } else if devSpawnWeapon == nil {
+                devSpawnWeapon = Weapon.all.first
+            } else {
+                devSpawnWeapon = nil
+            }
+            syncDevSpawnOverride()
+        case "dev:spawnFormation":
+            // Cycle random → each named formation → random.
+            switch devSpawnFormationIndex {
+            case nil: devSpawnFormationIndex = Formation.all.isEmpty ? nil : 0
+            case let i? where i + 1 < Formation.all.count: devSpawnFormationIndex = i + 1
+            default: devSpawnFormationIndex = nil
+            }
+            syncDevSpawnOverride()
         case "dev:unlockAll":
             unlockedWeaponNames = Set(Weapon.milestones.map(\.weapon.name))
             claimedTrophyNames = Set(Weapon.eliteTrophies.map(\.name))
@@ -2535,6 +2923,11 @@ class GameScene: SKScene {
             SKAction.fadeOut(withDuration: 0.35),
             SKAction.removeFromParent(),
         ]))
+        // An untouched run behind the title means we're heading into a fresh
+        // one: route through the loadout draft first.
+        if state.turnNumber == 0 && buildPickerOverlay == nil {
+            showBuildPicker()
+        }
     }
 
     // MARK: - Input
@@ -2569,6 +2962,33 @@ class GameScene: SKScene {
             }
             return
         }
+        if buildPickerOverlay != nil {
+            // The loadout draft dims only the board: slots cycle and BEGIN deals
+            // the run, but the nav tabs stay live so the milestones page and the
+            // title screen are reachable without starting.
+            let pool = currentWeaponPool()
+            if clickedNames.contains("build:melee") {
+                loadoutMeleeName = cycledLoadoutName(loadoutMeleeName, options: pool.filter(\.isMelee))
+                showBuildPicker()
+            } else if clickedNames.contains("build:ranged") {
+                loadoutRangedName = cycledLoadoutName(loadoutRangedName, options: pool.filter(\.isRanged))
+                showBuildPicker()
+            } else if clickedNames.contains("build:start") {
+                startRun()
+            } else if let tab = clickedNames.first(where: { $0.hasPrefix("navTab:") }) {
+                switch tab {
+                case "navTab:board": setHUDPage(.board)
+                case "navTab:milestones":
+                    rebuildMilestonesPage()
+                    setHUDPage(.milestones)
+                default: showTitleScreen()
+                }
+            } else {
+                // The far-left reference dropdowns stay live under the draft too.
+                toggleLegendSection(named: clickedNames)
+            }
+            return
+        }
         if buffChoiceOverlay != nil {
             // The boon chooser is modal: only its buttons respond.
             if let choice = clickedNames.first(where: { $0.hasPrefix("buffChoice:") }),
@@ -2599,28 +3019,46 @@ class GameScene: SKScene {
             }
             return
         }
-        if let toggle = clickedNames.first(where: { $0.hasPrefix("legendToggle:") }) {
-            let section: LegendSection = toggle.hasSuffix("weapons") ? .weapons : .enemies
-            if expandedLegendSections.contains(section) {
-                expandedLegendSections.remove(section)
-            } else {
-                expandedLegendSections.insert(section)
-            }
-            rebuildLegend()
+        if toggleLegendSection(named: clickedNames) {
             return
         }
         guard let target = gridPosition(at: location) else { return }
         planMove(to: target)
     }
 
+    /// Flips the tapped reference dropdown open/closed and rebuilds the legend.
+    /// Returns whether a toggle was hit, so callers can early-out.
+    @discardableResult
+    private func toggleLegendSection(named clickedNames: [String]) -> Bool {
+        guard let toggle = clickedNames.first(where: { $0.hasPrefix("legendToggle:") }) else {
+            return false
+        }
+        let section: LegendSection
+        switch toggle {
+        case "legendToggle:weapons": section = .weapons
+        case "legendToggle:tiles": section = .tiles
+        default: section = .enemies
+        }
+        // Accordion: opening a section collapses the others; clicking the open
+        // one closes it. At most one dropdown is expanded at a time.
+        if expandedLegendSections.contains(section) {
+            expandedLegendSections.removeAll()
+        } else {
+            expandedLegendSections = [section]
+        }
+        rebuildLegend()
+        return true
+    }
+
     /// Right-click drafts the equipped weapon's attack: directional weapons face
     /// the clicked tile, thrown weapons land on it. Right-clicking the planned
-    /// destination itself cancels the draft.
+    /// destination cancels whatever's drafted — directional swing or throw alike.
     override func rightMouseDown(with event: NSEvent) {
-        guard titleOverlay == nil else { return }
+        guard titleOverlay == nil, buildPickerOverlay == nil, devPanel == nil else { return }
         guard !isResolving, !state.isGameOver, buffChoiceOverlay == nil else { return }
         guard let tile = gridPosition(at: event.location(in: self)) else { return }
-        if tile == state.attackOrigin && state.equippedWeapon.thrown == nil {
+        let hasDraft = state.plannedAttackDirection != nil || state.plannedThrowTarget != nil
+        if tile == state.attackOrigin && hasDraft {
             state.clearPlannedAttack()
         } else {
             state.planAttack(toward: tile)
@@ -2644,6 +3082,13 @@ class GameScene: SKScene {
         if devPanel != nil {
             if event.keyCode == 0x35 { // Esc also closes it.
                 toggleDevPanel()
+            }
+            return
+        }
+        if buildPickerOverlay != nil {
+            // Space or Return deals the run with the drafted loadout.
+            if event.keyCode == 0x31 || event.keyCode == 0x24 {
+                startRun()
             }
             return
         }

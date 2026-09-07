@@ -26,9 +26,12 @@ outplaying it.
 - **Dodge.** Move 2+ tiles while taking no action and the first hit that turn
   misses. Projectiles, blasts, and hazards can't be dodged — only sidestepped.
 - **The ultimate.** Ten of your own kills charge a board-wide smite (F),
-  heralded by increasingly suspicious radio traffic. Kills your enemies score
-  for you — friendly fire, bomber blasts, chains they set off — don't charge
-  it. Overflow kills bank toward the next one.
+  heralded by an oracle who tries very hard to sound mystical. Kills your
+  enemies score for you — friendly fire, their trails, chains they set off —
+  don't charge it. Full is full: firing always costs the whole ten-kill climb.
+- **The bash.** A reloading ranged weapon still jabs: right-click while it
+  reloads for a 1-damage poke at an adjacent tile, without resetting the
+  reload.
 - **Enemy archetypes.** Fighters carry random weapons and kite to firing
   range; berserkers charge through danger; swifts move one tile further;
   bombers rush in, arm, and detonate on a fuse — or on death. Friendly fire
@@ -47,10 +50,21 @@ outplaying it.
   chain-react in a radius-2 diamond; lingering hazards burn whoever ends a
   turn standing in them. Floor weapons appear every few turns (capped, and
   they crumble if ignored).
-- **Endless waves.** Reinforcements telegraph their spawn tiles a turn ahead;
-  standing on a marker blocks that spawn for 1 damage. Score +1 per turn
-  survived, +10 per kill plus combo and streak bonuses, +30/+50 elite
-  bounties. High score persists between runs.
+- **Endless waves.** Reinforcements are pre-rolled and telegraphed a turn
+  ahead — hover the marker to see exactly what's coming. They materialize at
+  the START of the turn, so a pre-aimed attack greets them (spawn camping is
+  legal); standing on a marker blocks the spawn for 1 damage. Score +1 per
+  turn survived, +10 per kill plus combo and streak bonuses, +30/+50 elite
+  bounties.
+- **Projectiles are solid.** A shell mid-flight is ordnance: enemies path
+  around it, and anything that walks into (or dashes straight through) its
+  tile sets it off on contact. Crossing a lingering pool burns per tile, too.
+- **The roguelite part.** A fresh profile starts with Dagger, Sword, and Bow;
+  the rest of the arsenal unlocks through lifetime milestones (kills per
+  weapon, barrel chains, movement, combos, streaks, dodges), while the
+  gatekeepers' greataxe and cannon must be claimed off their corpses. The
+  MILESTONES page tracks progress; unlocks, tallies, and the high score
+  persist between runs.
 
 ## Controls
 
@@ -66,16 +80,27 @@ outplaying it.
 | 1 / 2 | Pick a boon on level-up |
 | R ×2 | Restart and reroll (single R once defeated) |
 | B | Boom mode: next restart replaces walls with barrels |
+| ` | Dev panel (the oracle pretends not to see it) |
 
 Hover any enemy to see its weapon, health, reload status, and exactly which
 tiles its drafted attack will sweep — the boss also announces its next play.
 Hover a barrel to see its blast radius, or a spawn marker to see what's
-coming.
+coming. New players can click "i'm too lazy to read" under the instructions
+for a four-step (fine, five-step) interactive tutorial.
 
 ## Tuning
 
-All the rules live in `Foretold/GameState.swift`, deliberately free of
-SpriteKit: weapon stats and attack patterns, archetype odds, elite health and
-summon counts, barrel damage/radius, dodge distance, spawn cadence, drop
-rates, buff definitions, and scoring are constants and presets near the top
-of the file. `GameScene.swift` only draws and animates.
+The rules are pure Swift, deliberately free of SpriteKit, split by concept:
+
+- `GameState.swift` — the turn engine, scoring, spawn cadence, dodge and
+  bash rules, level configs, and the dev-mode hooks
+- `Weapons.swift` — weapon stats, attack patterns, the loot table, and the
+  milestone/trophy unlock tables
+- `Enemy.swift` — archetypes, their odds, and the elite factories
+- `Buffs.swift` — every boon
+- `Projectiles.swift` — bolts, lobs, and lingering hazards
+- `Board.swift` — grid math, obstacles, and weapon drops
+- `TurnResolution.swift` — the per-turn event record the scene animates from
+
+`GameScene.swift` only draws, animates, and persists meta-progress. An
+`ASSET_SPEC.md` at the repo root briefs artists who can't run the game.

@@ -6,680 +6,6 @@
 
 import Foundation
 
-/// A tile coordinate on the board. Origin (0, 0) is the bottom-left tile.
-struct GridPosition: Hashable {
-    var x: Int
-    var y: Int
-}
-
-extension GridPosition {
-    /// Manhattan distance: tiles apart moving only orthogonally.
-    func distance(to other: GridPosition) -> Int {
-        abs(x - other.x) + abs(y - other.y)
-    }
-}
-
-/// The eight directions an attack can face. Orthogonal patterns are authored
-/// facing right (+x); diagonal patterns are authored facing up-right (+x, +y).
-/// Both are rotated in quarter turns to the other three facings of their kind.
-enum Direction: CaseIterable {
-    case right, up, left, down
-    case upRight, upLeft, downLeft, downRight
-
-    var isDiagonal: Bool {
-        switch self {
-        case .right, .up, .left, .down: return false
-        case .upRight, .upLeft, .downLeft, .downRight: return true
-        }
-    }
-
-    /// Quarter turns from this direction's canonical facing (right for
-    /// orthogonal, up-right for diagonal).
-    private var quarterTurns: Int {
-        switch self {
-        case .right, .upRight: return 0
-        case .up, .upLeft: return 1
-        case .left, .downLeft: return 2
-        case .down, .downRight: return 3
-        }
-    }
-
-    /// Rotates a canonically-authored offset into this direction.
-    func rotated(_ offset: GridPosition) -> GridPosition {
-        var result = offset
-        for _ in 0..<quarterTurns {
-            result = GridPosition(x: -result.y, y: result.x)
-        }
-        return result
-    }
-
-    /// One tile of travel along this direction (diagonal steps move both axes).
-    var unitStep: GridPosition {
-        isDiagonal ? rotated(GridPosition(x: 1, y: 1)) : rotated(GridPosition(x: 1, y: 0))
-    }
-
-    /// Compass glyph for HUD readouts.
-    var arrow: String {
-        switch self {
-        case .right: return "→"
-        case .up: return "↑"
-        case .left: return "←"
-        case .down: return "↓"
-        case .upRight: return "↗"
-        case .upLeft: return "↖"
-        case .downLeft: return "↙"
-        case .downRight: return "↘"
-        }
-    }
-
-    /// The direction that best matches aiming from origin toward tile; diagonal
-    /// facings are only chosen when allowed and the aim is closer to 45° than to
-    /// an axis. Nil when origin and tile coincide.
-    static func aiming(from origin: GridPosition, toward tile: GridPosition, allowDiagonals: Bool) -> Direction? {
-        let dx = tile.x - origin.x
-        let dy = tile.y - origin.y
-        guard dx != 0 || dy != 0 else { return nil }
-        if allowDiagonals && min(abs(dx), abs(dy)) * 2 > max(abs(dx), abs(dy)) {
-            switch (dx > 0, dy > 0) {
-            case (true, true): return .upRight
-            case (false, true): return .upLeft
-            case (false, false): return .downLeft
-            case (true, false): return .downRight
-            }
-        }
-        if abs(dx) >= abs(dy) {
-            return dx > 0 ? .right : .left
-        }
-        return dy > 0 ? .up : .down
-    }
-}
-
-/// The tiles an attack covers. `offsets` is authored relative to an attacker
-/// facing right (+x): (x: 1, y: 0) is the tile directly ahead, (x: 1, y: 1)
-/// ahead and to the left, (x: 2, y: 0) two tiles ahead. `diagonalOffsets`, when
-/// provided, is the shape used for diagonal aims, authored facing up-right;
-/// weapons without it can only aim orthogonally. Offsets should be listed
-/// nearest-first so non-piercing attacks stop at the right target.
-struct AttackPattern: Equatable {
-    let offsets: [GridPosition]
-    let diagonalOffsets: [GridPosition]?
-    /// True for straight thrusts (the `line` factory): a wall stops everything
-    /// behind it. Shaped swings (arcs, rings) just can't hit the wall tile
-    /// itself — they sweep around it.
-    let isLine: Bool
-
-    init(offsets: [GridPosition], diagonalOffsets: [GridPosition]? = nil, isLine: Bool = false) {
-        self.offsets = offsets
-        self.diagonalOffsets = diagonalOffsets
-        self.isLine = isLine
-    }
-
-    var supportsDiagonals: Bool { diagonalOffsets != nil }
-
-    /// Absolute board tiles covered when attacking from origin facing direction
-    /// (not yet clipped to the board), in authored order. Empty for a diagonal
-    /// facing when the pattern has no diagonal shape.
-    func tiles(from origin: GridPosition, facing direction: Direction) -> [GridPosition] {
-        let base = direction.isDiagonal ? (diagonalOffsets ?? []) : offsets
-        return base.map { offset in
-            let rotated = direction.rotated(offset)
-            return GridPosition(x: origin.x + rotated.x, y: origin.y + rotated.y)
-        }
-    }
-}
-
-// MARK: - Attack patterns
-// Author each weapon's shape here, facing right (and up-right for the optional
-// diagonal shape).
-extension AttackPattern {
-    /// A straight thrust of `length` tiles directly ahead, with the matching
-    /// diagonal thrust built in. Off-board tiles are clipped at attack time, so
-    /// pass the board's span (columns - 1) to reach the far edge from anywhere.
-    static func line(length: Int) -> AttackPattern {
-        AttackPattern(
-            offsets: (1...length).map { GridPosition(x: $0, y: 0) },
-            diagonalOffsets: (1...length).map { GridPosition(x: $0, y: $0) },
-            isLine: true
-        )
-    }
-
-    /// A hollow circle: every tile between innerRadius and outerRadius of the
-    /// attacker (rounded grid circle, own tile excluded). ring(from: 2, to: 2)
-    /// strikes only at two tiles out, leaving a blind spot right beside the
-    /// attacker. The shape is identical from any facing, diagonals included, so
-    /// aiming direction doesn't matter; offsets are ordered nearest-first in
-    /// case a non-piercing weapon uses it.
-    static func ring(from innerRadius: Int, to outerRadius: Int) -> AttackPattern {
-        let outerBound = outerRadius * outerRadius + outerRadius
-        let inner = innerRadius - 1
-        let innerBound = inner * inner + inner
-        var offsets: [GridPosition] = []
-        for dx in -outerRadius...outerRadius {
-            for dy in -outerRadius...outerRadius where !(dx == 0 && dy == 0) {
-                let distanceSquared = dx * dx + dy * dy
-                if distanceSquared <= outerBound && distanceSquared > innerBound {
-                    offsets.append(GridPosition(x: dx, y: dy))
-                }
-            }
-        }
-        offsets.sort { ($0.x * $0.x + $0.y * $0.y) < ($1.x * $1.x + $1.y * $1.y) }
-        return AttackPattern(offsets: offsets, diagonalOffsets: offsets)
-    }
-
-    /// Every tile within `radius` of the attacker — a filled ring, i.e. a
-    /// bigger hammer swing. radius 1 is exactly the 8 surrounding tiles.
-    static func circle(radius: Int) -> AttackPattern {
-        ring(from: 1, to: radius)
-    }
-
-    static let dagger = AttackPattern.line(length: 1)
-    static let sword = AttackPattern(offsets: [
-        GridPosition(x: 2, y: -1),
-        GridPosition(x: 2, y: 0),
-        GridPosition(x: 1, y: 0),
-        GridPosition(x: 2, y: 1),
-    ],
-    diagonalOffsets: [
-        GridPosition(x: 1, y: 1),
-        GridPosition(x: 2, y: 2),
-        GridPosition(x: 2, y: 1),
-        GridPosition(x: 1, y: 2)
-    ])
-    static let hammer = AttackPattern(offsets: [
-        GridPosition(x: -1, y: -1), GridPosition(x: 0, y: -1), GridPosition(x: 1, y: -1),
-        GridPosition(x: -1, y: 0), GridPosition(x: 1, y: 0),
-        GridPosition(x: -1, y: 1), GridPosition(x: 0, y: 1), GridPosition(x: 1, y: 1),
-    ])
-    static let pike = AttackPattern.line(length: 3)
-    static let bow = AttackPattern.line(length: 10)
-    static let crossbow = AttackPattern.line(length: 14)
-    static let greataxe = AttackPattern.circle(radius: 2)
-    static let scythe = AttackPattern.ring(from: 2, to: 2)
-}
-
-/// Gear anyone can carry. A weapon attacks either directionally (via
-/// `attackPattern`) or by being lobbed at a tile (via `thrown`) — exactly one of
-/// the two. Heavier weapons restrict how far the wielder can move but hit
-/// harder, so weapon choice is a mobility/damage trade-off.
-//MARK: - Weapons
-struct Weapon: Equatable {
-    /// A lobbed attack: pick any tile within `range`, and the blast covers a
-    /// diamond of `blastRadius` around it. Throws arc over walls and bodies, and
-    /// the blast hits everyone caught in it — the thrower included.
-    struct Thrown: Equatable {
-        /// Max Manhattan distance the weapon can be thrown.
-        let range: Int
-        /// Manhattan radius of the blast diamond around the impact tile.
-        let blastRadius: Int
-        /// Turns the projectile spends airborne before detonating; 0 lands the
-        /// same turn it's thrown. While in flight the impact zone is telegraphed,
-        /// so slower projectiles are easier to walk out of — escape needs
-        /// moveRange × (1 + flightTurns) > blastRadius.
-        let flightTurns: Int
-
-        init(range: Int, blastRadius: Int, flightTurns: Int = 0) {
-            self.range = range
-            self.blastRadius = blastRadius
-            self.flightTurns = flightTurns
-        }
-    }
-
-    /// A hazard the attack leaves burning on every tile it swept — the tiles
-    /// highlighted while aiming. Anything ending a turn on one takes damage.
-    struct Lingering: Equatable {
-        let damagePerTurn: Int
-        let duration: Int
-    }
-
-    let name: String
-    /// Tiles of orthogonal movement this weapon allows per turn.
-    let moveRange: Int
-    let damage: Int
-    /// Whether the attack sweeps past the first enemy it hits (matters for
-    /// ordered patterns like lines).
-    let pierces: Bool
-    /// Turns the wielder must wait after attacking before attacking again;
-    /// 0 attacks every turn, 1 every other turn.
-    let cooldown: Int
-    /// Health an enemy carrying this weapon spawns with — melee bruisers take
-    /// more hits than ranged skirmishers.
-    let enemyHealth: Int
-    /// Directional swing shape; nil for thrown weapons.
-    let attackPattern: AttackPattern?
-    /// Set for lobbed weapons (grenades, potions); nil for directional ones.
-    let thrown: Thrown?
-    let lingering: Lingering?
-    /// Declares the weapon ranged (bows, thrown flasks…). Melee hits are the
-    /// ones blunted by meleeDamageReduction buffs; ranged hits by
-    /// rangedDamageReduction ones.
-    let isRanged: Bool
-    /// When set on a directional weapon (line patterns), attacks fire a
-    /// traveling bolt instead of striking instantly: it advances this many
-    /// tiles per turn along the aimed line — low values make slow, dodgeable
-    /// cannonballs. Range comes from the pattern's length.
-    let projectileSpeed: Int?
-    /// For bolts only: the shot detonates a diamond blast of this radius
-    /// wherever its flight ends — striking a body, hitting scenery, or falling
-    /// at max range. The blast replaces the single-target hit. 0 = no blast.
-    let impactBlastRadius: Int
-
-    var isMelee: Bool { !isRanged }
-
-    init(
-        name: String,
-        moveRange: Int,
-        damage: Int,
-        pierces: Bool = true,
-        cooldown: Int = 0,
-        enemyHealth: Int = 3,
-        isRanged: Bool = false,
-        projectileSpeed: Int? = nil,
-        impactBlastRadius: Int = 0,
-        attackPattern: AttackPattern? = nil,
-        thrown: Thrown? = nil,
-        lingering: Lingering? = nil
-    ) {
-        precondition((attackPattern != nil) != (thrown != nil), "A weapon attacks with either a pattern or a throw, not both")
-        self.name = name
-        self.moveRange = moveRange
-        self.damage = damage
-        self.pierces = pierces
-        self.cooldown = cooldown
-        self.enemyHealth = enemyHealth
-        self.isRanged = isRanged
-        self.projectileSpeed = projectileSpeed
-        self.impactBlastRadius = impactBlastRadius
-        self.attackPattern = attackPattern
-        self.thrown = thrown
-        self.lingering = lingering
-    }
-}
-
-extension Weapon {
-    static let dagger = Weapon(name: "Dagger", moveRange: 3, damage: 2, enemyHealth: 4, attackPattern: .dagger)
-    static let sword = Weapon(name: "Sword", moveRange: 2, damage: 2, enemyHealth: 4, attackPattern: .sword)
-    static let hammer = Weapon(name: "Hammer", moveRange: 1, damage: 4, cooldown: 1, enemyHealth: 5, attackPattern: .hammer)
-    static let pike = Weapon(name: "Pike", moveRange: 2, damage: 2, enemyHealth: 3, attackPattern: .pike)
-    static let bow = Weapon(name: "Bow", moveRange: 2, damage: 2, pierces: false, cooldown: 1, enemyHealth: 2, isRanged: true, projectileSpeed: 5, attackPattern: .bow)
-    static let tippedBow = Weapon(name: "Tipped Bow", moveRange: 2, damage: 1, pierces: false, cooldown: 1, enemyHealth: 2, isRanged: true, projectileSpeed: 5, attackPattern: .bow, lingering: Lingering(damagePerTurn: 1, duration: 2))
-    static let crossbow = Weapon(name: "Crossbow", moveRange: 1, damage: 3, pierces: true , cooldown: 2, enemyHealth: 2, isRanged: true, projectileSpeed: 7, attackPattern: .crossbow)
-    /// A slow, devastating ball you can see coming for turns; it bursts in a
-    /// diamond wherever its flight ends.
-    static let cannon = Weapon(name: "Cannon", moveRange: 1, damage: 5, pierces: false, cooldown: 2, enemyHealth: 3, isRanged: true, projectileSpeed: 2, impactBlastRadius: 1, attackPattern: .crossbow)
-    static let grenade = Weapon(
-        name: "Grenade",
-        moveRange: 2,
-        damage: 3,
-        cooldown: 1,
-        enemyHealth: 2,
-        isRanged: true,
-        thrown: Thrown(range: 8, blastRadius: 1, flightTurns: 1),
-        lingering: Lingering(damagePerTurn: 1, duration: 1),
-    )
-    static let poisonPotion = Weapon(
-        name: "Poison Potion",
-        moveRange: 2,
-        damage: 1,
-        cooldown: 2,
-        enemyHealth: 2,
-        isRanged: true,
-        thrown: Thrown(range: 4, blastRadius: 2, flightTurns: 2),
-        lingering: Lingering(damagePerTurn: 3, duration: 3)
-    )
-    static let greataxe = Weapon(name: "Greataxe", moveRange: 1, damage: 4, cooldown: 2, enemyHealth: 4, attackPattern: .greataxe)
-    static let scythe = Weapon(name: "Scythe", moveRange: 2, damage: 2, enemyHealth: 3, attackPattern: .scythe)
-    /// The pool random loadouts and enemy weapons draw from.
-    static let all: [Weapon] = [.dagger, .sword, .hammer, .pike, .bow, .crossbow, .grenade, .poisonPotion, .tippedBow, .greataxe, .scythe, .cannon]
-
-    /// Everything that can appear as floor loot, arm rank-and-file enemies, or
-    /// seed the starting loadout. The cannon is boss-exclusive: it only enters
-    /// a run as the boss's trophy drop.
-    static let lootTable: [Weapon] = all.filter { $0.name != Weapon.cannon.name }
-
-    /// Elite trophies: wielded by gatekeepers, absent from every pool until
-    /// the player claims one off a fallen elite — from then on they join the
-    /// loot of future runs.
-    static let eliteTrophies: [Weapon] = [.greataxe, .cannon]
-
-    /// What a brand-new profile starts with; the rest is earned.
-    static let baseArsenal: [Weapon] = [.dagger, .sword, .bow]
-
-    /// A lifetime-tally gate for one weapon: hit the count on its tally
-    /// (kills with a weapon, barrel-chain kills, tiles moved…) and it joins
-    /// future runs' loot.
-    struct Milestone {
-        let weapon: Weapon
-        /// Key into the lifetime tallies (a weapon name, "Barrels", "TilesMoved"…).
-        let tally: String
-        let count: Int
-        /// Human-readable unlock condition.
-        let requirement: String
-    }
-
-    /// The unlock paths, a mix of weapon mastery and playstyle feats:
-    /// kills teach the chains (Sword → Pike, Bow → Crossbow, Barrels →
-    /// Grenade), while movement, combos, streaks, and dodges earn the rest.
-    /// Elite trophies unlock by pickup.
-    static let milestones: [Milestone] = [
-        Milestone(weapon: .pike, tally: Weapon.sword.name, count: 10, requirement: "10 kills with the Sword"),
-        Milestone(weapon: .hammer, tally: "ComboTurns", count: 5, requirement: "kill 3+ in a single turn, 5 times"),
-        Milestone(weapon: .scythe, tally: "TilesMoved", count: 200, requirement: "move 200 tiles, lifetime"),
-        Milestone(weapon: .crossbow, tally: Weapon.bow.name, count: 10, requirement: "10 kills with the Bow"),
-        Milestone(weapon: .tippedBow, tally: "Streaks", count: 3, requirement: "reach a ×3 kill streak, 3 times"),
-        Milestone(weapon: .grenade, tally: "Barrels", count: 10, requirement: "10 kills with exploding barrels"),
-        Milestone(weapon: .poisonPotion, tally: "Dodges", count: 10, requirement: "dodge 10 attacks"),
-    ]
-}
-
-/// A hazard burning on one tile for a few turns; anything standing there when
-/// the turn resolves takes damage.
-struct LingeringEffect {
-    let position: GridPosition
-    let damagePerTurn: Int
-    /// Player-made pools charge the ultimate with their kills; enemy trails don't.
-    let chargesUltimate: Bool
-    /// Kill-tally key for player pools (the painting weapon); nil for enemies'.
-    let creditName: String?
-    var turnsRemaining: Int
-    /// Freshly placed this turn; the first end-of-turn tick skips it so the
-    /// hazard lasts its full duration after the attack that created it.
-    var justPlaced = true
-}
-
-/// Behavior templates layered on top of a weapon.
-enum Archetype: Equatable {
-    /// The standard enemy: weapon defines everything.
-    case fighter
-    /// Fearless melee: ignores hazards and telegraphed danger entirely.
-    case berserker
-    /// +1 move range on top of its weapon.
-    case swift
-    /// Charges adjacent, arms a visible fuse, then detonates — and detonates
-    /// on death too, so finish it from outside the blast.
-    case bomber
-    /// Miniboss: heavy melee with a deep health pool.
-    case juggernaut
-    /// The real thing: huge, hard-hitting, worth a fat bounty.
-    case boss
-}
-
-/// A foe on the board. Enemies draft a move toward the player and, when their
-/// weapon can reach the player's tile from the drafted position (and isn't on
-/// cooldown), an aimed swing or a lobbed throw — all telegraphed during the
-/// planning phase.
-struct Enemy {
-    /// The boss drafts one of these each turn, telegraphed like any plan:
-    /// fire both weapons at once, sweep the cannon in a circle around itself,
-    /// or call reinforcements to its side.
-    enum BossIntent {
-        case volley, nova, summon
-    }
-
-    let id: Int
-    var position: GridPosition
-    var health: Int
-    /// Where this enemy intends to move next resolve; visible to the player while planning.
-    var plannedTarget: GridPosition?
-    /// The tiles it will step through to get there (destination included) —
-    /// crossing a lingering hazard burns the mover per tile stepped.
-    var plannedPath: [GridPosition] = []
-    /// The facing of the swing this enemy intends after moving (directional weapons).
-    var plannedDirection: Direction?
-    /// The tile this enemy intends to lob its weapon at (thrown weapons).
-    var plannedThrowTarget: GridPosition?
-    /// Turns left before this enemy's weapon is ready again.
-    var cooldownRemaining = 0
-    /// Bombers only: turns until detonation once armed; nil = not armed yet.
-    var fuse: Int?
-    /// Bosses only: the drafted intent for next resolve.
-    var plannedIntent: BossIntent?
-    /// Volley only: the facing of the cannon shot alongside the primary swing.
-    var plannedSecondaryDirection: Direction?
-    let weapon: Weapon
-    /// Bosses only: the cannon carried alongside the primary weapon.
-    let secondaryWeapon: Weapon?
-    /// Damage dealt per hit; defaults to the weapon's damage.
-    let damage: Int
-    let archetype: Archetype
-
-    init(id: Int, position: GridPosition, health: Int? = nil, weapon: Weapon? = nil, secondaryWeapon: Weapon? = nil, damage: Int? = nil, archetype: Archetype = .fighter) {
-        self.id = id
-        self.position = position
-        let carried = weapon ?? Weapon.lootTable.randomElement()!
-        self.weapon = carried
-        self.secondaryWeapon = secondaryWeapon
-        self.health = health ?? carried.enemyHealth
-        self.damage = damage ?? carried.damage
-        self.archetype = archetype
-    }
-
-    /// Tiles moved per turn: the weapon's range, plus haste for the swift.
-    var moveRange: Int { weapon.moveRange + (archetype == .swift ? 1 : 0) }
-
-    /// Fearless enemies path straight through hazards and telegraphed danger.
-    var isFearless: Bool { archetype == .berserker || archetype == .bomber }
-
-    /// Kill score, before combo/streak bonuses.
-    var bounty: Int {
-        switch archetype {
-        case .juggernaut: return 30
-        case .boss: return 50
-        default: return GameState.killScore
-        }
-    }
-
-    var displayName: String {
-        switch archetype {
-        case .fighter: return weapon.name
-        case .berserker: return "Berserker · \(weapon.name)"
-        case .swift: return "Swift · \(weapon.name)"
-        case .bomber: return "Bomber"
-        case .juggernaut: return "JUGGERNAUT · \(weapon.name)"
-        case .boss: return "BOSS · \(weapon.name)\(secondaryWeapon.map { " + \($0.name)" } ?? "")"
-        }
-    }
-
-    /// How this enemy is credited as a killer in the death recap — "undone by
-    /// a fighter's Bow" rather than the bare weapon name.
-    var slayerName: String {
-        switch archetype {
-        case .fighter: return "a fighter's \(weapon.name)"
-        case .berserker: return "a berserker's \(weapon.name)"
-        case .swift: return "a swift's \(weapon.name)"
-        case .bomber: return "a bomber"
-        case .juggernaut: return "the juggernaut's \(weapon.name)"
-        case .boss: return "the boss's \(weapon.name)"
-        }
-    }
-
-    /// A random rank-and-file spawn: mostly fighters, seasoned with berserkers,
-    /// swifts, and the occasional bomber.
-    static func recruit(id: Int, at position: GridPosition, armory: [Weapon] = Weapon.lootTable) -> Enemy {
-        switch Int.random(in: 0..<100) {
-        case ..<55:
-            return Enemy(id: id, position: position, weapon: armory.randomElement()!)
-        case ..<70:
-            let melee = armory.filter(\.isMelee).randomElement() ?? .sword
-            return Enemy(id: id, position: position, weapon: melee, archetype: .berserker)
-        case ..<85:
-            return Enemy(id: id, position: position, weapon: armory.randomElement()!, archetype: .swift)
-        default:
-            return Enemy(id: id, position: position, health: 2, weapon: .dagger, archetype: .bomber)
-        }
-    }
-
-    /// A late-level elite: the juggernaut miniboss, or the boss proper.
-    static func elite(_ archetype: Archetype, id: Int, at position: GridPosition) -> Enemy {
-        switch archetype {
-        case .boss:
-            // Always the cannon as sidearm — it's the run's only source of one.
-            let arsenal = [Weapon.greataxe, .crossbow].randomElement()!
-            return Enemy(id: id, position: position, health: 20, weapon: arsenal, secondaryWeapon: .cannon, damage: arsenal.damage + 1, archetype: .boss)
-        default:
-            let heavy = [Weapon.hammer, .greataxe].randomElement()!
-            return Enemy(id: id, position: position, health: 12, weapon: heavy, archetype: .juggernaut)
-        }
-    }
-}
-
-/// Scenery on the board. Walls block movement and stop attacks dead; barrels
-/// block movement and explode when any attack sweeps them, damaging everything
-/// beside them (player, enemies, and other barrels — chain reactions included).
-struct Obstacle {
-    enum Kind {
-        case wall, barrel
-    }
-
-    let id: Int
-    let kind: Kind
-    let position: GridPosition
-}
-
-/// A weapon lying on the ground. While standing on one the player may draft a
-/// pickup, spending their attack (and dodge) for the turn to swap it with the
-/// equipped weapon — the old weapon stays on the tile for trading back later.
-struct WeaponDrop {
-    let id: Int
-    let weapon: Weapon
-    let position: GridPosition
-    /// Dropped by a slain elite: survives level regeneration, never expires,
-    /// and doesn't count toward the floor-weapon cap.
-    var isBossDrop = false
-}
-
-/// A boon granted on level-up. Author buffs by setting only the knobs they
-/// use — everything defaults to "no effect":
-/// - `instantHeal` / `instantArmorRepair` apply once, when granted.
-/// - The damage reductions, immunities, and bonuses apply continuously while
-///   the buff is held (a buff with only instant effects is never "held").
-/// - `levelDuration` is how many level-ups the buff survives: 1 lasts just the
-///   current level, 2 wears off two level-ups later, nil lasts the whole run.
-/// - `stackable: false` removes it from the pool while owned.
-struct Buff: Equatable {
-    let name: String
-    let levelDuration: Int?
-    let stackable: Bool
-    let instantHeal: Int
-    let instantArmorRepair: Int
-    /// Damage removed from each melee weapon hit (reach ≤ 3, not thrown).
-    let meleeDamageReduction: Int
-    /// Damage removed from each ranged or thrown weapon hit.
-    let rangedDamageReduction: Int
-    /// Barrel blasts no longer hurt the player.
-    let barrelImmunity: Bool
-    /// Lingering pools no longer burn the player.
-    let hazardImmunity: Bool
-    /// Added to the equipped weapon's move range.
-    let bonusMoveRange: Int
-    /// Added to the equipped weapon's damage.
-    let bonusDamage: Int
-    /// Added to the player's max armor
-    let bonusArmor: Int
-
-    init(
-        name: String,
-        levelDuration: Int? = nil,
-        stackable: Bool = true,
-        instantHeal: Int = 0,
-        instantArmorRepair: Int = 0,
-        meleeDamageReduction: Int = 0,
-        rangedDamageReduction: Int = 0,
-        barrelImmunity: Bool = false,
-        hazardImmunity: Bool = false,
-        bonusMoveRange: Int = 0,
-        bonusDamage: Int = 0,
-        bonusArmor: Int = 0,
-    ) {
-        self.name = name
-        self.levelDuration = levelDuration
-        self.stackable = stackable
-        self.instantHeal = instantHeal
-        self.instantArmorRepair = instantArmorRepair
-        self.meleeDamageReduction = meleeDamageReduction
-        self.rangedDamageReduction = rangedDamageReduction
-        self.barrelImmunity = barrelImmunity
-        self.hazardImmunity = hazardImmunity
-        self.bonusMoveRange = bonusMoveRange
-        self.bonusDamage = bonusDamage
-        self.bonusArmor = bonusArmor
-    }
-
-    /// Purely instant buffs aren't kept in the held list after applying.
-    var isInstantOnly: Bool {
-        meleeDamageReduction == 0 && rangedDamageReduction == 0
-            && !barrelImmunity && !hazardImmunity
-            && bonusMoveRange == 0 && bonusDamage == 0
-            && bonusArmor == 0
-    }
-}
-
-// MARK: - Buffs
-// Author level-up boons here; the pool below is what level-ups draw from.
-extension Buff {
-    static let barrelImmune = Buff(name: "Immune to barrels", levelDuration: 2, stackable: false, barrelImmunity: true)
-    static let thickSkin = Buff(name: "-1 melee dmg taken", levelDuration: 3, meleeDamageReduction: 1)
-    static let secondWind = Buff(name: "+2 HP", instantHeal: 2)
-    static let longStride = Buff(name: "+1 move", levelDuration: 1, bonusMoveRange: 1)
-    static let whetstone = Buff(name: "+1 dmg", levelDuration: 1, bonusDamage: 1)
-    static let hardenedArmour = Buff(name: "+1 max armour", levelDuration: 1, instantArmorRepair: 1, bonusArmor: 1)
-    /// The pool level-ups draw from.
-    static let all: [Buff] = [.barrelImmune, .thickSkin, .secondWind, .longStride, .whetstone, .hardenedArmour]
-}
-
-/// A buff the player currently holds, with its remaining lifetime.
-struct HeldBuff {
-    let buff: Buff
-    /// Level-ups left before it wears off; nil = the whole run.
-    var levelsRemaining: Int?
-}
-
-/// A lobbed shot in flight: it lands on a fixed tile after a fixed number of
-/// turns and blasts a diamond there. The impact zone is telegraphed the whole
-/// time it's airborne — nothing can stop a shell already in the air.
-struct Projectile {
-    let id: Int
-    let origin: GridPosition
-    let target: GridPosition
-    let blastRadius: Int
-    let damage: Int
-    let lingering: Weapon.Lingering?
-    /// Player-thrown shells charge the ultimate with their kills; enemy ones don't.
-    let chargesUltimate: Bool
-    let totalFlightTurns: Int
-    var turnsUntilImpact: Int
-    /// Who threw it — named in the death recap if it proves fatal.
-    let sourceName: String
-    /// Kill-tally key for player lobs (the weapon's name); nil for enemies.
-    let creditName: String?
-}
-
-/// An arrow or cannonball flying along a straight line: each resolve it
-/// advances up to `speed` tiles, striking the first body it meets (everything
-/// in its path, if it pierces), detonating barrels, and dying against walls.
-/// Its next stretch of travel is telegraphed while it flies.
-struct Bolt {
-    let id: Int
-    /// The last tile the bolt passed through (starts at the shooter).
-    var position: GridPosition
-    let direction: Direction
-    /// Tiles advanced per turn — the "slow cannonball" knob.
-    let speed: Int
-    var remainingRange: Int
-    let damage: Int
-    let pierces: Bool
-    /// Detonates a diamond blast of this radius wherever the flight ends;
-    /// 0 = plain arrow.
-    let impactBlastRadius: Int
-    /// Left burning on the tiles the bolt passes through.
-    let lingering: Weapon.Lingering?
-    /// Player-fired bolts charge the ultimate with their kills; enemy ones don't.
-    let chargesUltimate: Bool
-    /// Who fired it — named in the death recap if it proves fatal.
-    let sourceName: String
-    /// Kill-tally key for player shots (the weapon's name); nil for enemies.
-    let creditName: String?
-}
-
 /// Difficulty knobs for one level — the Tetris-style ramp.
 struct LevelConfig {
     /// Enemies placed when the level's board is generated.
@@ -704,95 +30,43 @@ struct LevelConfig {
     }
 }
 
-/// Everything that happened during one resolve phase, so the scene can animate it.
-struct TurnResolution {
-    struct EnemyMove {
-        let enemyID: Int
-        let from: GridPosition
-        let to: GridPosition
-    }
+/// Elite scaling by level. Every gatekeeper knob — health, damage, summon
+/// sizes, and the boss's cannon-nova radius — ramps with the run so late elites
+/// keep pace with the player, each capped so the climb stays hard but fair.
+struct BossConfig {
+    /// Juggernaut miniboss starting health.
+    let juggernautHealth: Int
+    /// Boss starting health.
+    let bossHealth: Int
+    /// Added on top of the elite's weapon damage.
+    let eliteDamageBonus: Int
+    /// Recruits the juggernaut passively calls in each wave.
+    let juggernautSummonCount: Int
+    /// Recruits the boss calls in per summon intent.
+    let bossSummonCount: Int
+    /// Either elite stops summoning while this many rank-and-file are already up.
+    let retinueCap: Int
+    /// Radius of the boss's point-blank cannon nova (its own tile spared).
+    let novaRadius: Int
+    /// Explosive barrels the boss rains around the player per barrage intent.
+    let bossBarrageCount: Int
 
-    struct EnemyHit {
-        let enemyID: Int
-        let healthAfter: Int
-        let died: Bool
+    static func forLevel(_ level: Int) -> BossConfig {
+        // base, then +step for every `every` levels cleared, never past cap.
+        func ramp(_ base: Int, step: Int, every: Int, cap: Int) -> Int {
+            min(cap, base + step * ((max(1, level) - 1) / every))
+        }
+        return BossConfig(
+            juggernautHealth: ramp(12, step: 1, every: 1, cap: 30),
+            bossHealth: ramp(20, step: 2, every: 1, cap: 56),
+            eliteDamageBonus: ramp(0, step: 1, every: 3, cap: 4),
+            juggernautSummonCount: ramp(2, step: 1, every: 5, cap: 3),
+            bossSummonCount: ramp(3, step: 1, every: 3, cap: 5),
+            retinueCap: ramp(4, step: 1, every: 3, cap: 6),
+            novaRadius: ramp(3, step: 1, every: 3, cap: 4),
+            bossBarrageCount: ramp(2, step: 1, every: 4, cap: 4)
+        )
     }
-
-    struct EnemyAttack {
-        let enemyID: Int
-        let tiles: [GridPosition]
-        let hitsPlayer: Bool
-        /// True when the attack had the player but their dodge (a long move with
-        /// no attack drafted) made it miss.
-        let dodged: Bool
-    }
-
-    /// A barrel going off: its tile and the surrounding tiles the blast damaged.
-    struct Explosion {
-        let center: GridPosition
-        let tiles: [GridPosition]
-    }
-
-    /// A telegraphed reinforcement arriving (or being blocked).
-    struct SpawnEvent {
-        let position: GridPosition
-        /// The new enemy's id, or nil when the spawn was blocked by whoever was
-        /// standing on the tile (who took 1 damage for it) or by scenery.
-        let enemyID: Int?
-    }
-
-    let playerDestination: GridPosition
-    /// Tiles the player's attack covered — a directional sweep or a throw's
-    /// blast; empty when no attack was drafted.
-    let attackTiles: [GridPosition]
-    /// Enemy tiles smitten by the ultimate this turn.
-    let ultimateTiles: [GridPosition]
-    /// Enemies damaged during the player's phase (weapon and explosions).
-    let enemyHits: [EnemyHit]
-    let playerExplosions: [Explosion]
-    let enemyMoves: [EnemyMove]
-    let enemyAttacks: [EnemyAttack]
-    /// Enemies damaged during the enemies' own phase: friendly fire and explosions.
-    let friendlyFireHits: [EnemyHit]
-    let enemyExplosions: [Explosion]
-    /// Enemies burned by lingering effects at the end of the turn (plus anyone
-    /// damaged blocking a spawn).
-    let hazardHits: [EnemyHit]
-    /// Explosions from that late phase (bombers dying to hazards, etc.).
-    let hazardExplosions: [Explosion]
-    /// One bolt's travel this turn, for the scene to glide its sprite along.
-    struct BoltFlight {
-        let boltID: Int
-        let from: GridPosition
-        /// The furthest tile it reached — its resting place, or where it died.
-        let to: GridPosition
-        let direction: Direction
-    }
-
-    /// Airborne shells that landed this turn (after everyone moved).
-    let projectileImpacts: [Explosion]
-    /// Enemies caught in those landings.
-    let projectileHits: [EnemyHit]
-    /// Every bolt's travel this turn.
-    let boltFlights: [BoltFlight]
-    /// Reinforcements that arrived (or were blocked) this turn.
-    let spawns: [SpawnEvent]
-    /// Fresh barrels that dropped in this turn (blocked deliveries just vanish).
-    let barrelSpawns: [GridPosition]
-    /// The weapon the player picked up this turn, if any.
-    let pickedUpWeapon: Weapon?
-    /// Set when the score crossed a threshold: the level reached. The board has
-    /// been fully regenerated (the scene should rebuild its entities) and
-    /// `pendingBuffChoices` holds the boons awaiting the player's pick.
-    let leveledUpTo: Int?
-    /// Enemies that died this turn (any cause), for combo callouts.
-    let killsThisTurn: Int
-    /// The kill streak after this turn's update.
-    let killStreak: Int
-    let healthLost: Int
-    let armorLost: Int
-    let playerHealth: Int
-    let playerArmor: Int
 }
 
 /// Pure game rules, independent of SpriteKit so turn logic stays unit-testable.
@@ -843,14 +117,34 @@ struct GameState {
     /// …blasting a diamond of this radius for this much damage.
     static let bomberBlastRadius = 2
     static let bomberDamage = 3
-    /// Recruits the juggernaut passively summons around itself per wave.
-    static let bossSummonCount = 2
-    /// Recruits the boss calls in when it drafts its summon intent.
-    static let bossIntentSummonCount = 3
-    /// The boss stops summoning while this many rank-and-file are already up.
-    static let bossRetinueCap = 4
-    /// Radius of the boss's point-blank cannon nova (its own tile is spared).
-    static let bossNovaRadius = 2
+    // Elite health, damage, summon sizes, and nova radius now scale with the
+    // level — see BossConfig.forLevel(_:).
+    /// Extra damage a hit deals when it lands in a shieldbearer's exposed back.
+    static let shieldbearerBackstabBonus = 1
+    /// An enemy only refuses to line a shot up through an ally that's within this
+    /// many tiles (the one right in front of it — a shield wall). Comrades farther
+    /// down the lane are fair game, so long-range friendly fire stays exploitable.
+    static let friendlyAimGuardRange = 2
+    /// Chance (percent) that an eligible wave arrives as a whole formation
+    /// instead of the usual trickle.
+    static let formationChance = 30
+    /// A formation's arrivals suppress this fraction of that many future waves,
+    /// so a squad is a net gain but buys a lull rather than free extra bodies.
+    static let formationSpawnDebtFactor = 0.6
+    /// A marching squad holds formation until its anchor (or nearest member)
+    /// closes to within this many tiles of the player, then breaks and engages.
+    /// Kept below the spawn distance (>3) so a squad doesn't break the instant
+    /// it lands.
+    static let formationBreakDistance = 3
+    /// A bomber holding formation peels off to charge once it's this close —
+    /// larger than the squad's break so it pulls ahead and detonates in open
+    /// ground, clear of the escorts it was marching with.
+    static let bomberBreakDistance = 6
+    // Squad shapes and makeup are authored in Enemy.swift as `Formation.all`.
+    /// Minimum turns between the boss's summon intents, so a retinue thinned by
+    /// friendly fire and the player's blasts doesn't retrigger a summon every
+    /// single turn (the cap limits how many, this limits how often).
+    static let bossSummonInterval = 2
 
     /// Score needed to reach a level: 100 for level 2, 300 for 3, 600 for 4…
     /// (Tetris-style widening gaps).
@@ -896,6 +190,14 @@ struct GameState {
     private(set) var tilesMoved = 0
     /// Attacks dodged this run.
     private(set) var dodgesMade = 0
+    /// Enemies struck by the player's weapon this resolve (for focus tracking).
+    private var struckByPlayerThisTurn: Set<Int> = []
+    /// The enemy the player has been hitting on consecutive turns, and for how
+    /// many turns running.
+    private var focusTargetID: Int?
+    private var focusHitRun = 0
+    /// Times the player has hit the same enemy 3 turns running this run.
+    private(set) var focusStreaks = 0
     /// Turns with three or more kills this run.
     private(set) var comboTurns = 0
     /// Times the kill streak climbed to ×3 this run.
@@ -909,6 +211,7 @@ struct GameState {
         tallies["Dodges"] = dodgesMade
         tallies["ComboTurns"] = comboTurns
         tallies["Streaks"] = streakPeaks
+        tallies["Focus"] = focusStreaks
         return tallies
     }
     // Run-long tallies for the death recap.
@@ -934,6 +237,21 @@ struct GameState {
     /// Spawn tiles the boss called in this resolve via its summon intent;
     /// they telegraph next turn like any reinforcement, skipping wave cadence.
     private var queuedBossSummons: [GridPosition] = []
+    /// Tiles where the boss's barrage will drop explosive barrels this resolve;
+    /// telegraphed next turn like any barrel delivery, skipping wave cadence.
+    private var queuedBossBarrels: [GridPosition] = []
+    /// Pending barrel tiles that came from a boss barrage — marked volatile
+    /// (drawn red) once they land.
+    private var primedBarrelTiles: Set<GridPosition> = []
+    /// Turn the boss last committed a summon intent; gates the summon cadence.
+    private var lastBossSummonTurn = -100
+    /// Ordinary waves owed silence after a formation marched in — a squad buys
+    /// a lull rather than stacking on top of the normal trickle.
+    private var spawnDebt = 0
+    /// The advancing anchor each live squad marches from; members hold their
+    /// slot relative to it until the squad breaks. Keyed by formation id.
+    private var formationAnchors: [Int: GridPosition] = [:]
+    private var nextFormationID = 0
     /// Boon options awaiting the player's pick after a level-up; planning is
     /// paused while this is non-empty.
     private(set) var pendingBuffChoices: [Buff] = []
@@ -998,6 +316,39 @@ struct GameState {
     /// True when the drafted attack is the reload-jab rather than the weapon's
     /// real attack.
     private(set) var plannedBash = false
+
+    /// A bleed or poison riding on the player; ticks at the end of each turn.
+    private(set) var playerAffliction: ActiveAffliction?
+
+    /// Sticks a weapon's damage-over-time to every survivor of a strike.
+    private mutating func afflict(
+        _ hits: [TurnResolution.EnemyHit],
+        with affliction: Weapon.Affliction?,
+        chargesUltimate: Bool,
+        credit: String?
+    ) {
+        guard let affliction else { return }
+        for hit in hits where !hit.died {
+            guard let index = enemies.firstIndex(where: { $0.id == hit.enemyID }) else { continue }
+            enemies[index].affliction = ActiveAffliction(
+                damagePerTurn: affliction.damagePerTurn,
+                turnsRemaining: affliction.duration,
+                chargesUltimate: chargesUltimate,
+                credit: credit
+            )
+        }
+    }
+
+    /// Sticks a weapon's damage-over-time to the player.
+    private mutating func afflictPlayer(with affliction: Weapon.Affliction?) {
+        guard let affliction, !isGameOver else { return }
+        playerAffliction = ActiveAffliction(
+            damagePerTurn: affliction.damagePerTurn,
+            turnsRemaining: affliction.duration,
+            chargesUltimate: false,
+            credit: nil
+        )
+    }
 
     /// True when the current draft earns the dodge: no attack or throw drafted,
     /// no weapon pickup, and a move of at least dodgeDistance tiles.
@@ -1249,21 +600,26 @@ struct GameState {
     /// it isn't attacking. Used to telegraph threats while planning.
     func threatTiles(of enemy: Enemy) -> [GridPosition] {
         if enemy.archetype == .bomber {
-            guard enemy.fuse != nil else { return [] }
+            // Its blast is worth previewing even before it arms, so hovering an
+            // unarmed bomber shows the radius rather than an irrelevant dagger jab.
             return blastTiles(around: enemy.position, radius: Self.bomberBlastRadius, includeCenter: true)
         }
         if let target = enemy.plannedThrowTarget, let thrown = enemy.weapon.thrown {
             return blastTiles(around: target, radius: thrown.blastRadius, includeCenter: true)
         }
         // The boss's nova rings its destination; a volley adds the cannon's
-        // line to the primary sweep. A summon threatens no tiles directly —
-        // the called recruits telegraph as spawns once cast.
+        // line to the primary sweep. A summon or barrage threatens no tiles
+        // directly — the recruits and barrels telegraph as spawns once cast.
         if enemy.archetype == .boss, let intent = enemy.plannedIntent {
             let origin = enemy.plannedTarget ?? enemy.position
             switch intent {
             case .nova:
-                return blastTiles(around: origin, radius: Self.bossNovaRadius)
-            case .summon:
+                return blastTiles(around: origin, radius: BossConfig.forLevel(level).novaRadius)
+            case .detonate:
+                // Show the full chain the boss is about to set off so it can be
+                // walked out of.
+                return enemy.plannedDetonateTile.map { barrelChainBlast(from: $0) } ?? []
+            case .summon, .barrage:
                 return []
             case .volley:
                 var blockers = Set(enemies.filter { $0.id != enemy.id }.map(\.position))
@@ -1298,7 +654,10 @@ struct GameState {
     /// orthogonal steps (a diamond, no diagonals), including the current tile
     /// (planning to stay) but excluding tiles occupied by enemies or obstacles.
     func legalMoveTargets() -> Set<GridPosition> {
-        let occupied = Set(enemies.map(\.position)).union(obstacles.map(\.position))
+        // Enemies drafted to move off their tile don't block it — you can slip
+        // into the space they're vacating (they'll have stepped away by the
+        // time you land, and are shoved aside if their own move gets blocked).
+        let occupied = Set(enemies.filter { !$0.isVacating }.map(\.position)).union(obstacles.map(\.position))
         var targets: Set<GridPosition> = []
         for dx in -moveRange...moveRange {
             let remaining = moveRange - abs(dx)
@@ -1467,6 +826,7 @@ struct GameState {
         tilesMoved += playerStart.distance(to: playerPosition)
         plannedTarget = nil
         killsThisTurn = 0
+        struckByPlayerThisTurn = []
         pendingExplosions = []
 
         // A drafted pickup swaps the weapon underfoot (at the tile the player is
@@ -1494,8 +854,17 @@ struct GameState {
 
         // Enemy weapon cooldowns tick at the start of the turn, so a fresh shot
         // still reads at its full value on the hover display while planning.
-        for index in enemies.indices where enemies[index].cooldownRemaining > 0 {
-            enemies[index].cooldownRemaining -= 1
+        for index in enemies.indices {
+            if enemies[index].cooldownRemaining > 0 {
+                enemies[index].cooldownRemaining -= 1
+            }
+            if enemies[index].secondaryCooldownRemaining > 0 {
+                enemies[index].secondaryCooldownRemaining -= 1
+            }
+            // A parried shield stays down a turn before it comes back up.
+            if enemies[index].shieldCooldown > 0 {
+                enemies[index].shieldCooldown -= 1
+            }
         }
 
         let healthBefore = playerHealth
@@ -1551,13 +920,15 @@ struct GameState {
             let blocked = tile == playerPosition
                 || enemies.contains { $0.position == tile }
                 || obstacle(at: tile) != nil
+                || weaponDrops.contains { $0.position == tile }
             if !blocked {
-                obstacles.append(Obstacle(id: nextObstacleID, kind: .barrel, position: tile))
+                obstacles.append(Obstacle(id: nextObstacleID, kind: .barrel, position: tile, volatile: primedBarrelTiles.contains(tile)))
                 nextObstacleID += 1
                 barrelSpawns.append(tile)
             }
         }
         pendingBarrelSpawns = []
+        primedBarrelTiles = []
 
         var spawns: [TurnResolution.SpawnEvent] = []
         for arrival in pendingArrivals {
@@ -1596,6 +967,19 @@ struct GameState {
                     .union([playerPosition])
                 if !contains(to) || occupied.contains(to) {
                     to = from
+                }
+            }
+            // The player stepped onto the tile this enemy is leaving, but its own
+            // move got blocked — it can't share the tile, so it's shoved to any
+            // free neighbour (staying put only if truly boxed in).
+            if to == from && from == playerPosition {
+                let occupied = Set(enemies.filter { $0.id != enemyID }.map(\.position))
+                    .union(obstacles.map(\.position))
+                    .union([playerPosition])
+                let step = [GridPosition(x: from.x + 1, y: from.y), GridPosition(x: from.x - 1, y: from.y),
+                            GridPosition(x: from.x, y: from.y + 1), GridPosition(x: from.x, y: from.y - 1)]
+                if let free = step.first(where: { contains($0) && !occupied.contains($0) }) {
+                    to = free
                 }
             }
             enemies[index].position = to
@@ -1648,7 +1032,7 @@ struct GameState {
                         bolts.remove(at: boltIndex)
                     } else {
                         pendingExplosions.append(TurnResolution.Explosion(center: bolt.position, tiles: [bolt.position]))
-                        crossingHits += damageEnemies(on: [to], damage: bolt.damage, chargesUltimate: bolt.chargesUltimate, credit: bolt.creditName)
+                        crossingHits += damageEnemies(on: [to], damage: bolt.damage, chargesUltimate: bolt.chargesUltimate, credit: bolt.creditName, travelling: bolt.direction)
                         if !bolt.pierces {
                             bolts.remove(at: boltIndex)
                         }
@@ -1671,10 +1055,16 @@ struct GameState {
             let blast = blastTiles(around: shell.target, radius: shell.blastRadius, includeCenter: true)
             let blastSet = Set(blast)
             projectileImpacts.append(TurnResolution.Explosion(center: shell.target, tiles: blast))
-            projectileHits += damageEnemies(on: blastSet, damage: shell.damage, chargesUltimate: shell.chargesUltimate, credit: shell.creditName)
+            let landingHits = damageEnemies(on: blastSet, damage: shell.damage, chargesUltimate: shell.chargesUltimate, credit: shell.creditName)
+            afflict(landingHits, with: shell.affliction, chargesUltimate: shell.chargesUltimate, credit: shell.creditName)
+            if shell.creditName != nil {
+                struckByPlayerThisTurn.formUnion(landingHits.map(\.enemyID))
+            }
+            projectileHits += landingHits
             if !isGameOver && blastSet.contains(playerPosition) {
                 let reduction = buffs.reduce(0) { $0 + $1.rangedDamageReduction }
                 applyDamage(max(0, shell.damage - reduction), from: shell.sourceName)
+                afflictPlayer(with: shell.affliction)
             }
             let chained = detonateBarrels(struckTiles: blastSet, chargesUltimate: shell.chargesUltimate)
             projectileImpacts += chained.explosions
@@ -1740,7 +1130,8 @@ struct GameState {
                     lingering: equippedWeapon.lingering,
                     chargesUltimate: true,
                     sourceName: "your own \(equippedWeapon.name)",
-                    creditName: equippedWeapon.name
+                    creditName: equippedWeapon.name,
+                    affliction: equippedWeapon.affliction
                 )
                 nextProjectileID += 1
                 if let survivor = fly(shot, impacts: &projectileImpacts, hits: &projectileHits, flights: &boltFlights) {
@@ -1770,7 +1161,8 @@ struct GameState {
                     totalFlightTurns: thrown.flightTurns,
                     turnsUntilImpact: thrown.flightTurns,
                     sourceName: "your own \(equippedWeapon.name)",
-                    creditName: equippedWeapon.name
+                    creditName: equippedWeapon.name,
+                    affliction: equippedWeapon.affliction
                 ))
                 nextProjectileID += 1
             } else {
@@ -1780,7 +1172,16 @@ struct GameState {
         if didAttack && !attackTiles.isEmpty {
             let struck = Set(attackTiles)
             let strikeDamage = bashing ? Self.bashDamage : attackDamage
-            playerPhaseHits += damageEnemies(on: struck, damage: strikeDamage, credit: bashing ? nil : equippedWeapon.name)
+            // A directional swing can be parried from the front and rewards a
+            // backstab; a thrown blast or a radial swing (greataxe/hammer/scythe)
+            // carries no meaningful facing, so it slips past the shield and
+            // triggers no backstab — it's area damage, not a pointed strike.
+            let radial = equippedWeapon.attackPattern?.isRadial ?? false
+            let facing = (equippedWeapon.thrown == nil && !radial) ? plannedAttackDirection : nil
+            let sweepHits = damageEnemies(on: struck, damage: strikeDamage, credit: bashing ? nil : equippedWeapon.name, travelling: facing)
+            afflict(sweepHits, with: bashing ? nil : equippedWeapon.affliction, chargesUltimate: true, credit: equippedWeapon.name)
+            struckByPlayerThisTurn.formUnion(sweepHits.map(\.enemyID))
+            playerPhaseHits += sweepHits
             // A lobbed blast has no friendly immunity: catch yourself, hurt yourself.
             if equippedWeapon.thrown != nil && !bashing && !isGameOver && struck.contains(playerPosition) {
                 applyDamage(attackDamage, from: "your own \(equippedWeapon.name)")
@@ -1840,14 +1241,24 @@ struct GameState {
             enemies[attackerIndex].plannedSecondaryDirection = nil
             switch attacker.plannedIntent {
             case .volley:
-                enemies[attackerIndex].cooldownRemaining = max(attacker.weapon.cooldown, attacker.secondaryWeapon?.cooldown ?? 0)
+                // Only the weapons that actually fired go on cooldown, each on
+                // its own clock — so nova and volley can alternate.
+                if attacker.plannedDirection != nil {
+                    enemies[attackerIndex].cooldownRemaining = attacker.weapon.cooldown
+                }
+                if attacker.plannedSecondaryDirection != nil {
+                    enemies[attackerIndex].secondaryCooldownRemaining = attacker.secondaryWeapon?.cooldown ?? 0
+                }
             case .nova:
-                enemies[attackerIndex].cooldownRemaining = attacker.secondaryWeapon?.cooldown ?? attacker.weapon.cooldown
-            case .summon:
-                enemies[attackerIndex].cooldownRemaining = 1
+                enemies[attackerIndex].secondaryCooldownRemaining = attacker.secondaryWeapon?.cooldown ?? attacker.weapon.cooldown
+            case .summon, .barrage, .detonate:
+                // Abilities don't spend a weapon's reload; their own gates
+                // (summon cadence, barrel cap, a live red barrel) pace them.
+                break
             case nil:
                 enemies[attackerIndex].cooldownRemaining = attacker.weapon.cooldown
             }
+            enemies[attackerIndex].plannedDetonateTile = nil
 
             if attacker.plannedIntent == .summon {
                 // The boss spends its action calling recruits to its side; they
@@ -1859,7 +1270,28 @@ struct GameState {
                 let ring = blastTiles(around: attacker.position, radius: 2).filter {
                     !taken.contains($0) && $0.distance(to: playerPosition) > 1
                 }
-                queuedBossSummons = Array(ring.shuffled().prefix(Self.bossIntentSummonCount))
+                queuedBossSummons = Array(ring.shuffled().prefix(BossConfig.forLevel(level).bossSummonCount))
+                lastBossSummonTurn = turnNumber
+                continue
+            }
+
+            if attacker.plannedIntent == .barrage {
+                // The boss hurls a cluster of live barrels to rain down 1–3
+                // tiles from the player: telegraphed like any barrel delivery,
+                // and set off later with a detonate intent — reintroducing the
+                // board hazards a boss fight otherwise strips away.
+                queuedBossBarrels = Array(barrageTiles().shuffled().prefix(BossConfig.forLevel(level).bossBarrageCount))
+                continue
+            }
+
+            if attacker.plannedIntent == .detonate {
+                // The boss sets off a barrel it primed earlier; the chain runs
+                // through detonateBarrels just like a player-lit blast.
+                if let target = attacker.plannedDetonateTile {
+                    let blast = detonateBarrels(struckTiles: [target], chargesUltimate: false)
+                    enemyExplosions += blast.explosions
+                    friendlyFireHits += blast.hits
+                }
                 continue
             }
 
@@ -1875,7 +1307,7 @@ struct GameState {
             if attacker.plannedIntent == .nova {
                 // The cannon swept in a circle: everything around the boss
                 // takes a shell, its own tile spared.
-                tiles = blastTiles(around: attacker.position, radius: Self.bossNovaRadius)
+                tiles = blastTiles(around: attacker.position, radius: BossConfig.forLevel(level).novaRadius)
             } else if let direction = attacker.plannedDirection, let pattern = attacker.weapon.attackPattern {
                 if let speed = attacker.weapon.projectileSpeed {
                     // The shot becomes a traveling bolt, flying its first window
@@ -1892,7 +1324,8 @@ struct GameState {
                         lingering: attacker.weapon.lingering,
                         chargesUltimate: false,
                         sourceName: attacker.slayerName,
-                        creditName: nil
+                        creditName: nil,
+                        affliction: attacker.weapon.affliction
                     )
                     nextProjectileID += 1
                     if let survivor = fly(shot, impacts: &projectileImpacts, hits: &projectileHits, flights: &boltFlights) {
@@ -1917,7 +1350,8 @@ struct GameState {
                         totalFlightTurns: thrown.flightTurns,
                         turnsUntilImpact: thrown.flightTurns,
                         sourceName: attacker.slayerName,
-                        creditName: nil
+                        creditName: nil,
+                        affliction: attacker.weapon.affliction
                     ))
                     nextProjectileID += 1
                     // tiles stays empty: nothing swept this turn.
@@ -1947,7 +1381,8 @@ struct GameState {
                     lingering: cannon.lingering,
                     chargesUltimate: false,
                     sourceName: "the gatekeeper's cannon",
-                    creditName: nil
+                    creditName: nil,
+                    affliction: cannon.affliction
                 )
                 nextProjectileID += 1
                 if let survivor = fly(shell, impacts: &projectileImpacts, hits: &projectileHits, flights: &boltFlights) {
@@ -1973,6 +1408,7 @@ struct GameState {
                     ? "the boss's cannon nova"
                     : attacker.slayerName
                 applyDamage(max(0, attackDamage - reduction), from: killer)
+                afflictPlayer(with: strikingWeapon.affliction)
             }
             // Friendly fire: comrades in the sweep take the hit; a thrower caught
             // in its own blast does too.
@@ -1980,7 +1416,9 @@ struct GameState {
             if !throwerIncluded {
                 struckEnemies.remove(attacker.position)
             }
-            friendlyFireHits += damageEnemies(on: struckEnemies, damage: attackDamage, chargesUltimate: false)
+            let comradeHits = damageEnemies(on: struckEnemies, damage: attackDamage, chargesUltimate: false)
+            afflict(comradeHits, with: strikingWeapon.affliction, chargesUltimate: false, credit: nil)
+            friendlyFireHits += comradeHits
             let blast = detonateBarrels(struckTiles: struck, chargesUltimate: false)
             enemyExplosions += blast.explosions
             friendlyFireHits += blast.hits
@@ -2015,6 +1453,38 @@ struct GameState {
         }
         lingeringEffects.removeAll { $0.turnsRemaining <= 0 }
 
+        // Wounds fester: afflicted survivors bleed at the end of the turn,
+        // wherever they've run to. Fresh wounds skip their first tick.
+        for enemyID in enemies.map(\.id) {
+            guard let index = enemies.firstIndex(where: { $0.id == enemyID }),
+                  var wound = enemies[index].affliction else { continue }
+            if wound.fresh {
+                wound.fresh = false
+                enemies[index].affliction = wound
+                continue
+            }
+            wound.turnsRemaining -= 1
+            enemies[index].affliction = wound.turnsRemaining > 0 ? wound : nil
+            hazardHits += damageEnemies(
+                on: [enemies[index].position],
+                damage: wound.damagePerTurn,
+                chargesUltimate: wound.chargesUltimate,
+                credit: wound.credit
+            )
+        }
+        if var wound = playerAffliction {
+            if wound.fresh {
+                wound.fresh = false
+                playerAffliction = wound
+            } else {
+                if !isGameOver {
+                    applyDamage(wound.damagePerTurn, from: "a festering wound")
+                }
+                wound.turnsRemaining -= 1
+                playerAffliction = wound.turnsRemaining > 0 ? wound : nil
+            }
+        }
+
         let tookDamage = playerHealth < healthBefore || playerArmor < armorBefore
         if tookDamage {
             undamagedTurns = 0
@@ -2043,9 +1513,24 @@ struct GameState {
         if killStreak == 3 {
             streakPeaks += 1
         }
+        // Focus: a weapon hit on the same enemy on consecutive turns. Three
+        // running scores one and the count restarts (the target keeps its mark).
+        if let target = focusTargetID, struckByPlayerThisTurn.contains(target) {
+            focusHitRun += 1
+        } else if let fresh = struckByPlayerThisTurn.min() {
+            focusTargetID = fresh
+            focusHitRun = 1
+        } else {
+            focusTargetID = nil
+            focusHitRun = 0
+        }
+        if focusHitRun >= 3 {
+            focusStreaks += 1
+            focusHitRun = 0
+        }
 
         turnNumber += 1
-        if !isGameOver && !bossPhase {
+        if !isGameOver && !bossPhase && !devFreezeScore {
             score += Self.survivalScore
         }
 
@@ -2058,7 +1543,7 @@ struct GameState {
             advanceLevel()
             leveledUpTo = level
         } else {
-            if !isGameOver && score >= milestone && !bossPhase && !bossDefeatedThisLevel {
+            if !isGameOver && score >= milestone && !bossPhase && !bossDefeatedThisLevel && !devNoElites {
                 summonElite(into: &spawns)
             }
             scheduleSpawns()
@@ -2098,16 +1583,26 @@ struct GameState {
 
     /// Damages every enemy standing on the given tiles and removes the dead.
     /// Returns the hits for animation.
-    private mutating func damageEnemies(on tiles: Set<GridPosition>, damage: Int, chargesUltimate: Bool = true, credit: String? = nil) -> [TurnResolution.EnemyHit] {
+    private mutating func damageEnemies(on tiles: Set<GridPosition>, damage: Int, chargesUltimate: Bool = true, credit: String? = nil, travelling direction: Direction? = nil) -> [TurnResolution.EnemyHit] {
         var hits: [TurnResolution.EnemyHit] = []
         var diedBomberPositions: [GridPosition] = []
         for index in enemies.indices where tiles.contains(enemies[index].position) {
-            enemies[index].health -= damage
+            // A shieldbearer parries a blow driven into its front: no damage,
+            // and the shield drops for a turn (shieldCooldown) so it can't block
+            // again immediately.
+            if enemies[index].parries(direction) {
+                enemies[index].shieldCooldown = 2
+                hits.append(TurnResolution.EnemyHit(enemyID: enemies[index].id, healthAfter: enemies[index].health, died: false, blocked: true))
+                continue
+            }
+            // Struck in the exposed back: extra damage.
+            let dealt = damage + (enemies[index].struckFromBehind(direction) ? Self.shieldbearerBackstabBonus : 0)
+            enemies[index].health -= dealt
             let died = enemies[index].health <= 0
             if died {
                 let isElite = enemies[index].archetype == .juggernaut || enemies[index].archetype == .boss
                 // Score is frozen during the boss fight — except the gate itself.
-                if !bossPhase || isElite {
+                if (!bossPhase || isElite) && !devFreezeScore {
                     // Kills escalate within a turn and ride the multi-turn streak.
                     score += enemies[index].bounty
                         + Self.comboKillBonus * killsThisTurn
@@ -2216,6 +1711,12 @@ struct GameState {
         bossPhase = false
         bossDefeatedThisLevel = false
         queuedBossSummons = []
+        queuedBossBarrels = []
+        primedBarrelTiles = []
+        lastBossSummonTurn = -100
+        spawnDebt = 0
+        formationAnchors = [:]
+        playerAffliction = nil
 
         var fresh: [Enemy] = []
         for tile in edgeTiles().shuffled() where fresh.count < config.startingEnemies {
@@ -2296,7 +1797,7 @@ struct GameState {
         guard let tile = edgeTiles().shuffled().first(where: {
             !taken.contains($0) && $0.distance(to: playerPosition) > 3
         }) else { return }
-        let elite = Enemy.elite(archetype, id: nextEnemyID, at: tile)
+        let elite = Enemy.elite(archetype, id: nextEnemyID, at: tile, config: BossConfig.forLevel(level))
         nextEnemyID += 1
         enemies.append(elite)
         spawns.append(TurnResolution.SpawnEvent(position: tile, enemyID: elite.id))
@@ -2314,21 +1815,28 @@ struct GameState {
     private mutating func scheduleSpawns() {
         pendingArrivals = []
         pendingBarrelSpawns = []
-        // A drafted boss summon overrides the wave cadence: the called recruits
-        // telegraph immediately.
-        if !queuedBossSummons.isEmpty {
+        // A drafted boss summon or barrage overrides the wave cadence: the
+        // called recruits and lobbed barrels telegraph immediately.
+        if !queuedBossSummons.isEmpty || !queuedBossBarrels.isEmpty {
             pendingArrivals = queuedBossSummons.map { rollArrival(at: $0) }
+            pendingBarrelSpawns = queuedBossBarrels
+            primedBarrelTiles = Set(queuedBossBarrels)
             queuedBossSummons = []
+            queuedBossBarrels = []
             return
         }
         let config = LevelConfig.forLevel(level)
         guard turnNumber % config.spawnInterval == 0 else { return }
 
         // During an elite fight, ordinary waves and barrel deliveries stop. The
-        // juggernaut summons recruits on nearby open ground each wave; the boss
-        // proper only summons by drafting its summon intent.
+        // juggernaut summons recruits on nearby open ground each wave — but only
+        // up to the retinue cap, so it can't flood the board; the boss proper
+        // only summons by drafting its summon intent.
         if bossPhase {
             guard let elite = enemies.first(where: { $0.archetype == .juggernaut }) else { return }
+            let boss = BossConfig.forLevel(level)
+            let retinue = enemies.filter { $0.archetype != .juggernaut && $0.archetype != .boss }.count
+            guard retinue < boss.retinueCap else { return }
             let taken = Set(enemies.map(\.position))
                 .union(obstacles.map(\.position))
                 .union(lingeringEffects.map(\.position))
@@ -2336,8 +1844,32 @@ struct GameState {
             let ring = blastTiles(around: elite.position, radius: 2).filter {
                 !taken.contains($0) && $0.distance(to: playerPosition) > 1
             }
-            pendingArrivals = ring.shuffled().prefix(Self.bossSummonCount).map { rollArrival(at: $0) }
+            pendingArrivals = ring.shuffled().prefix(boss.juggernautSummonCount).map { rollArrival(at: $0) }
             return
+        }
+
+        // Dev override forces this wave's makeup and skips the usual roll.
+        if let override = devSpawnOverride {
+            applyDevSpawn(override)
+            return
+        }
+
+        // A formation just marched in: this wave (and a few after) stays quiet
+        // so the squad is a net gain, not free extra bodies on top of the trickle.
+        if spawnDebt > 0 {
+            spawnDebt -= 1
+            return
+        }
+
+        // Every so often (from level 2) a whole squad arrives together in a
+        // shaped formation instead of the usual trickle; it then quiets the next
+        // few waves by a fraction of its size.
+        if level >= 2 && Int.random(in: 0..<100) < Self.formationChance {
+            let count = spawnFormation()
+            if count > 0 {
+                spawnDebt = Int((Double(count) * Self.formationSpawnDebtFactor).rounded())
+                return
+            }
         }
 
         let taken = Set(enemies.map(\.position))
@@ -2349,12 +1881,14 @@ struct GameState {
         pendingArrivals = candidates.shuffled().prefix(config.spawnBatch).map { rollArrival(at: $0) }
 
         guard obstacles.filter({ $0.kind == .barrel }).count < Self.barrelSpawnCap else { return }
+        let drops = Set(weaponDrops.map(\.position))
         var open: [GridPosition] = []
         for x in 0..<columns {
             for y in 0..<rows {
                 let tile = GridPosition(x: x, y: y)
                 if !taken.contains(tile)
                     && !pendingSpawns.contains(tile)
+                    && !drops.contains(tile)
                     && tile.distance(to: playerPosition) > 2 {
                     open.append(tile)
                 }
@@ -2363,6 +1897,75 @@ struct GameState {
         if let drop = open.randomElement() {
             pendingBarrelSpawns = [drop]
         }
+    }
+
+    /// Telegraphs a shaped squad marching in from a random edge: an anchor tile
+    /// plus the formation's rotated offsets, dropping any that fall off-board or
+    /// onto taken ground. Returns how many actually got placed.
+    private mutating func spawnFormation(_ forced: Formation? = nil) -> Int {
+        let taken = Set(enemies.map(\.position))
+            .union(obstacles.map(\.position))
+            .union(lingeringEffects.map(\.position))
+        let anchorPool = edgeTiles()
+            .filter { !taken.contains($0) && $0.distance(to: playerPosition) > 3 }
+            .shuffled()
+        guard let formation = forced ?? Formation.all.randomElement() else { return 0 }
+
+        // Every slot that fits from a given anchor, with its rotated offset.
+        func placement(at anchor: GridPosition) -> [(tile: GridPosition, offset: GridPosition, slot: Formation.Slot)] {
+            let inward = inwardDirection(from: anchor)
+            var used = taken
+            var out: [(GridPosition, GridPosition, Formation.Slot)] = []
+            for slot in formation.slots {
+                let rotated = inward.rotated(slot.offset)
+                let tile = GridPosition(x: anchor.x + rotated.x, y: anchor.y + rotated.y)
+                guard contains(tile), !used.contains(tile), tile.distance(to: playerPosition) > 2 else { continue }
+                used.insert(tile)
+                out.append((tile, rotated, slot))
+            }
+            return out
+        }
+
+        // Prefer an anchor where the whole squad fits; else the fullest partial,
+        // so a wall-crowded edge doesn't quietly cook members off the formation.
+        var anchor: GridPosition?
+        var chosen: [(tile: GridPosition, offset: GridPosition, slot: Formation.Slot)] = []
+        for candidate in anchorPool.prefix(12) {
+            let fit = placement(at: candidate)
+            if fit.count == formation.slots.count { anchor = candidate; chosen = fit; break }
+            if fit.count > chosen.count { anchor = candidate; chosen = fit }
+        }
+        guard let anchor, !chosen.isEmpty else { return 0 }
+
+        let fid = nextFormationID
+        var arrivals: [Enemy] = []
+        for entry in chosen {
+            var recruit = Enemy.recruit(entry.slot.archetype, weaponClass: entry.slot.weaponClass, id: nextEnemyID, at: entry.tile, armory: weaponPool)
+            // Everyone marches in as a cohesive squad — bombers included, but they
+            // peel off early (see draftEnemyPlans) so they don't blow up the line.
+            recruit.formationID = fid
+            recruit.formationOffset = entry.offset
+            arrivals.append(recruit)
+            nextEnemyID += 1
+        }
+        // A squad needs at least two to hold formation; a lone soldier just charges.
+        if arrivals.filter({ $0.formationID == fid }).count >= 2 {
+            formationAnchors[fid] = anchor
+            nextFormationID += 1
+        } else {
+            for index in arrivals.indices { arrivals[index].formationID = nil }
+        }
+        pendingArrivals = arrivals
+        return arrivals.count
+    }
+
+    /// The way a squad standing on an edge tile should march to reach the board:
+    /// toward the centre.
+    private func inwardDirection(from tile: GridPosition) -> Direction {
+        if tile.x == 0 { return .right }
+        if tile.x == columns - 1 { return .left }
+        if tile.y == 0 { return .up }
+        return .down
     }
 
     /// Every few turns a random weapon appears on an open tile (up to a cap),
@@ -2459,8 +2062,14 @@ struct GameState {
                     if next == playerPosition {
                         let reduction = buffs.reduce(0) { $0 + $1.rangedDamageReduction }
                         applyDamage(max(0, bolt.damage - reduction), from: bolt.sourceName)
+                        afflictPlayer(with: bolt.affliction)
                     } else {
-                        hits += damageEnemies(on: [next], damage: bolt.damage, chargesUltimate: bolt.chargesUltimate, credit: bolt.creditName)
+                        let strike = damageEnemies(on: [next], damage: bolt.damage, chargesUltimate: bolt.chargesUltimate, credit: bolt.creditName, travelling: bolt.direction)
+                        afflict(strike, with: bolt.affliction, chargesUltimate: bolt.chargesUltimate, credit: bolt.creditName)
+                        if bolt.creditName != nil {
+                            struckByPlayerThisTurn.formUnion(strike.map(\.enemyID))
+                        }
+                        hits += strike
                     }
                     impacts.append(TurnResolution.Explosion(center: next, tiles: [next]))
                     if !bolt.pierces {
@@ -2477,10 +2086,16 @@ struct GameState {
             let blast = blastTiles(around: bolt.position, radius: bolt.impactBlastRadius, includeCenter: true)
             let blastSet = Set(blast)
             impacts.append(TurnResolution.Explosion(center: bolt.position, tiles: blast))
-            hits += damageEnemies(on: blastSet, damage: bolt.damage, chargesUltimate: bolt.chargesUltimate, credit: bolt.creditName)
+            let blastHits = damageEnemies(on: blastSet, damage: bolt.damage, chargesUltimate: bolt.chargesUltimate, credit: bolt.creditName)
+            afflict(blastHits, with: bolt.affliction, chargesUltimate: bolt.chargesUltimate, credit: bolt.creditName)
+            if bolt.creditName != nil {
+                struckByPlayerThisTurn.formUnion(blastHits.map(\.enemyID))
+            }
+            hits += blastHits
             if !isGameOver && blastSet.contains(playerPosition) {
                 let reduction = buffs.reduce(0) { $0 + $1.rangedDamageReduction }
                 applyDamage(max(0, bolt.damage - reduction), from: bolt.sourceName)
+                afflictPlayer(with: bolt.affliction)
             }
             let chained = detonateBarrels(struckTiles: blastSet, chargesUltimate: bolt.chargesUltimate)
             impacts += chained.explosions
@@ -2558,6 +2173,40 @@ struct GameState {
 
     /// While true the player ignores all damage.
     var devInvincible = false
+    /// Dev: suppresses gameplay score gains (kills, survival) so clearing the
+    /// board while testing doesn't trip the elite-gate milestone. Explicit dev
+    /// score bumps still apply.
+    var devFreezeScore = false
+    /// Dev: while true, the score milestone never summons a juggernaut or boss.
+    var devNoElites = false
+
+    /// Dev-panel override for the next wave. When non-nil, `scheduleSpawns`
+    /// forces this on wave turns; nil restores the standard spawn logic.
+    enum DevSpawnOverride: Equatable {
+        /// Force a shaped squad; nil index picks a random formation.
+        case formation(index: Int?)
+        /// Force a single enemy; nil archetype/weapon means "roll it normally".
+        case single(archetype: Archetype?, weapon: Weapon?)
+    }
+    var devSpawnOverride: DevSpawnOverride?
+
+    /// Applies a dev spawn override through the normal telegraph pipeline.
+    private mutating func applyDevSpawn(_ override: DevSpawnOverride) {
+        switch override {
+        case .formation(let index):
+            let forced = index.flatMap { Formation.all.indices.contains($0) ? Formation.all[$0] : nil }
+            _ = spawnFormation(forced)
+        case .single(let archetype, let weapon):
+            let taken = Set(enemies.map(\.position))
+                .union(obstacles.map(\.position))
+                .union(lingeringEffects.map(\.position))
+            guard let tile = edgeTiles().filter({
+                !taken.contains($0) && $0.distance(to: playerPosition) > 3
+            }).randomElement() else { return }
+            pendingArrivals = [Enemy.devSpawn(archetype: archetype, weapon: weapon, id: nextEnemyID, at: tile, armory: weaponPool)]
+            nextEnemyID += 1
+        }
+    }
 
     mutating func devSetUltimateCharge(_ value: Int) {
         ultimateKillCharge = max(0, min(Self.ultimateChargeKills, value))
@@ -2602,12 +2251,53 @@ struct GameState {
             .union(bomberThreatTiles)
             // The tile a bolt is sitting on: walking through it is a collision.
             .union(bolts.map(\.position))
+        // Slow arcing lobs specifically — the only telegraphed danger enemies
+        // will gamble on (see the greedy fallback below). Bolts and bomber
+        // blasts are not in here, so they stay strictly avoided.
+        let lobZones = Set(projectiles.flatMap {
+            blastTiles(around: $0.target, radius: $0.blastRadius, includeCenter: true)
+        })
         var claimed = Set(enemies.map(\.position))
             .union(obstacles.map(\.position))
             .union(hazardTiles)
             .union(incomingTiles)
             .union([playerPosition])
-        for index in enemies.indices {
+
+        // Advance each live squad's anchor one tile toward the player, and
+        // disband any that have closed in (or been whittled below two) so their
+        // members break ranks and engage individually this very turn. Members
+        // still inbound this turn count too, so a freshly drafted squad isn't
+        // disbanded before it even lands; and the anchor only marches once the
+        // squad is actually on the board.
+        for (fid, anchor) in formationAnchors {
+            let live = enemies.filter { $0.formationID == fid }
+            let inbound = pendingArrivals.filter { $0.formationID == fid }.count
+            // Bombers peel off on their own (below), so a forward bomber doesn't
+            // drag the whole squad's break early — measure from the others.
+            let nearest = live.filter { $0.archetype != .bomber }
+                .map { $0.position.distance(to: playerPosition) }.min() ?? Int.max
+            if live.count + inbound < 2
+                || anchor.distance(to: playerPosition) <= Self.formationBreakDistance
+                || nearest <= Self.formationBreakDistance {
+                for index in enemies.indices where enemies[index].formationID == fid {
+                    enemies[index].formationID = nil
+                }
+                formationAnchors[fid] = nil
+            } else if !live.isEmpty {
+                // Route the anchor around scenery — marching it straight through
+                // walls would drag members' slots onto tiles they can't reach and
+                // shred the squad against the wall.
+                formationAnchors[fid] = stepToward(playerPosition, from: anchor, avoiding: Set(obstacles.map(\.position)))
+            }
+        }
+
+        // Front-liners plan first so they vacate their tiles before the enemies
+        // behind them draft — letting a column flow forward instead of jamming
+        // up behind the leader (each mover frees its old tile from `claimed`).
+        let draftOrder = enemies.indices.sorted {
+            enemies[$0].position.distance(to: playerPosition) < enemies[$1].position.distance(to: playerPosition)
+        }
+        for index in draftOrder {
             let enemy = enemies[index]
             let ready = enemy.cooldownRemaining == 0
             // Fearless archetypes (berserkers, bombers) path straight through
@@ -2616,6 +2306,50 @@ struct GameState {
             let avoid = fearless
                 ? claimed.subtracting(hazardTiles).subtracting(incomingTiles)
                 : claimed
+
+            // Formation cohesion comes first: a member holds its slot and marches
+            // with the squad, looses a shot from its slot if it has a clean lane,
+            // and doesn't engage until the squad breaks. Bombers hold too but
+            // peel off early — once one is within bomberBreakDistance it drops
+            // formation here and falls through to its charge below, so it detonates
+            // out ahead of the escorts instead of among them.
+            if let fid = enemy.formationID, let anchor = formationAnchors[fid] {
+                if enemy.archetype == .bomber
+                    && enemy.position.distance(to: playerPosition) <= Self.bomberBreakDistance {
+                    enemies[index].formationID = nil
+                } else {
+                    let goal = GridPosition(x: anchor.x + enemy.formationOffset.x, y: anchor.y + enemy.formationOffset.y)
+                    var target = enemy.position
+                    var path: [GridPosition] = []
+                    for _ in 0..<enemy.moveRange {
+                        let next = stepToward(goal, from: target, avoiding: avoid)
+                        if next == target { break }
+                        target = next
+                        path.append(next)
+                        if target == goal { break }
+                    }
+                    enemies[index].plannedTarget = target
+                    enemies[index].plannedPath = path
+                    enemies[index].plannedDirection = nil
+                    enemies[index].plannedThrowTarget = nil
+                    // Shields stay squared toward the player even on the march.
+                    if enemy.archetype == .shieldbearer {
+                        enemies[index].facing = Direction.aiming(from: target, toward: playerPosition, allowDiagonals: true)
+                    }
+                    // A ranged member still fires from its slot with a clean lane;
+                    // bombers never jab.
+                    if ready && enemy.archetype != .bomber && canHitPlayer(enemy, from: target) {
+                        if enemy.weapon.thrown != nil {
+                            enemies[index].plannedThrowTarget = playerPosition
+                        } else {
+                            enemies[index].plannedDirection = aimDirection(for: enemy, from: target)
+                        }
+                    }
+                    claimed.remove(enemy.position)
+                    claimed.insert(target)
+                    continue
+                }
+            }
 
             // An armed bomber sits on its fuse; an unarmed one just wants to be
             // next to you.
@@ -2646,6 +2380,7 @@ struct GameState {
                 }
                 enemies[index].plannedTarget = target
                 enemies[index].plannedPath = path
+                claimed.remove(enemy.position)
                 claimed.insert(target)
                 continue
             }
@@ -2660,29 +2395,27 @@ struct GameState {
             let canHitHere = canHitPlayer(enemy, from: enemy.position)
             let skirmisher = enemy.weapon.isRanged
                 && enemy.archetype != .boss && enemy.archetype != .juggernaut
+            let cautiousDanger: Set<GridPosition> = fearless ? [] : hazardTiles.union(incomingTiles)
             if !canHitHere || inDanger {
-                let goal = attackGoal(for: enemy, avoiding: avoid)
-                for _ in 0..<enemy.moveRange {
-                    var next = stepToward(goal, from: target, avoiding: avoid)
-                    if next == target && (hazardTiles.contains(target) || incomingTiles.contains(target)) {
-                        // Trapped inside a pool or a telegraphed blast with no
-                        // clean exit: wading through danger toward the rim beats
-                        // standing at ground zero.
-                        next = stepToward(
-                            goal,
-                            from: target,
-                            avoiding: claimed.subtracting(hazardTiles).subtracting(incomingTiles)
-                        )
-                    }
-                    if next == target {
-                        break
-                    }
-                    target = next
-                    path.append(next)
-                    let safeHere = fearless
-                        || (!hazardTiles.contains(target) && !incomingTiles.contains(target))
-                    if canHitPlayer(enemy, from: target) && safeHere {
-                        break
+                (target, path) = pressApproach(enemy, blocked: avoid, danger: cautiousDanger)
+                // Slow lobs are only a soft deterrent: if dodging them would cost
+                // this enemy its attack, it presses in and braves the blast
+                // instead of idling — its own miscalculation, symmetric with a
+                // greedy player who eats a hit to land one. Fast, certain threats
+                // (bolts, bomber blasts, arriving spawns) stay hard-avoided.
+                if !fearless && !skirmisher && !lobZones.isEmpty
+                    && !canHitPlayer(enemy, from: target) {
+                    let reckless = pressApproach(
+                        enemy,
+                        blocked: avoid.subtracting(lobZones),
+                        danger: cautiousDanger.subtracting(lobZones)
+                    )
+                    // Brave the blast only to attack from there, and only when
+                    // the hit wouldn't kill it — enemies gamble on damage, not
+                    // on death.
+                    if canHitPlayer(enemy, from: reckless.target)
+                        && lobDamage(at: reckless.target) < enemy.health {
+                        (target, path) = reckless
                     }
                 }
             } else if skirmisher {
@@ -2727,8 +2460,14 @@ struct GameState {
             enemies[index].plannedThrowTarget = nil
             enemies[index].plannedIntent = nil
             enemies[index].plannedSecondaryDirection = nil
+            enemies[index].plannedDetonateTile = nil
+            // The shieldbearer squares its shield up toward the player from
+            // wherever it plans to end — telegraphed, so a flank can be planned.
+            if enemy.archetype == .shieldbearer {
+                enemies[index].facing = Direction.aiming(from: target, toward: playerPosition, allowDiagonals: true)
+            }
             if enemy.archetype == .boss {
-                draftBossIntent(at: index, from: target, ready: ready)
+                draftBossIntent(at: index, from: target)
             } else if ready && canHitPlayer(enemy, from: target) {
                 if enemy.weapon.thrown != nil {
                     enemies[index].plannedThrowTarget = playerPosition
@@ -2736,37 +2475,154 @@ struct GameState {
                     enemies[index].plannedDirection = aimDirection(for: enemy, from: target)
                 }
             }
+            claimed.remove(enemy.position)
             claimed.insert(target)
         }
+    }
+
+    /// Total impact damage the airborne lobs would deal to a body ending on
+    /// `tile` — what a greedy enemy weighs against its own health before it
+    /// braves a blast to attack.
+    private func lobDamage(at tile: GridPosition) -> Int {
+        projectiles.reduce(0) { sum, lob in
+            blastTiles(around: lob.target, radius: lob.blastRadius, includeCenter: true).contains(tile)
+                ? sum + lob.damage : sum
+        }
+    }
+
+    /// Walks an enemy up to its move range toward a tile it can attack the
+    /// player from, avoiding `blocked`. `danger` is the subset it would rather
+    /// not end on (pools, telegraphed blasts): trapped in one, it wades toward
+    /// clear ground, and it won't call an attack position "good enough" to stop
+    /// early while still standing in danger.
+    private func pressApproach(_ enemy: Enemy, blocked: Set<GridPosition>, danger: Set<GridPosition>) -> (target: GridPosition, path: [GridPosition]) {
+        var target = enemy.position
+        var path: [GridPosition] = []
+        let goal = attackGoal(for: enemy, avoiding: blocked)
+        for _ in 0..<enemy.moveRange {
+            var next = stepToward(goal, from: target, avoiding: blocked)
+            if next == target && danger.contains(target) {
+                next = stepToward(goal, from: target, avoiding: blocked.subtracting(danger))
+            }
+            if next == target {
+                break
+            }
+            target = next
+            path.append(next)
+            if canHitPlayer(enemy, from: target) && !danger.contains(target) {
+                break
+            }
+        }
+        return (target, path)
     }
 
     /// The boss drafts one of three intents from wherever it plans to stand:
     /// a point-blank cannon nova when the player is in blast range, both
     /// weapons at once when either can reach, or a summon to rebuild its
     /// retinue when guns are down or ranks are thin.
-    private mutating func draftBossIntent(at index: Int, from tile: GridPosition, ready: Bool) {
+    private mutating func draftBossIntent(at index: Int, from tile: GridPosition) {
         let boss = enemies[index]
+        let config = BossConfig.forLevel(level)
         let retinue = enemies.filter { $0.archetype != .boss && $0.archetype != .juggernaut }.count
-        let wantsSummon = retinue < Self.bossRetinueCap
-        if ready {
-            if playerPosition.distance(to: tile) <= Self.bossNovaRadius {
-                enemies[index].plannedIntent = .nova
-                return
-            }
-            let primaryAim = aimDirection(weapon: boss.weapon, attackerID: boss.id, from: tile)
-            let cannonAim = boss.secondaryWeapon.flatMap { aimDirection(weapon: $0, attackerID: boss.id, from: tile) }
-            // Even with a firing solution, a thinned retinue is occasionally
-            // rebuilt instead — the boss shouldn't be a pure turret.
-            if (primaryAim != nil || cannonAim != nil) && !(wantsSummon && Int.random(in: 0..<4) == 0) {
+        // Summoning is gated both by the retinue cap (how many) and a cadence
+        // (how often) — a fresh wave of fodder mostly dies to bombers, the
+        // boss's own greataxe/nova friendly fire, and the player's blasts, so
+        // without the cadence the boss would resummon every single turn.
+        let canSummon = retinue < config.retinueCap
+            && turnNumber - lastBossSummonTurn >= Self.bossSummonInterval
+
+        // The cannon and primary reload independently, so nova and volley
+        // interleave — one keeps pressure up while the other is cooling.
+        let primaryReady = boss.cooldownRemaining == 0
+        let cannonReady = boss.secondaryCooldownRemaining == 0
+
+        // Weapons come first: a ready boss fires rather than fiddling with
+        // abilities, so hugging it (with the cannon loaded) earns a nova and
+        // standing at range a volley.
+        if cannonReady && playerPosition.distance(to: tile) <= config.novaRadius {
+            enemies[index].plannedIntent = .nova
+            return
+        }
+        // A volley fires whichever weapons are both loaded and have a firing
+        // line; a melee primary that can't reach the player is left holstered
+        // so it doesn't scythe the boss's own retinue for nothing.
+        let primaryAim = primaryReady ? aimDirection(weapon: boss.weapon, attackerID: boss.id, from: tile) : nil
+        let cannonAim = (cannonReady ? boss.secondaryWeapon : nil)
+            .flatMap { aimDirection(weapon: $0, attackerID: boss.id, from: tile) }
+        if primaryAim != nil || cannonAim != nil {
+            // With a firing solution the boss volleys, occasionally rebuilding
+            // a thinned retinue instead so it isn't a pure turret.
+            if canSummon && Int.random(in: 0..<4) == 0 {
+                enemies[index].plannedIntent = .summon
+            } else {
                 enemies[index].plannedIntent = .volley
                 enemies[index].plannedDirection = primaryAim
                 enemies[index].plannedSecondaryDirection = cannonAim
-                return
+            }
+            return
+        }
+
+        // No shot available (reloading with no target, or out of every firing
+        // line): fall back to a single ability, in priority order — this is
+        // where the boss makes its downtime count rather than idling.
+        // 1) Cash in a primed barrel that has the player boxed in.
+        if let detonateTile = bossDetonationTarget() {
+            enemies[index].plannedIntent = .detonate
+            enemies[index].plannedDetonateTile = detonateTile
+            return
+        }
+        // 2) Rebuild thinned ranks.
+        if canSummon {
+            enemies[index].plannedIntent = .summon
+            return
+        }
+        // 3) Lay a fresh barrel trap — but only while few of its own are still
+        //    live, so the arena isn't flooded with red barrels (and detonate
+        //    stays an occasional payoff rather than a spam).
+        let liveVolatile = obstacles.filter { $0.kind == .barrel && $0.volatile }.count
+        if liveVolatile < config.bossBarrageCount && !barrageTiles().isEmpty {
+            enemies[index].plannedIntent = .barrage
+        }
+    }
+
+    /// Open tiles 1–3 tiles from the player the boss could drop barrels onto —
+    /// free of bodies, scenery, and hazards.
+    private func barrageTiles() -> [GridPosition] {
+        let taken = Set(enemies.map(\.position))
+            .union(obstacles.map(\.position))
+            .union(lingeringEffects.map(\.position))
+            .union([playerPosition])
+        return blastTiles(around: playerPosition, radius: 3).filter { !taken.contains($0) }
+    }
+
+    /// The barrel the boss should set off: one of its own primed (red) barrels
+    /// whose chain would catch the player. Ordinary orange barrels are off
+    /// limits — red is the player's tell that the boss can trigger it. nil if
+    /// none currently threaten the player.
+    private func bossDetonationTarget() -> GridPosition? {
+        obstacles.first {
+            $0.kind == .barrel && $0.volatile && barrelChainBlast(from: $0.position).contains(playerPosition)
+        }?.position
+    }
+
+    /// Every tile a chain detonation starting at `origin` would cover, walking
+    /// the same barrel-to-barrel spread as detonateBarrels but read-only — used
+    /// to telegraph the boss's detonate intent honestly.
+    private func barrelChainBlast(from origin: GridPosition) -> [GridPosition] {
+        var queue = obstacles.filter { $0.kind == .barrel && $0.position == origin }
+        var done = Set<Int>()
+        var tiles = Set<GridPosition>()
+        while let barrel = queue.popLast() {
+            guard !done.contains(barrel.id) else { continue }
+            done.insert(barrel.id)
+            let blast = blastTiles(around: barrel.position, radius: Self.barrelBlastRadius)
+            tiles.formUnion(blast)
+            let blastSet = Set(blast)
+            queue += obstacles.filter {
+                $0.kind == .barrel && !done.contains($0.id) && blastSet.contains($0.position)
             }
         }
-        if wantsSummon {
-            enemies[index].plannedIntent = .summon
-        }
+        return Array(tiles)
     }
 
     /// A nearby open tile this enemy can't hit the player from — cover to duck
@@ -2857,9 +2713,23 @@ struct GameState {
     /// of its primary.
     private func aimDirection(weapon: Weapon, attackerID: Int, from tile: GridPosition) -> Direction? {
         guard let pattern = weapon.attackPattern else { return nil }
-        let blockers = Set(enemies.filter { $0.id != attackerID }.map(\.position))
+        // Only nearby comrades block the aim — the shield right in front, not a
+        // teammate way down the lane (who stays fair game, so long-range friendly
+        // fire remains exploitable). Measured against where they'll BE, not where
+        // they are: a marching shield wall steps forward in lockstep, so a lane
+        // clear of a shield's current tile would still put it in front of the bolt
+        // at resolve. Front-liners draft first, so their plannedTarget is known.
+        let blockers = Set(enemies
+            .filter { $0.id != attackerID }
+            .map { $0.plannedTarget ?? $0.position }
+            .filter { $0.distance(to: tile) <= Self.friendlyAimGuardRange })
+        // A bolt won't be lined up through a comrade's back: even if the shot
+        // itself pierces, the enemy only takes it when the player is the first
+        // body on the line (so archers behind a shield wall hold or reposition
+        // for a clear angle rather than shooting their own shields).
+        let aimPierces = weapon.projectileSpeed == nil && weapon.pierces
         return Direction.allCases.first { direction in
-            sweep(pattern, from: tile, facing: direction, pierces: weapon.pierces, blockers: blockers)
+            sweep(pattern, from: tile, facing: direction, pierces: aimPierces, blockers: blockers)
                 .contains(playerPosition)
         }
     }
