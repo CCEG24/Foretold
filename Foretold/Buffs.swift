@@ -76,7 +76,7 @@ struct Buff: Equatable {
 extension Buff {
     static let barrelImmune = Buff(name: "Immune to barrels", levelDuration: 2, stackable: false, barrelImmunity: true)
     static let thickSkin = Buff(name: "-1 melee dmg taken", levelDuration: 3, meleeDamageReduction: 1)
-    static let secondWind = Buff(name: "+2 HP", instantHeal: 2)
+    static let secondWind = Buff(name: "Recover 2 HP", instantHeal: 2)
     static let longStride = Buff(name: "+1 move", levelDuration: 1, bonusMoveRange: 1)
     static let whetstone = Buff(name: "+1 dmg", levelDuration: 1, bonusDamage: 1)
     static let hardenedArmour = Buff(name: "+1 max armour", levelDuration: 1, instantArmorRepair: 1, bonusArmor: 1)

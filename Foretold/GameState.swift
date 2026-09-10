@@ -30,44 +30,57 @@ struct LevelConfig {
     }
 }
 
-/// An optional "condition" the player switches on before a run. Each recombines
-/// rules the game already has — more powder, a swarm, glass cannon — for run
-/// variety, and multiplies the score to reward the added risk. See `RunRules`,
-/// which folds a chosen set into the plain knobs the turn logic reads.
+/// A run "condition." Each is atomic and cleanly good (a boon) or bad (a curse);
+/// a run's pact pairs one random boon with one random curse, so they balance each
+/// other and no single modifier needs internal tuning. See `RunRules`, which
+/// folds a chosen set into the plain knobs the turn logic reads.
 enum RunModifier: String, CaseIterable {
-    case powderKeg, swarm, glass, fastHands, brittle, warband
+    // Boons ⚡ — purely in the player's favor.
+    case sharpened, quickdraw, quickhands, bulwark, vigor, momentum
+    // Curses ☠ — purely against the player.
+    case fragile, swarm, brittle, warband, frenzy, powderKeg
+
+    var isBoon: Bool {
+        switch self {
+        case .sharpened, .quickdraw, .quickhands, .bulwark, .vigor, .momentum: return true
+        case .fragile, .swarm, .brittle, .warband, .frenzy, .powderKeg: return false
+        }
+    }
+
+    static var boons: [RunModifier] { allCases.filter(\.isBoon) }
+    static var curses: [RunModifier] { allCases.filter { !$0.isBoon } }
 
     var title: String {
         switch self {
-        case .powderKeg: return "Powder Keg"
+        case .sharpened: return "Sharpened"
+        case .quickdraw: return "Quickdraw"
+        case .quickhands: return "Quickhands"
+        case .bulwark: return "Bulwark"
+        case .vigor: return "Vigor"
+        case .momentum: return "Momentum"
+        case .fragile: return "Fragile"
         case .swarm: return "Swarm"
-        case .glass: return "Glass"
-        case .fastHands: return "Fast Hands"
         case .brittle: return "Brittle"
         case .warband: return "Warband"
+        case .frenzy: return "Frenzy"
+        case .powderKeg: return "Powder Keg"
         }
     }
 
     var blurb: String {
         switch self {
-        case .powderKeg: return "walls become barrels"
+        case .sharpened: return "your attacks deal double"
+        case .quickdraw: return "your cooldowns −1"
+        case .quickhands: return "weapon swaps are free"
+        case .bulwark: return "+2 max armor"
+        case .vigor: return "+2 max health"
+        case .momentum: return "+1 move range"
+        case .fragile: return "you take double damage"
         case .swarm: return "bigger, faster waves"
-        case .glass: return "deal & take double"
-        case .fastHands: return "all cooldowns −1"
         case .brittle: return "no armor regen"
         case .warband: return "every gate is a boss"
-        }
-    }
-
-    /// How much this condition multiplies score gains — its reward for the risk.
-    var scoreMultiplier: Double {
-        switch self {
-        case .powderKeg: return 1.3
-        case .swarm: return 1.5
-        case .glass: return 1.8
-        case .fastHands: return 1.4
-        case .brittle: return 1.4
-        case .warband: return 1.6
+        case .frenzy: return "enemies' cooldowns −1"
+        case .powderKeg: return "walls become barrels"
         }
     }
 }
@@ -81,27 +94,34 @@ struct RunRules {
     var startingEnemiesBonus = 0
     var damageDealtMult = 1.0
     var damageTakenMult = 1.0
-    var cooldownDelta = 0
+    var playerCooldownDelta = 0
+    var enemyCooldownDelta = 0
+    var bonusMaxArmor = 0
+    var bonusMaxHealth = 0
+    var bonusMoveRange = 0
     var armorRegen = true
     var bossEveryGate = false
-    var scoreMultiplier = 1.0
+    var freeSwap = false
 
     init(_ modifiers: Set<RunModifier> = []) {
         for modifier in modifiers {
             switch modifier {
-            case .powderKeg: allBarrels = true
+            case .sharpened: damageDealtMult *= 2
+            case .quickdraw: playerCooldownDelta -= 1
+            case .quickhands: freeSwap = true
+            case .bulwark: bonusMaxArmor += 2
+            case .vigor: bonusMaxHealth += 2
+            case .momentum: bonusMoveRange += 1
+            case .fragile: damageTakenMult *= 2
             case .swarm:
                 spawnBatchBonus += 1
                 spawnIntervalDelta -= 1
                 startingEnemiesBonus += 2
-            case .glass:
-                damageDealtMult *= 2
-                damageTakenMult *= 2
-            case .fastHands: cooldownDelta -= 1
             case .brittle: armorRegen = false
             case .warband: bossEveryGate = true
+            case .frenzy: enemyCooldownDelta -= 1
+            case .powderKeg: allBarrels = true
             }
-            scoreMultiplier *= modifier.scoreMultiplier
         }
     }
 }
@@ -242,8 +262,16 @@ struct GameState {
     let maxArmor: Int
     private(set) var equippedWeapon: Weapon
     /// The backup weapon. Only two can be carried (Soul Knight style); swapping
-    /// exchanges it with the equipped one and costs the whole turn.
+    /// exchanges it with the equipped one.
     private(set) var holsteredWeapon: Weapon
+    /// The weapon equipped at the start of this planning phase. A net swap away
+    /// from it spends the turn's action (unless the run grants free swaps) —
+    /// swapping back to it refunds, so fiddling costs nothing.
+    private var turnStartWeapon: Weapon
+
+    /// True when the player has swapped to a different weapon this turn and the
+    /// run doesn't make swaps free — the swap has spent this turn's attack.
+    var weaponSwapCostsAttack: Bool { !rules.freeSwap && equippedWeapon != turnStartWeapon }
     private(set) var playerPosition: GridPosition
     /// The destination chosen during planning; nil until a move is planned.
     private(set) var plannedTarget: GridPosition?
@@ -354,8 +382,6 @@ struct GameState {
     private(set) var weaponDrops: [WeaponDrop] = []
     /// True when the player has drafted picking up the weapon underfoot.
     private(set) var plannedPickup = false
-    /// True when the player has drafted swapping to the holstered weapon.
-    private(set) var plannedSwap = false
     /// True when the player has drafted the ultimate for this turn.
     private(set) var plannedUltimate = false
     /// Kills banked toward the ultimate; it fires once this reaches
@@ -375,7 +401,7 @@ struct GameState {
     /// plus any buff bonuses. Dev infinite-speed opens the whole board.
     var moveRange: Int {
         if devInfiniteSpeed { return columns + rows }
-        return equippedWeapon.moveRange + buffs.reduce(0) { $0 + $1.bonusMoveRange }
+        return equippedWeapon.moveRange + buffs.reduce(0) { $0 + $1.bonusMoveRange } + rules.bonusMoveRange
     }
     /// Damage the player's attacks deal: the equipped weapon's plus buff
     /// bonuses. Dev damage mode overrides it for testing — one-shot everything,
@@ -402,16 +428,16 @@ struct GameState {
         devNoCooldown ? 0 : (weaponCooldowns[weapon.name] ?? 0)
     }
 
-    /// A weapon's reload with this run's conditions applied (Fast Hands shaves a
-    /// turn off every cooldown, player and enemy alike). Never below zero.
-    func effectiveCooldown(_ base: Int) -> Int {
-        max(0, base + rules.cooldownDelta)
+    /// A player weapon's reload with this run's conditions applied (Quickdraw
+    /// shaves a turn off). Never below zero.
+    func effectivePlayerCooldown(_ base: Int) -> Int {
+        max(0, base + rules.playerCooldownDelta)
     }
 
-    /// A score award scaled by the run's condition multiplier — harder runs pay
-    /// out more. Rounded so a fractional multiplier still yields whole points.
-    private func scaledScore(_ base: Int) -> Int {
-        Int((Double(base) * rules.scoreMultiplier).rounded())
+    /// An enemy weapon's reload with this run's conditions applied (Frenzy shaves
+    /// a turn off). Never below zero.
+    func effectiveEnemyCooldown(_ base: Int) -> Int {
+        max(0, base + rules.enemyCooldownDelta)
     }
 
     var canAttack: Bool { attackCooldownRemaining(of: equippedWeapon) == 0 }
@@ -573,7 +599,7 @@ struct GameState {
     /// no weapon pickup, and a move of at least dodgeDistance tiles.
     var plannedDodgeReady: Bool {
         guard plannedAttackDirection == nil, plannedThrowTarget == nil, !plannedPickup,
-              !plannedUltimate, !plannedSwap, let target = plannedTarget else { return false }
+              !plannedUltimate, !weaponSwapCostsAttack, let target = plannedTarget else { return false }
         return playerPosition.distance(to: target) >= Self.dodgeDistance
     }
 
@@ -651,10 +677,13 @@ struct GameState {
             self.equippedWeapon = pair[0]
             self.holsteredWeapon = pair[1]
         }
-        self.playerHealth = playerHealth
-        self.maxHealth = playerHealth
-        self.maxArmor = maxArmor
-        self.playerArmor = maxArmor
+        self.turnStartWeapon = self.equippedWeapon
+        // Boons that raise the ceilings (Vigor, Bulwark) fold in here, so the
+        // player starts the run already topped up at the higher max.
+        self.maxHealth = playerHealth + self.rules.bonusMaxHealth
+        self.playerHealth = self.maxHealth
+        self.maxArmor = maxArmor + self.rules.bonusMaxArmor
+        self.playerArmor = self.maxArmor
         let start = playerStart ?? GridPosition(x: columns / 2, y: rows / 2)
         self.playerPosition = start
         self.enemies = enemies ?? [
@@ -912,23 +941,25 @@ struct GameState {
         return targets
     }
 
-    /// Drafts swapping the equipped and holstered weapons: like a pickup, it
-    /// spends this turn's attack (and dodge), the drafted move still happens,
-    /// and the exchange lands during the resolve — the new weapon's move range
-    /// applies from next turn.
+    /// Instantly flips the equipped and holstered weapons during planning —
+    /// free, no turn cost. The new weapon's move range and attack pattern take
+    /// effect at once, so any drafted attack is cleared (re-aim with the new
+    /// weapon) and a now-unreachable move is dropped.
     @discardableResult
-    mutating func planSwap() -> Bool {
+    mutating func swapEquipped() -> Bool {
         guard !isGameOver, pendingBuffChoices.isEmpty else { return false }
-        plannedSwap = true
+        (equippedWeapon, holsteredWeapon) = (holsteredWeapon, equippedWeapon)
+        // A swap re-picks your action for the turn: any drafted attack/throw/
+        // pickup/ultimate is dropped (re-draft with the new weapon).
         plannedAttackDirection = nil
         plannedThrowTarget = nil
+        plannedBash = false
         plannedPickup = false
         plannedUltimate = false
+        if let target = plannedTarget, !legalMoveTargets().contains(target) {
+            plannedTarget = nil
+        }
         return true
-    }
-
-    mutating func clearPlannedSwap() {
-        plannedSwap = false
     }
 
     /// Stores the player's chosen destination without moving yet. A drafted
@@ -949,12 +980,12 @@ struct GameState {
     /// a drop.
     @discardableResult
     mutating func planPickup() -> Bool {
-        guard !isGameOver, pendingBuffChoices.isEmpty, weaponDrop(at: playerPosition) != nil else { return false }
+        guard !isGameOver, pendingBuffChoices.isEmpty, !weaponSwapCostsAttack,
+              weaponDrop(at: playerPosition) != nil else { return false }
         plannedPickup = true
         plannedAttackDirection = nil
         plannedThrowTarget = nil
         plannedUltimate = false
-        plannedSwap = false
         return true
     }
 
@@ -966,13 +997,12 @@ struct GameState {
     /// (the drafted move still happens). Fails while recharging.
     @discardableResult
     mutating func planUltimate() -> Bool {
-        guard !isGameOver, pendingBuffChoices.isEmpty,
+        guard !isGameOver, pendingBuffChoices.isEmpty, !weaponSwapCostsAttack,
               ultimateKillCharge >= Self.ultimateChargeKills else { return false }
         plannedUltimate = true
         plannedAttackDirection = nil
         plannedThrowTarget = nil
         plannedPickup = false
-        plannedSwap = false
         return true
     }
 
@@ -987,6 +1017,8 @@ struct GameState {
     @discardableResult
     mutating func planAttack(toward tile: GridPosition) -> Bool {
         guard !isGameOver, pendingBuffChoices.isEmpty else { return false }
+        // A weapon swap this turn already spent the attack (unless swaps are free).
+        guard !weaponSwapCostsAttack else { return false }
         // A ranged weapon mid-reload still jabs: 1 damage, one adjacent tile.
         // Melee weapons recovering their swing get nothing.
         let bashing = !canAttack && equippedWeapon.isRanged
@@ -998,7 +1030,6 @@ struct GameState {
             plannedBash = false
             plannedPickup = false
             plannedUltimate = false
-            plannedSwap = false
             return true
         }
         let pattern = bashing ? AttackPattern.dagger : equippedWeapon.attackPattern
@@ -1012,7 +1043,6 @@ struct GameState {
         plannedThrowTarget = nil
         plannedPickup = false
         plannedUltimate = false
-        plannedSwap = false
         return true
     }
 
@@ -1070,13 +1100,8 @@ struct GameState {
         }
         plannedPickup = false
 
-        // A drafted swap exchanges the carried weapons — the attack was its
-        // price; the new weapon's move range applies from next turn.
-        let swapped = plannedSwap
-        if swapped {
-            (equippedWeapon, holsteredWeapon) = (holsteredWeapon, equippedWeapon)
-        }
-        plannedSwap = false
+        // Weapon swaps happen instantly during planning (see swapEquipped), so
+        // there's nothing to resolve here.
 
         // Enemy weapon cooldowns tick at the start of the turn, so a fresh shot
         // still reads at its full value on the hover display while planning.
@@ -1416,7 +1441,10 @@ struct GameState {
         }
         if didAttack && !attackTiles.isEmpty {
             let struck = Set(attackTiles)
-            let strikeDamage = bashing ? Self.bashDamage : attackDamage
+            // Bash rides the deal-double boon too (attackDamage already does).
+            let strikeDamage = bashing
+                ? Int((Double(Self.bashDamage) * rules.damageDealtMult).rounded())
+                : attackDamage
             // A directional swing can be parried from the front and rewards a
             // backstab; a thrown blast or a radial swing (greataxe/hammer/scythe)
             // carries no meaningful facing, so it slips past the shield and
@@ -1456,7 +1484,7 @@ struct GameState {
 
         // Moving far without attacking (or grabbing a weapon) earns one dodge:
         // the first enemy hit this turn misses.
-        var dodgeCharges = (!didAttack && pickedUp == nil && !ultimateFired && !swapped
+        var dodgeCharges = (!didAttack && pickedUp == nil && !ultimateFired && !weaponSwapCostsAttack
             && playerStart.distance(to: playerPosition) >= Self.dodgeDistance) ? 1 : 0
 
         var enemyAttacks: [TurnResolution.EnemyAttack] = []
@@ -1512,19 +1540,19 @@ struct GameState {
                 // Only the weapons that actually fired go on cooldown, each on
                 // its own clock — so nova and volley can alternate.
                 if attacker.plannedDirection != nil {
-                    enemies[attackerIndex].cooldownRemaining = effectiveCooldown(attacker.weapon.cooldown)
+                    enemies[attackerIndex].cooldownRemaining = effectiveEnemyCooldown(attacker.weapon.cooldown)
                 }
                 if attacker.plannedSecondaryDirection != nil {
-                    enemies[attackerIndex].secondaryCooldownRemaining = effectiveCooldown(attacker.secondaryWeapon?.cooldown ?? 0)
+                    enemies[attackerIndex].secondaryCooldownRemaining = effectiveEnemyCooldown(attacker.secondaryWeapon?.cooldown ?? 0)
                 }
             case .nova:
-                enemies[attackerIndex].secondaryCooldownRemaining = effectiveCooldown(attacker.secondaryWeapon?.cooldown ?? attacker.weapon.cooldown)
+                enemies[attackerIndex].secondaryCooldownRemaining = effectiveEnemyCooldown(attacker.secondaryWeapon?.cooldown ?? attacker.weapon.cooldown)
             case .summon, .barrage, .detonate:
                 // Abilities don't spend a weapon's reload; their own gates
                 // (summon cadence, barrel cap, a live red barrel) pace them.
                 break
             case nil:
-                enemies[attackerIndex].cooldownRemaining = effectiveCooldown(attacker.weapon.cooldown)
+                enemies[attackerIndex].cooldownRemaining = effectiveEnemyCooldown(attacker.weapon.cooldown)
             }
             enemies[attackerIndex].plannedDetonateTile = nil
 
@@ -1779,7 +1807,7 @@ struct GameState {
         }
         // The jab doesn't restart the reload — the real weapon keeps counting.
         if didAttack && !bashing {
-            weaponCooldowns[equippedWeapon.name] = effectiveCooldown(equippedWeapon.cooldown)
+            weaponCooldowns[equippedWeapon.name] = effectivePlayerCooldown(equippedWeapon.cooldown)
         }
 
         // The streak extends on any turn with a kill and snaps on a dry one.
@@ -1810,7 +1838,7 @@ struct GameState {
 
         turnNumber += 1
         if !isGameOver && !bossPhase && !devFreezeScore {
-            score += scaledScore(Self.survivalScore)
+            score += Self.survivalScore
         }
 
         // The score milestone summons the level's elite gatekeeper (a boss every
@@ -1831,6 +1859,9 @@ struct GameState {
         }
 
         draftEnemyPlans()
+        // The next planning phase starts from whatever's equipped now, so a
+        // swap only costs the turn it's actually made on.
+        turnStartWeapon = equippedWeapon
 
         return TurnResolution(
             playerDestination: draftedDestination,
@@ -1886,9 +1917,9 @@ struct GameState {
                 // Score is frozen during the boss fight — except the gate itself.
                 if (!bossPhase || isElite) && !devFreezeScore {
                     // Kills escalate within a turn and ride the multi-turn streak.
-                    score += scaledScore(enemies[index].bounty
+                    score += enemies[index].bounty
                         + Self.comboKillBonus * killsThisTurn
-                        + Self.streakKillBonus * killStreak)
+                        + Self.streakKillBonus * killStreak
                 }
                 killsThisTurn += 1
                 totalKills += 1
@@ -2040,8 +2071,9 @@ struct GameState {
             }
         }
         heldBuffs.removeAll { ($0.levelsRemaining ?? 1) <= 0 }
-        // Armor above a shrunken cap (an expired armor buff) falls off.
-        playerArmor = min(playerArmor, armorCap)
+        // Clearing a level tops armor back up to its (possibly newly-shrunken)
+        // cap — a breather each level, though health still never regenerates.
+        playerArmor = armorCap
 
         // Draw the boon options; play pauses until the player picks one.
         let pool = Buff.all.filter { $0.stackable || !buffs.contains($0) }
@@ -2049,6 +2081,31 @@ struct GameState {
         if pendingBuffChoices.isEmpty {
             pendingBuffChoices = [.secondWind]
         }
+    }
+
+    // MARK: - Tutorial showcase
+    // Force-plays systems the player can't reach on turn one. These only ever
+    // run on a sandbox copy of the state (the scene snapshots before, restores
+    // after), so they don't need to be gentle about side effects.
+
+    /// Drops a formation onto the board at once, telegraphs and all.
+    mutating func tutorialSpawnFormation() {
+        _ = spawnFormation(nil)
+        enemies.append(contentsOf: pendingArrivals)
+        pendingArrivals = []
+        draftEnemyPlans()
+    }
+
+    /// Drops the level's gatekeeper on the board with its intent telegraphed.
+    mutating func tutorialSpawnGatekeeper() {
+        var ignored: [TurnResolution.SpawnEvent] = []
+        summonElite(into: &ignored)
+        draftEnemyPlans()
+    }
+
+    /// Runs a real level-up: fresh board, refilled armor, a boon to pick.
+    mutating func tutorialLevelUp() {
+        advanceLevel()
     }
 
     /// Applies the picked boon and resumes play.
@@ -2454,8 +2511,14 @@ struct GameState {
             explosions.append(TurnResolution.Explosion(center: barrel.position, tiles: blast))
 
             let blastSet = Set(blast)
-            // Player-lit barrel chains tally toward the explosives milestones.
-            hits += damageEnemies(on: blastSet, damage: Self.barrelDamage, chargesUltimate: chargesUltimate, credit: chargesUltimate ? "Barrels" : nil)
+            // Player-lit barrel chains tally toward the explosives milestones and
+            // ride the deal-double boon (Sharpened); enemy-lit ones stay at base.
+            let enemyBlastDamage = chargesUltimate
+                ? Int((Double(Self.barrelDamage) * rules.damageDealtMult).rounded())
+                : Self.barrelDamage
+            hits += damageEnemies(on: blastSet, damage: enemyBlastDamage, chargesUltimate: chargesUltimate, credit: chargesUltimate ? "Barrels" : nil)
+            // Damage to the player runs through applyDamage, which already scales
+            // it by the take-double curse (Fragile).
             if !isGameOver && blastSet.contains(playerPosition) && !buffs.contains(where: \.barrelImmunity) {
                 applyDamage(Self.barrelDamage, from: "an exploding barrel")
             }
