@@ -128,6 +128,20 @@ extension AttackPattern {
     static let crossbow = AttackPattern.line(length: 14)
     static let greataxe = AttackPattern.circle(radius: 2)
     static let scythe = AttackPattern.ring(from: 2, to: 2)
+    /// A frontal crush: the tile dead ahead and the two flanking it. Everything
+    /// caught is flung straight along the swing's facing (see Weapon.knockback).
+    static let maul = AttackPattern(
+        offsets: [
+            GridPosition(x: 1, y: 0),
+            GridPosition(x: 1, y: 1),
+            GridPosition(x: 1, y: -1),
+        ],
+        diagonalOffsets: [
+            GridPosition(x: 1, y: 1),
+            GridPosition(x: 1, y: 0),
+            GridPosition(x: 0, y: 1),
+        ]
+    )
     static let explosiveCrossbow = AttackPattern.line(length: 14)
     static let hi = AttackPattern.circle(radius: 15)
 }
@@ -207,6 +221,15 @@ struct Weapon: Equatable {
     /// wherever its flight ends — striking a body, hitting scenery, or falling
     /// at max range. The blast replaces the single-target hit. 0 = no blast.
     let impactBlastRadius: Int
+    /// Turns a struck target is stunned. A stunned enemy's telegraphed attack
+    /// this resolve fizzles and it plans nothing (no move, no attack) for the
+    /// duration; a stunned player loses only their next action, never their
+    /// move. 0 = no stun.
+    let stun: Int
+    /// Tiles a struck target is flung directly along the swing's facing — into
+    /// barrels, walls, or hazard pools. Cuts both ways: an enemy wielding a
+    /// knockback weapon shoves the player too. 0 = no knockback.
+    let knockback: Int
 
     var isMelee: Bool { !isRanged }
 
@@ -220,6 +243,8 @@ struct Weapon: Equatable {
         isRanged: Bool = false,
         projectileSpeed: Int? = nil,
         impactBlastRadius: Int = 0,
+        stun: Int = 0,
+        knockback: Int = 0,
         attackPattern: AttackPattern? = nil,
         thrown: Thrown? = nil,
         lingering: Lingering? = nil,
@@ -235,6 +260,8 @@ struct Weapon: Equatable {
         self.isRanged = isRanged
         self.projectileSpeed = projectileSpeed
         self.impactBlastRadius = impactBlastRadius
+        self.stun = stun
+        self.knockback = knockback
         self.attackPattern = attackPattern
         self.thrown = thrown
         self.lingering = lingering
@@ -245,7 +272,7 @@ struct Weapon: Equatable {
 extension Weapon {
     static let dagger = Weapon(name: "Dagger", moveRange: 3, damage: 2, enemyHealth: 4, attackPattern: .dagger)
     static let sword = Weapon(name: "Sword", moveRange: 2, damage: 2, enemyHealth: 4, attackPattern: .sword)
-    static let hammer = Weapon(name: "Hammer", moveRange: 2, damage: 4, cooldown: 1, enemyHealth: 5, attackPattern: .hammer)
+    static let hammer = Weapon(name: "Hammer", moveRange: 2, damage: 4, cooldown: 2, enemyHealth: 5, stun: 1, attackPattern: .hammer)
     static let pike = Weapon(name: "Pike", moveRange: 2, damage: 2, enemyHealth: 3, attackPattern: .pike)
     static let bow = Weapon(name: "Bow", moveRange: 2, damage: 2, pierces: false, cooldown: 1, enemyHealth: 2, isRanged: true, projectileSpeed: 5, attackPattern: .bow)
     static let tippedBow = Weapon(name: "Tipped Bow", moveRange: 2, damage: 1, pierces: false, cooldown: 1, enemyHealth: 2, isRanged: true, projectileSpeed: 5, attackPattern: .bow, lingering: Lingering(damagePerTurn: 1, duration: 2))
@@ -278,10 +305,17 @@ extension Weapon {
     static let explosiveCrossbow = Weapon(name: "Explosive Crossbow", moveRange: 1, damage: 1, pierces: false, cooldown: 2, enemyHealth: 2, isRanged: true, projectileSpeed: 5, impactBlastRadius: 1, attackPattern: .crossbow)
     static let serratedBow = Weapon(name: "Serrated Bow", moveRange: 2, damage: 1, pierces: true, cooldown: 1, enemyHealth: 2, isRanged: true, projectileSpeed: 5, attackPattern: .bow, affliction: Affliction(damagePerTurn: 1, duration: 2))
     static let trident = Weapon(name: "Trident", moveRange: 2, damage: 2, cooldown: 1, enemyHealth: 3, attackPattern: .trident)
+    /// Flings whatever it hits two tiles down its
+    /// facing — into barrels, walls, and pools. Slow and short-ranged; the
+    /// payoff is the shove, not the reach.
+    static let maul = Weapon(name: "Maul", moveRange: 2, damage: 4, cooldown: 1, enemyHealth: 4, knockback: 2, attackPattern: .maul)
+    /// A blunt-tipped arrow that dazes on impact — the ranged answer to the
+    /// hammer, trading damage for a stun at range.
+    static let concussionBow = Weapon(name: "Concussion Bow", moveRange: 2, damage: 2, pierces: false, cooldown: 2, enemyHealth: 2, isRanged: true, projectileSpeed: 5, stun: 1, attackPattern: .bow)
     /// A dev-only toy: kept out of `all`, loot, and milestones, so it can only
     /// be handed out through the dev panel's weapon cycler.
     static let hi = Weapon(name: "Wrath of God", moveRange: 30, damage: 20, enemyHealth: 1, attackPattern: .hi)
-    static let all: [Weapon] = [.dagger, .sword, .hammer, .pike, .bow, .crossbow, .grenade, .poisonPotion, .tippedBow, .greataxe, .scythe, .cannon, .explosiveCrossbow, .serratedBow, .trident]
+    static let all: [Weapon] = [.dagger, .sword, .hammer, .pike, .bow, .crossbow, .grenade, .poisonPotion, .tippedBow, .greataxe, .scythe, .cannon, .explosiveCrossbow, .serratedBow, .trident, .maul, .concussionBow]
 
     /// Weapons reachable only through the dev panel — the full arsenal plus the
     /// dev-only toys. Kept separate from `all` so these never leak into loot,
@@ -327,6 +361,8 @@ extension Weapon {
         Milestone(weapon: .poisonPotion, tally: "Dodges", count: 10, requirement: "dodge 10 attacks"),
         Milestone(weapon: .explosiveCrossbow, tally: Weapon.crossbow.name, count: 10, requirement: "10 kills with the Crossbow"),
         Milestone(weapon: .serratedBow, tally: "Focus", count: 5, requirement: "hit the same enemy 3 turns running, 5 times"),
-        Milestone(weapon: .trident, tally: Weapon.pike.name, count: 10, requirement: "10 kills with the Pike")
+        Milestone(weapon: .trident, tally: Weapon.pike.name, count: 10, requirement: "10 kills with the Pike"),
+        Milestone(weapon: .maul, tally: "TilesMoved", count: 400, requirement: "move 400 tiles, lifetime"),
+        Milestone(weapon: .concussionBow, tally: "Dodges", count: 20, requirement: "dodge 20 attacks")
     ]
 }

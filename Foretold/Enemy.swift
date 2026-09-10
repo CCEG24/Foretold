@@ -65,6 +65,10 @@ struct Enemy {
     var fuse: Int?
     /// A bleed or poison riding on this enemy; ticks at the end of each turn.
     var affliction: ActiveAffliction?
+    /// Turns this enemy is stunned. While >0 it plans nothing — no move, no
+    /// attack, no boss intent — and any telegraphed attack this resolve fizzles.
+    /// Decremented as it drafts each turn.
+    var stunTurns = 0
     /// Bosses only: the drafted intent for next resolve.
     var plannedIntent: BossIntent?
     /// Volley only: the facing of the cannon shot alongside the primary swing.
@@ -118,6 +122,9 @@ struct Enemy {
 
     /// Fearless enemies path straight through hazards and telegraphed danger.
     var isFearless: Bool { archetype == .berserker || archetype == .bomber }
+
+    /// Reeling from a stun: skips planning and acting until it wears off.
+    var isStunned: Bool { stunTurns > 0 }
 
     /// True when this enemy has drafted a move off its current tile — so the
     /// player may step onto the tile it's leaving.

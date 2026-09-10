@@ -13,6 +13,15 @@ struct TurnResolution {
         let to: GridPosition
     }
 
+    /// An enemy flung by a knockback weapon during the player's action, for the
+    /// scene to slide it from `from` to `to` (any barrel it slammed into shows
+    /// up in `playerExplosions`).
+    struct Shove {
+        let enemyID: Int
+        let from: GridPosition
+        let to: GridPosition
+    }
+
     struct EnemyHit {
         let enemyID: Int
         let healthAfter: Int
@@ -45,7 +54,13 @@ struct TurnResolution {
         let enemyID: Int?
     }
 
+    /// Where the player moved to this turn (their drafted tile) — the initial
+    /// move animation, the ultimate's origin, and the enemies' lunge all key off
+    /// this, so it stays the drafted tile even when knockback shoves the player.
     let playerDestination: GridPosition
+    /// Where the player was flung to by enemy knockback during the enemy phase,
+    /// or nil if they weren't shoved. The scene slides them here as the hit lands.
+    let playerShoveTo: GridPosition?
     /// Tiles the player's attack covered — a directional sweep or a throw's
     /// blast; empty when no attack was drafted.
     let attackTiles: [GridPosition]
@@ -54,6 +69,8 @@ struct TurnResolution {
     /// Enemies damaged during the player's phase (weapon and explosions).
     let enemyHits: [EnemyHit]
     let playerExplosions: [Explosion]
+    /// Enemies flung by a knockback weapon this turn, in the order they were shoved.
+    let shoves: [Shove]
     let enemyMoves: [EnemyMove]
     let enemyAttacks: [EnemyAttack]
     /// Enemies damaged during the enemies' own phase: friendly fire and explosions.
@@ -97,4 +114,6 @@ struct TurnResolution {
     let armorLost: Int
     let playerHealth: Int
     let playerArmor: Int
+    /// True when the player's drafted action was voided by a stun this turn.
+    let playerActionStunned: Bool
 }

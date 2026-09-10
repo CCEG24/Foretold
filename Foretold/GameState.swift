@@ -30,6 +30,82 @@ struct LevelConfig {
     }
 }
 
+/// An optional "condition" the player switches on before a run. Each recombines
+/// rules the game already has — more powder, a swarm, glass cannon — for run
+/// variety, and multiplies the score to reward the added risk. See `RunRules`,
+/// which folds a chosen set into the plain knobs the turn logic reads.
+enum RunModifier: String, CaseIterable {
+    case powderKeg, swarm, glass, fastHands, brittle, warband
+
+    var title: String {
+        switch self {
+        case .powderKeg: return "Powder Keg"
+        case .swarm: return "Swarm"
+        case .glass: return "Glass"
+        case .fastHands: return "Fast Hands"
+        case .brittle: return "Brittle"
+        case .warband: return "Warband"
+        }
+    }
+
+    var blurb: String {
+        switch self {
+        case .powderKeg: return "walls become barrels"
+        case .swarm: return "bigger, faster waves"
+        case .glass: return "deal & take double"
+        case .fastHands: return "all cooldowns −1"
+        case .brittle: return "no armor regen"
+        case .warband: return "every gate is a boss"
+        }
+    }
+
+    /// How much this condition multiplies score gains — its reward for the risk.
+    var scoreMultiplier: Double {
+        switch self {
+        case .powderKeg: return 1.3
+        case .swarm: return 1.5
+        case .glass: return 1.8
+        case .fastHands: return 1.4
+        case .brittle: return 1.4
+        case .warband: return 1.6
+        }
+    }
+}
+
+/// The chosen modifiers folded into flat knobs the turn logic reads, computed
+/// once so the rules never scatter `if modifiers.contains(...)` checks around.
+struct RunRules {
+    var allBarrels = false
+    var spawnBatchBonus = 0
+    var spawnIntervalDelta = 0
+    var startingEnemiesBonus = 0
+    var damageDealtMult = 1.0
+    var damageTakenMult = 1.0
+    var cooldownDelta = 0
+    var armorRegen = true
+    var bossEveryGate = false
+    var scoreMultiplier = 1.0
+
+    init(_ modifiers: Set<RunModifier> = []) {
+        for modifier in modifiers {
+            switch modifier {
+            case .powderKeg: allBarrels = true
+            case .swarm:
+                spawnBatchBonus += 1
+                spawnIntervalDelta -= 1
+                startingEnemiesBonus += 2
+            case .glass:
+                damageDealtMult *= 2
+                damageTakenMult *= 2
+            case .fastHands: cooldownDelta -= 1
+            case .brittle: armorRegen = false
+            case .warband: bossEveryGate = true
+            }
+            scoreMultiplier *= modifier.scoreMultiplier
+        }
+    }
+}
+
 /// Elite scaling by level. Every gatekeeper knob — health, damage, summon
 /// sizes, and the boss's cannon-nova radius — ramps with the run so late elites
 /// keep pace with the player, each capped so the climb stays hard but fair.
@@ -157,6 +233,9 @@ struct GameState {
     /// The arsenal this run draws from for loot, loadouts, and enemy weapons —
     /// the core weapons plus whichever elite trophies the profile has claimed.
     let weaponPool: [Weapon]
+    /// The conditions switched on for this run, and their folded-down rules.
+    let modifiers: Set<RunModifier>
+    let rules: RunRules
     /// Armor absorbs damage before health and regenerates 1 on every second
     /// consecutive turn without taking damage (Soul Knight style); health never
     /// regenerates.
@@ -293,10 +372,23 @@ struct GameState {
     private var turnsAtWeaponCap = 0
 
     /// How many tiles the player may move per turn: the equipped weapon's range
-    /// plus any buff bonuses.
-    var moveRange: Int { equippedWeapon.moveRange + buffs.reduce(0) { $0 + $1.bonusMoveRange } }
-    /// Damage the player's attacks deal: the equipped weapon's plus buff bonuses.
-    var attackDamage: Int { equippedWeapon.damage + buffs.reduce(0) { $0 + $1.bonusDamage } }
+    /// plus any buff bonuses. Dev infinite-speed opens the whole board.
+    var moveRange: Int {
+        if devInfiniteSpeed { return columns + rows }
+        return equippedWeapon.moveRange + buffs.reduce(0) { $0 + $1.bonusMoveRange }
+    }
+    /// Damage the player's attacks deal: the equipped weapon's plus buff
+    /// bonuses. Dev damage mode overrides it for testing — one-shot everything,
+    /// or deal nothing so a struck enemy survives repeated stun/knockback trials.
+    var attackDamage: Int {
+        switch devDamageMode {
+        case .instakill: return 999
+        case .zero: return 0
+        case .normal:
+            let base = equippedWeapon.damage + buffs.reduce(0) { $0 + $1.bonusDamage }
+            return Int((Double(base) * rules.damageDealtMult).rounded())
+        }
+    }
     /// The armor ceiling right now: the base cap plus buff bonuses.
     var armorCap: Int { maxArmor + buffs.reduce(0) { $0 + $1.bonusArmor } }
     var isGameOver: Bool { playerHealth <= 0 }
@@ -305,8 +397,21 @@ struct GameState {
     var attackOrigin: GridPosition { plannedTarget ?? playerPosition }
 
     /// Turns before the given carried weapon can attack again; 0 means ready.
+    /// Dev no-cooldown reports every weapon as ready so it can be fired each turn.
     func attackCooldownRemaining(of weapon: Weapon) -> Int {
-        weaponCooldowns[weapon.name] ?? 0
+        devNoCooldown ? 0 : (weaponCooldowns[weapon.name] ?? 0)
+    }
+
+    /// A weapon's reload with this run's conditions applied (Fast Hands shaves a
+    /// turn off every cooldown, player and enemy alike). Never below zero.
+    func effectiveCooldown(_ base: Int) -> Int {
+        max(0, base + rules.cooldownDelta)
+    }
+
+    /// A score award scaled by the run's condition multiplier — harder runs pay
+    /// out more. Rounded so a fractional multiplier still yields whole points.
+    private func scaledScore(_ base: Int) -> Int {
+        Int((Double(base) * rules.scoreMultiplier).rounded())
     }
 
     var canAttack: Bool { attackCooldownRemaining(of: equippedWeapon) == 0 }
@@ -319,6 +424,11 @@ struct GameState {
 
     /// A bleed or poison riding on the player; ticks at the end of each turn.
     private(set) var playerAffliction: ActiveAffliction?
+
+    /// Turns the player's *action* is disabled by a stun. The move is never
+    /// taken away — only the drafted attack/throw/ultimate fizzles — so the
+    /// player is never denied a choice they can't see coming.
+    private(set) var playerStunTurns = 0
 
     /// Sticks a weapon's damage-over-time to every survivor of a strike.
     private mutating func afflict(
@@ -348,6 +458,115 @@ struct GameState {
             chargesUltimate: false,
             credit: nil
         )
+    }
+
+    /// Dazes every survivor of a stunning strike. Refreshes to the longer of
+    /// any existing stun and the new one, so overlapping hits don't cut it short.
+    private mutating func applyStun(_ hits: [TurnResolution.EnemyHit], turns: Int) {
+        guard turns > 0 else { return }
+        for hit in hits where !hit.died {
+            guard let index = enemies.firstIndex(where: { $0.id == hit.enemyID }) else { continue }
+            enemies[index].stunTurns = max(enemies[index].stunTurns, turns)
+        }
+    }
+
+    /// Dazes the player: their next action is voided, but not their move.
+    private mutating func applyPlayerStun(_ turns: Int) {
+        guard turns > 0, !isGameOver, !devStunImmune else { return }
+        playerStunTurns = max(playerStunTurns, turns)
+    }
+
+    /// Flings the given enemies up to `distance` tiles down `direction`, one
+    /// cardinal step at a time. A shove stops short of the board edge, a wall,
+    /// another body, or the player; driving one into a barrel detonates it
+    /// (the marquee interaction). An enemy that ends on a hazard pool just
+    /// burns there at the usual end-of-turn tick — no special handling needed.
+    private mutating func shoveEnemies(
+        ids: [Int],
+        direction: Direction,
+        distance: Int
+    ) -> (shoves: [TurnResolution.Shove], explosions: [TurnResolution.Explosion], hits: [TurnResolution.EnemyHit]) {
+        // Collapse the aim to a single cardinal step so the shove tracks a clean
+        // grid line even for a diagonal swing.
+        let s = direction.unitStep
+        let push: GridPosition = (abs(s.x) >= abs(s.y) && s.x != 0)
+            ? GridPosition(x: s.x > 0 ? 1 : -1, y: 0)
+            : GridPosition(x: 0, y: s.y > 0 ? 1 : -1)
+
+        var shoves: [TurnResolution.Shove] = []
+        var explosions: [TurnResolution.Explosion] = []
+        var hits: [TurnResolution.EnemyHit] = []
+
+        // Push the enemy furthest along the shove first, so the tile ahead of
+        // the one behind it has already cleared.
+        let sortedIDs = ids.sorted { lhs, rhs in
+            let lp = enemies.first(where: { $0.id == lhs })?.position ?? GridPosition(x: 0, y: 0)
+            let rp = enemies.first(where: { $0.id == rhs })?.position ?? GridPosition(x: 0, y: 0)
+            return (lp.x * push.x + lp.y * push.y) > (rp.x * push.x + rp.y * push.y)
+        }
+
+        for id in sortedIDs {
+            guard let index = enemies.firstIndex(where: { $0.id == id }) else { continue }
+            let from = enemies[index].position
+            var current = from
+            var slammedBarrel: GridPosition?
+            for _ in 0..<distance {
+                let next = GridPosition(x: current.x + push.x, y: current.y + push.y)
+                guard contains(next) else { break }
+                if let scenery = obstacle(at: next) {
+                    if scenery.kind == .barrel { slammedBarrel = next }
+                    break
+                }
+                if next == playerPosition { break }
+                if enemies.contains(where: { $0.id != id && $0.position == next }) { break }
+                current = next
+            }
+            if current != from {
+                enemies[index].position = current
+                shoves.append(TurnResolution.Shove(enemyID: id, from: from, to: current))
+            }
+            if let barrel = slammedBarrel {
+                let blast = detonateBarrels(struckTiles: [barrel])
+                explosions += blast.explosions
+                hits += blast.hits
+            }
+        }
+        return (shoves, explosions, hits)
+    }
+
+    /// Knocks the player `distance` tiles down `direction`, one cardinal step at
+    /// a time — stopping at the board edge, a wall, or an enemy, and detonating
+    /// (and being caught by) any barrel they're driven into. Movement only; the
+    /// hit's own damage is applied by the caller. Returns any barrel blast so the
+    /// enemy phase can animate it.
+    private mutating func shovePlayer(direction: Direction, distance: Int)
+        -> (explosions: [TurnResolution.Explosion], hits: [TurnResolution.EnemyHit]) {
+        let s = direction.unitStep
+        let push: GridPosition = (abs(s.x) >= abs(s.y) && s.x != 0)
+            ? GridPosition(x: s.x > 0 ? 1 : -1, y: 0)
+            : GridPosition(x: 0, y: s.y > 0 ? 1 : -1)
+        var explosions: [TurnResolution.Explosion] = []
+        var hits: [TurnResolution.EnemyHit] = []
+        var current = playerPosition
+        var slammedBarrel: GridPosition?
+        for _ in 0..<distance {
+            let next = GridPosition(x: current.x + push.x, y: current.y + push.y)
+            guard contains(next) else { break }
+            if let scenery = obstacle(at: next) {
+                if scenery.kind == .barrel { slammedBarrel = next }
+                break
+            }
+            if enemies.contains(where: { $0.position == next }) { break }
+            current = next
+        }
+        playerPosition = current
+        if let barrel = slammedBarrel {
+            // Enemy-lit: no ultimate charge, no barrel-kill credit to the player.
+            let blast = detonateBarrels(struckTiles: [barrel], chargesUltimate: false)
+            explosions += blast.explosions
+            hits += blast.hits
+        }
+        return (explosions, hits)
     }
 
     /// True when the current draft earns the dodge: no attack or throw drafted,
@@ -403,12 +622,15 @@ struct GameState {
         barrels: Int = 4,
         enemies: [Enemy]? = nil,
         obstacles: [Obstacle]? = nil,
-        weaponPool: [Weapon] = Weapon.lootTable
+        weaponPool: [Weapon] = Weapon.lootTable,
+        modifiers: Set<RunModifier> = []
     ) {
         precondition(columns > 0 && rows > 0, "Board must have at least one tile")
         self.columns = columns
         self.rows = rows
         self.weaponPool = weaponPool
+        self.modifiers = modifiers
+        self.rules = RunRules(modifiers)
         // The starting loadout always covers both ranges — one melee, one
         // ranged/thrown — so threats like bombers can be dealt with from afar.
         // Unspecified slots are drawn to complete the pair.
@@ -825,6 +1047,10 @@ struct GameState {
         playerPosition = plannedTarget ?? playerPosition
         tilesMoved += playerStart.distance(to: playerPosition)
         plannedTarget = nil
+        // The drafted landing, captured before any enemy knockback can shove the
+        // player off it — the scene animates the move here and the shove later.
+        let draftedDestination = playerPosition
+        var playerShoveTo: GridPosition?
         killsThisTurn = 0
         struckByPlayerThisTurn = []
         pendingExplosions = []
@@ -864,6 +1090,12 @@ struct GameState {
             // A parried shield stays down a turn before it comes back up.
             if enemies[index].shieldCooldown > 0 {
                 enemies[index].shieldCooldown -= 1
+            }
+            // A stun burns off as its frozen turn is played out — decremented
+            // here (not at draft) so the daze stays visible, stars and all,
+            // through the planning phase the player is reading.
+            if enemies[index].stunTurns > 0 {
+                enemies[index].stunTurns -= 1
             }
         }
 
@@ -1089,20 +1321,32 @@ struct GameState {
         var attackTiles: [GridPosition] = []
         var playerPhaseHits: [TurnResolution.EnemyHit] = []
         var playerExplosions: [TurnResolution.Explosion] = []
+        var shoves: [TurnResolution.Shove] = []
         var didAttack = false
+
+        // A stun eats only this turn's action: the player still moved, and a
+        // drafted swap/pickup already stood, but the drafted attack/throw/
+        // ultimate is voided (the ultimate keeps its charge). The daze then
+        // wears off. Movement is never taken away, so foresight is preserved.
+        let actionStunned = playerStunTurns > 0
+        let playerActionStunned = actionStunned
+            && (plannedUltimate || plannedBash || plannedAttackDirection != nil || plannedThrowTarget != nil)
+        if playerStunTurns > 0 { playerStunTurns -= 1 }
 
         // The ultimate smites every enemy on the board at once, wherever they
         // ended up after moving.
         var ultimateTiles: [GridPosition] = []
-        let ultimateFired = plannedUltimate
+        let ultimateFired = plannedUltimate && !actionStunned
         if ultimateFired {
             ultimateTiles = enemies.map(\.position)
             ultimateKillCharge = 0
             playerPhaseHits += damageEnemies(on: Set(ultimateTiles), damage: Self.ultimateDamage, chargesUltimate: false)
         }
         plannedUltimate = false
-        let bashing = plannedBash
-        if bashing, let direction = plannedAttackDirection {
+        let bashing = plannedBash && !actionStunned
+        if actionStunned {
+            // The drafted action fizzles; the planned flags are cleared below.
+        } else if bashing, let direction = plannedAttackDirection {
             // The reload jab: a bare 1-damage poke that leaves the reload
             // ticking and the weapon's tricks (bolts, trails) holstered.
             didAttack = true
@@ -1131,7 +1375,8 @@ struct GameState {
                     chargesUltimate: true,
                     sourceName: "your own \(equippedWeapon.name)",
                     creditName: equippedWeapon.name,
-                    affliction: equippedWeapon.affliction
+                    affliction: equippedWeapon.affliction,
+                    stun: equippedWeapon.stun
                 )
                 nextProjectileID += 1
                 if let survivor = fly(shot, impacts: &projectileImpacts, hits: &projectileHits, flights: &boltFlights) {
@@ -1189,6 +1434,17 @@ struct GameState {
             let blast = detonateBarrels(struckTiles: struck)
             playerExplosions = blast.explosions
             playerPhaseHits += blast.hits
+            // Knockback flings the survivors of a direct hit down the swing's
+            // facing — into walls, off their telegraphed tiles, or into a barrel
+            // that then goes off. Radial/thrown weapons carry no facing (and no
+            // knockback), so this only ever fires for a directional shove.
+            if !bashing, equippedWeapon.knockback > 0, let facing = plannedAttackDirection {
+                let survivors = sweepHits.filter { !$0.died }.map(\.enemyID)
+                let flung = shoveEnemies(ids: survivors, direction: facing, distance: equippedWeapon.knockback)
+                shoves += flung.shoves
+                playerExplosions += flung.explosions
+                playerPhaseHits += flung.hits
+            }
             if !bashing, let lingering = equippedWeapon.lingering {
                 addLingeringEffect(at: attackTiles, damagePerTurn: lingering.damagePerTurn, duration: lingering.duration, creditName: equippedWeapon.name)
             }
@@ -1232,6 +1488,18 @@ struct GameState {
         for attackerID in attackerIDs {
             guard let attackerIndex = enemies.firstIndex(where: { $0.id == attackerID }) else { continue }
             let attacker = enemies[attackerIndex]
+            // A stun eats the telegraphed attack outright: the enemy doesn't
+            // fire (so its weapon isn't even spent on cooldown), and its plan
+            // is dropped. It stays frozen through draftEnemyPlans until the
+            // daze wears off.
+            if attacker.stunTurns > 0 {
+                enemies[attackerIndex].plannedDirection = nil
+                enemies[attackerIndex].plannedThrowTarget = nil
+                enemies[attackerIndex].plannedIntent = nil
+                enemies[attackerIndex].plannedSecondaryDirection = nil
+                enemies[attackerIndex].plannedDetonateTile = nil
+                continue
+            }
             // Indexed bookkeeping happens before the attack: firing a bolt can
             // kill enemies mid-flight (even the attacker, via a barrel burst),
             // which would leave attackerIndex stale.
@@ -1244,19 +1512,19 @@ struct GameState {
                 // Only the weapons that actually fired go on cooldown, each on
                 // its own clock — so nova and volley can alternate.
                 if attacker.plannedDirection != nil {
-                    enemies[attackerIndex].cooldownRemaining = attacker.weapon.cooldown
+                    enemies[attackerIndex].cooldownRemaining = effectiveCooldown(attacker.weapon.cooldown)
                 }
                 if attacker.plannedSecondaryDirection != nil {
-                    enemies[attackerIndex].secondaryCooldownRemaining = attacker.secondaryWeapon?.cooldown ?? 0
+                    enemies[attackerIndex].secondaryCooldownRemaining = effectiveCooldown(attacker.secondaryWeapon?.cooldown ?? 0)
                 }
             case .nova:
-                enemies[attackerIndex].secondaryCooldownRemaining = attacker.secondaryWeapon?.cooldown ?? attacker.weapon.cooldown
+                enemies[attackerIndex].secondaryCooldownRemaining = effectiveCooldown(attacker.secondaryWeapon?.cooldown ?? attacker.weapon.cooldown)
             case .summon, .barrage, .detonate:
                 // Abilities don't spend a weapon's reload; their own gates
                 // (summon cadence, barrel cap, a live red barrel) pace them.
                 break
             case nil:
-                enemies[attackerIndex].cooldownRemaining = attacker.weapon.cooldown
+                enemies[attackerIndex].cooldownRemaining = effectiveCooldown(attacker.weapon.cooldown)
             }
             enemies[attackerIndex].plannedDetonateTile = nil
 
@@ -1325,7 +1593,8 @@ struct GameState {
                         chargesUltimate: false,
                         sourceName: attacker.slayerName,
                         creditName: nil,
-                        affliction: attacker.weapon.affliction
+                        affliction: attacker.weapon.affliction,
+                        stun: attacker.weapon.stun
                     )
                     nextProjectileID += 1
                     if let survivor = fly(shot, impacts: &projectileImpacts, hits: &projectileHits, flights: &boltFlights) {
@@ -1409,6 +1678,16 @@ struct GameState {
                     : attacker.slayerName
                 applyDamage(max(0, attackDamage - reduction), from: killer)
                 afflictPlayer(with: strikingWeapon.affliction)
+                applyPlayerStun(strikingWeapon.stun)
+                // A knockback weapon flings the player down its swing — into a
+                // wall, an enemy, or a barrel that then goes off around them.
+                if strikingWeapon.knockback > 0, let facing = attacker.plannedDirection, !isGameOver, !devKnockbackImmune {
+                    let before = playerPosition
+                    let flung = shovePlayer(direction: facing, distance: strikingWeapon.knockback)
+                    enemyExplosions += flung.explosions
+                    friendlyFireHits += flung.hits
+                    if playerPosition != before { playerShoveTo = playerPosition }
+                }
             }
             // Friendly fire: comrades in the sweep take the hit; a thrower caught
             // in its own blast does too.
@@ -1490,7 +1769,7 @@ struct GameState {
             undamagedTurns = 0
         } else {
             undamagedTurns += 1
-            if undamagedTurns.isMultiple(of: 2) && playerArmor < armorCap {
+            if rules.armorRegen && undamagedTurns.isMultiple(of: 2) && playerArmor < armorCap {
                 playerArmor += 1
             }
         }
@@ -1500,7 +1779,7 @@ struct GameState {
         }
         // The jab doesn't restart the reload — the real weapon keeps counting.
         if didAttack && !bashing {
-            weaponCooldowns[equippedWeapon.name] = equippedWeapon.cooldown
+            weaponCooldowns[equippedWeapon.name] = effectiveCooldown(equippedWeapon.cooldown)
         }
 
         // The streak extends on any turn with a kill and snaps on a dry one.
@@ -1531,7 +1810,7 @@ struct GameState {
 
         turnNumber += 1
         if !isGameOver && !bossPhase && !devFreezeScore {
-            score += Self.survivalScore
+            score += scaledScore(Self.survivalScore)
         }
 
         // The score milestone summons the level's elite gatekeeper (a boss every
@@ -1554,11 +1833,13 @@ struct GameState {
         draftEnemyPlans()
 
         return TurnResolution(
-            playerDestination: playerPosition,
+            playerDestination: draftedDestination,
+            playerShoveTo: playerShoveTo,
             attackTiles: attackTiles,
             ultimateTiles: ultimateTiles,
             enemyHits: playerPhaseHits,
             playerExplosions: playerExplosions,
+            shoves: shoves,
             enemyMoves: moves,
             enemyAttacks: enemyAttacks,
             friendlyFireHits: friendlyFireHits,
@@ -1577,7 +1858,8 @@ struct GameState {
             healthLost: healthBefore - playerHealth,
             armorLost: max(0, armorBefore - playerArmor),
             playerHealth: playerHealth,
-            playerArmor: playerArmor
+            playerArmor: playerArmor,
+            playerActionStunned: playerActionStunned
         )
     }
 
@@ -1604,9 +1886,9 @@ struct GameState {
                 // Score is frozen during the boss fight — except the gate itself.
                 if (!bossPhase || isElite) && !devFreezeScore {
                     // Kills escalate within a turn and ride the multi-turn streak.
-                    score += enemies[index].bounty
+                    score += scaledScore(enemies[index].bounty
                         + Self.comboKillBonus * killsThisTurn
-                        + Self.streakKillBonus * killStreak
+                        + Self.streakKillBonus * killStreak)
                 }
                 killsThisTurn += 1
                 totalKills += 1
@@ -1692,13 +1974,26 @@ struct GameState {
         return pendingExplosions
     }
 
+    /// The level's difficulty knobs with this run's conditions folded in, so a
+    /// modifier like Powder Keg or Swarm reshapes every board, not just the first.
+    func effectiveLevelConfig(for level: Int) -> LevelConfig {
+        let base = LevelConfig.forLevel(level)
+        return LevelConfig(
+            startingEnemies: base.startingEnemies + rules.startingEnemiesBonus,
+            spawnInterval: max(2, base.spawnInterval + rules.spawnIntervalDelta),
+            spawnBatch: max(1, base.spawnBatch + rules.spawnBatchBonus),
+            walls: rules.allBarrels ? 0 : base.walls,
+            barrels: rules.allBarrels ? min(14 + level, 20) : base.barrels
+        )
+    }
+
     /// Advances to the next level: the board fully regenerates at the new
     /// difficulty (fresh enemies, obstacles, and floor — the player keeps
     /// position, health, armor, loadout, and score) and two boons are drawn for
     /// the player to choose between; play pauses until `chooseBuff` is called.
     private mutating func advanceLevel() {
         level += 1
-        let config = LevelConfig.forLevel(level)
+        let config = effectiveLevelConfig(for: level)
 
         lingeringEffects = []
         // The slain gatekeeper's weapon rides along to the new board.
@@ -1717,6 +2012,7 @@ struct GameState {
         spawnDebt = 0
         formationAnchors = [:]
         playerAffliction = nil
+        playerStunTurns = 0
 
         var fresh: [Enemy] = []
         for tile in edgeTiles().shuffled() where fresh.count < config.startingEnemies {
@@ -1790,7 +2086,7 @@ struct GameState {
     /// The level's gatekeeper arrives on an open edge tile: a juggernaut, or a
     /// full boss every third level. Waves pause until it falls.
     private mutating func summonElite(into spawns: inout [TurnResolution.SpawnEvent]) {
-        let archetype: Archetype = level.isMultiple(of: 3) ? .boss : .juggernaut
+        let archetype: Archetype = (rules.bossEveryGate || level.isMultiple(of: 3)) ? .boss : .juggernaut
         let taken = Set(enemies.map(\.position))
             .union(obstacles.map(\.position))
             .union([playerPosition])
@@ -1825,7 +2121,7 @@ struct GameState {
             queuedBossBarrels = []
             return
         }
-        let config = LevelConfig.forLevel(level)
+        let config = effectiveLevelConfig(for: level)
         guard turnNumber % config.spawnInterval == 0 else { return }
 
         // During an elite fight, ordinary waves and barrel deliveries stop. The
@@ -2063,9 +2359,11 @@ struct GameState {
                         let reduction = buffs.reduce(0) { $0 + $1.rangedDamageReduction }
                         applyDamage(max(0, bolt.damage - reduction), from: bolt.sourceName)
                         afflictPlayer(with: bolt.affliction)
+                        applyPlayerStun(bolt.stun)
                     } else {
                         let strike = damageEnemies(on: [next], damage: bolt.damage, chargesUltimate: bolt.chargesUltimate, credit: bolt.creditName, travelling: bolt.direction)
                         afflict(strike, with: bolt.affliction, chargesUltimate: bolt.chargesUltimate, credit: bolt.creditName)
+                        applyStun(strike, turns: bolt.stun)
                         if bolt.creditName != nil {
                             struckByPlayerThisTurn.formUnion(strike.map(\.enemyID))
                         }
@@ -2088,6 +2386,7 @@ struct GameState {
             impacts.append(TurnResolution.Explosion(center: bolt.position, tiles: blast))
             let blastHits = damageEnemies(on: blastSet, damage: bolt.damage, chargesUltimate: bolt.chargesUltimate, credit: bolt.creditName)
             afflict(blastHits, with: bolt.affliction, chargesUltimate: bolt.chargesUltimate, credit: bolt.creditName)
+            applyStun(blastHits, turns: bolt.stun)
             if bolt.creditName != nil {
                 struckByPlayerThisTurn.formUnion(blastHits.map(\.enemyID))
             }
@@ -2096,6 +2395,7 @@ struct GameState {
                 let reduction = buffs.reduce(0) { $0 + $1.rangedDamageReduction }
                 applyDamage(max(0, bolt.damage - reduction), from: bolt.sourceName)
                 afflictPlayer(with: bolt.affliction)
+                applyPlayerStun(bolt.stun)
             }
             let chained = detonateBarrels(struckTiles: blastSet, chargesUltimate: bolt.chargesUltimate)
             impacts += chained.explosions
@@ -2179,6 +2479,26 @@ struct GameState {
     var devFreezeScore = false
     /// Dev: while true, the score milestone never summons a juggernaut or boss.
     var devNoElites = false
+    /// Dev: while true, enemy attacks never stun the player's action.
+    var devStunImmune = false
+    /// Dev: while true, enemy knockback never shoves the player.
+    var devKnockbackImmune = false
+    /// Dev: while true, the player can move to any tile on the board, so it's
+    /// easy to line up a shove into a barrel or reach anything to test it.
+    var devInfiniteSpeed = false
+    /// Dev: while true, the player's weapons never go on cooldown.
+    var devNoCooldown = false
+    /// Dev override for the player's attack damage.
+    enum DevDamageMode: CaseIterable {
+        /// The weapon's real damage.
+        case normal
+        /// Enough to one-shot anything.
+        case instakill
+        /// Zero — the hit lands (stun/knockback still apply) but nothing dies,
+        /// so an enemy can be poked repeatedly for testing.
+        case zero
+    }
+    var devDamageMode: DevDamageMode = .normal
 
     /// Dev-panel override for the next wave. When non-nil, `scheduleSpawns`
     /// forces this on wave turns; nil restores the standard spawn logic.
@@ -2217,6 +2537,12 @@ struct GameState {
         playerArmor = armorCap
     }
 
+    /// Dev: immediately shakes off any active daze on the player — used when
+    /// toggling stun immunity on mid-run so it takes effect right away.
+    mutating func devClearPlayerStun() {
+        playerStunTurns = 0
+    }
+
     mutating func devAddScore(_ amount: Int) {
         score += amount
     }
@@ -2225,6 +2551,8 @@ struct GameState {
     /// source label feeds the death recap when the hit proves fatal.
     private mutating func applyDamage(_ amount: Int, from source: String) {
         guard !devInvincible else { return }
+        // Glass and kin scale incoming damage as well as outgoing.
+        let amount = Int((Double(amount) * rules.damageTakenMult).rounded())
         let absorbed = min(playerArmor, amount)
         playerArmor -= absorbed
         playerHealth -= amount - absorbed
@@ -2298,6 +2626,19 @@ struct GameState {
             enemies[$0].position.distance(to: playerPosition) < enemies[$1].position.distance(to: playerPosition)
         }
         for index in draftOrder {
+            // A stunned enemy plans nothing — it holds its tile, drafts no move
+            // or attack, and shows no threat. The countdown ticks at the start
+            // of its frozen turn (see resolveTurn), not here.
+            if enemies[index].stunTurns > 0 {
+                enemies[index].plannedTarget = enemies[index].position
+                enemies[index].plannedPath = []
+                enemies[index].plannedDirection = nil
+                enemies[index].plannedThrowTarget = nil
+                enemies[index].plannedIntent = nil
+                enemies[index].plannedSecondaryDirection = nil
+                enemies[index].plannedDetonateTile = nil
+                continue
+            }
             let enemy = enemies[index]
             let ready = enemy.cooldownRemaining == 0
             // Fearless archetypes (berserkers, bombers) path straight through

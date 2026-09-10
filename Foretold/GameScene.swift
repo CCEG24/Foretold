@@ -28,6 +28,7 @@ class GameScene: SKScene {
     private var afflictionLabel: SKLabelNode!
     private var itemsLabel: SKLabelNode!
     private var scoreLabel: SKLabelNode!
+    private var conditionsLabel: SKLabelNode!
     private var buffsLabel: SKLabelNode!
     private var spawnMarkerNodes: [SKNode] = []
     private var weaponDropNodes: [SKNode] = []
@@ -58,8 +59,15 @@ class GameScene: SKScene {
     /// Max gap between R presses for a mid-run restart.
     private static let restartDoubleTapWindow: TimeInterval = 0.45
     private var lastRestartKeyTime: TimeInterval = 0
-    /// Chaos toggle: the next restart replaces every wall with an explosive barrel.
-    private var allBarrelsMode = false
+    /// Run conditions switched on in the build picker; persisted across runs and
+    /// applied when the next run is generated. Powder Keg (the old "boom mode")
+    /// lives here now, so `B` toggles it.
+    private var activeModifiers: Set<RunModifier> {
+        get { Set(UserDefaults.standard.stringArray(forKey: "activeModifiers")?.compactMap(RunModifier.init(rawValue:)) ?? []) }
+        set { UserDefaults.standard.set(newValue.map(\.rawValue).sorted(), forKey: "activeModifiers") }
+    }
+    /// The score multiplier the active conditions currently grant.
+    private var activeScoreMultiplier: Double { RunRules(activeModifiers).scoreMultiplier }
     /// The level-up boon chooser; input is captive while it's up.
     private var buffChoiceOverlay: SKNode?
     /// Floating "E · pick up" prompt above the weapon the player is standing on.
@@ -537,6 +545,17 @@ class GameScene: SKScene {
         scoreLabel.zPosition = 20
         addChild(scoreLabel)
 
+        // Just under the score: which run conditions are active and their score
+        // multiplier, so the player never forgets what they signed up for.
+        conditionsLabel = SKLabelNode()
+        conditionsLabel.fontName = "HelveticaNeue-Bold"
+        conditionsLabel.fontSize = 12
+        conditionsLabel.fontColor = SKColor(red: 0.93, green: 0.80, blue: 0.45, alpha: 1.0)
+        conditionsLabel.verticalAlignmentMode = .center
+        conditionsLabel.position = CGPoint(x: size.width / 2, y: scoreLabel.position.y - 20)
+        conditionsLabel.zPosition = 20
+        addChild(conditionsLabel)
+
         buffsLabel = SKLabelNode()
         buffsLabel.fontName = "HelveticaNeue"
         buffsLabel.fontSize = 12
@@ -986,6 +1005,12 @@ class GameScene: SKScene {
         if let affliction = weapon.affliction {
             traits.append("bleed \(affliction.damagePerTurn)×\(affliction.duration)")
         }
+        if weapon.stun > 0 {
+            traits.append("stun \(weapon.stun)")
+        }
+        if weapon.knockback > 0 {
+            traits.append("knock \(weapon.knockback)")
+        }
         if weapon.cooldown > 0 {
             traits.append("cd\(weapon.cooldown)")
         }
@@ -1068,12 +1093,15 @@ class GameScene: SKScene {
             color: armorFlashColor
         )
         updateUltimateBar()
+        var playerStatuses: [String] = []
         if let wound = state.playerAffliction {
-            afflictionLabel.text = "BLEEDING \(wound.damagePerTurn) dmg/turn for \(wound.turnsRemaining) turns"
-            afflictionLabel.isHidden = false
-        } else {
-            afflictionLabel.isHidden = true
+            playerStatuses.append("BLEEDING \(wound.damagePerTurn) dmg/turn for \(wound.turnsRemaining) turns")
         }
+        if state.playerStunTurns > 0 {
+            playerStatuses.append("STUNNED · attack disabled")
+        }
+        afflictionLabel.text = playerStatuses.joined(separator: "  ·  ")
+        afflictionLabel.isHidden = playerStatuses.isEmpty
         dodgeChipLabel.isHidden = !state.plannedDodgeReady
         let nextLevel = GameState.scoreThreshold(forLevel: state.level + 1)
         let streak = state.killStreak >= 2 ? " · STREAK ×\(state.killStreak)" : ""
@@ -1083,6 +1111,16 @@ class GameScene: SKScene {
         let best = devFreezeHighScore ? highScore : max(highScore, state.score)
         scoreLabel.text = "LVL \(state.level) · SCORE \(progress)\(streak) · TURN \(state.turnNumber) · BEST \(best)"
         scoreLabel.fontColor = devFreezeHighScore ? SKColor(red: 0.45, green: 0.65, blue: 0.95, alpha: 1.0) : .white
+
+        // The run's active conditions and their score multiplier.
+        let mods = state.modifiers
+        if mods.isEmpty {
+            conditionsLabel.isHidden = true
+        } else {
+            let names = RunModifier.allCases.filter(mods.contains).map(\.title).joined(separator: " · ")
+            conditionsLabel.text = String(format: "%@  ·  score ×%.1f", names, state.rules.scoreMultiplier)
+            conditionsLabel.isHidden = false
+        }
 
         // Held buffs, deduplicated into "name ×2 (3 lv)" style in pickup order;
         // the level count shows the soonest expiry of the stack.
@@ -1396,6 +1434,9 @@ class GameScene: SKScene {
         if let wound = enemy.affliction {
             status += " · BLEEDING \(wound.damagePerTurn)/turn ×\(wound.turnsRemaining)"
         }
+        if enemy.stunTurns > 0 {
+            status += " · STUNNED ×\(enemy.stunTurns)"
+        }
         if enemy.archetype == .shieldbearer, let facing = enemy.facing {
             status += enemy.shieldReady ? " · shield \(facing.arrow)" : " · shield down"
         }
@@ -1511,6 +1552,55 @@ class GameScene: SKScene {
             boardNode.addChild(plank)
             enemyPlanArrowNodes.append(plank)
         }
+
+        // Dazed combatants (the player included) wear a little orbit of stars
+        // where their threat would be — they plan nothing until it wears off.
+        refreshStunMarkers()
+    }
+
+    /// Puts — or clears — the dazed-stars marker on the player and every enemy
+    /// so it matches the current stun state. The marker rides each body, so it
+    /// tracks movement and vanishes with an enemy on death.
+    private func refreshStunMarkers() {
+        playerNode.childNode(withName: "stunStars")?.removeFromParent()
+        if state.playerStunTurns > 0 {
+            playerNode.addChild(makeStunStars())
+        }
+        for (id, node) in enemyNodes {
+            node.childNode(withName: "stunStars")?.removeFromParent()
+            if let enemy = state.enemies.first(where: { $0.id == id }), enemy.stunTurns > 0 {
+                node.addChild(makeStunStars())
+            }
+        }
+    }
+
+    /// The classic "seeing stars" marker: three sparks that slowly orbit above
+    /// the head and twinkle out of phase. Named "stunStars" so a refresh can
+    /// find and remove it.
+    private func makeStunStars() -> SKNode {
+        let ring = SKNode()
+        ring.name = "stunStars"
+        ring.position = CGPoint(x: 0, y: tileSize * 0.46)
+        ring.zPosition = 30
+        let count = 3
+        let orbit = tileSize * 0.17
+        for index in 0..<count {
+            let angle = CGFloat(index) / CGFloat(count) * .pi * 2
+            let star = SKLabelNode(text: "✦")
+            star.fontName = "HelveticaNeue-Bold"
+            star.fontSize = tileSize * 0.26
+            star.fontColor = SKColor(red: 1.0, green: 0.90, blue: 0.45, alpha: 1.0)
+            star.verticalAlignmentMode = .center
+            star.horizontalAlignmentMode = .center
+            star.position = CGPoint(x: cos(angle) * orbit, y: sin(angle) * orbit)
+            star.run(SKAction.repeatForever(SKAction.sequence([
+                SKAction.fadeAlpha(to: 0.30, duration: 0.4),
+                SKAction.fadeAlpha(to: 1.0, duration: 0.4),
+            ])))
+            ring.addChild(star)
+        }
+        ring.run(SKAction.repeatForever(SKAction.rotate(byAngle: .pi * 2, duration: 1.6)))
+        return ring
     }
 
     // MARK: - Turn flow
@@ -1562,6 +1652,9 @@ class GameScene: SKScene {
             } else {
                 showToast("picked up \(picked.name)", duration: 1.0)
             }
+        }
+        if resolution.playerActionStunned {
+            showToast("STUNNED — your attack fizzled", duration: 1.4)
         }
         isResolving = true
         advanceTutorial(after: .go)
@@ -1618,6 +1711,21 @@ class GameScene: SKScene {
 
         run(SKAction.wait(forDuration: longestDuration)) { [weak self] in
             self?.playProjectileImpacts(resolution)
+        }
+    }
+
+    /// Skids each knocked-back enemy along its shove. Runs concurrently with the
+    /// hit/death flash on the same node, so a body flung into a barrel slides in
+    /// as it's destroyed.
+    private func animateShoves(_ shoves: [TurnResolution.Shove]) {
+        for shove in shoves {
+            guard let node = enemyNodes[shove.enemyID] else { continue }
+            let destination = point(for: shove.to)
+            let distanceInTiles = hypot(destination.x - node.position.x,
+                                        destination.y - node.position.y) / tileSize
+            let skid = SKAction.move(to: destination, duration: 0.08 + 0.04 * distanceInTiles)
+            skid.timingMode = .easeOut
+            node.run(skid)
         }
     }
 
@@ -1806,7 +1914,8 @@ class GameScene: SKScene {
         // Bolt shots sweep no tiles, but a bomber dying to one still blasts:
         // its explosion (and the barrels it popped) must play regardless.
         guard !resolution.attackTiles.isEmpty
-            || !resolution.playerExplosions.isEmpty || !resolution.enemyHits.isEmpty else {
+            || !resolution.playerExplosions.isEmpty || !resolution.enemyHits.isEmpty
+            || !resolution.shoves.isEmpty else {
             playEnemyAttacks(resolution)
             return
         }
@@ -1814,6 +1923,9 @@ class GameScene: SKScene {
         for tile in resolution.attackTiles {
             tileNodes[tile]?.color = SKColor(red: 0.85, green: 0.25, blue: 0.15, alpha: 1.0)
         }
+        // Slide the flung enemies first (they're still in enemyNodes here) so a
+        // shove into a barrel reads as the body arriving just as it goes off.
+        animateShoves(resolution.shoves)
         animateEnemyHits(resolution.enemyHits)
         animateExplosions(resolution.playerExplosions)
 
@@ -1944,6 +2056,16 @@ class GameScene: SKScene {
                 SKAction.move(to: lunge, duration: 0.08),
                 SKAction.move(to: origin, duration: 0.10),
             ]))
+        }
+
+        // Knockback: the player skids off their tile as the blow lands.
+        if let landing = resolution.playerShoveTo {
+            let target = point(for: landing)
+            let distanceInTiles = hypot(target.x - playerNode.position.x,
+                                        target.y - playerNode.position.y) / tileSize
+            let skid = SKAction.move(to: target, duration: 0.10 + 0.05 * distanceInTiles)
+            skid.timingMode = .easeOut
+            playerNode.run(SKAction.sequence([SKAction.wait(forDuration: 0.10), skid]))
         }
 
         // A dodged hit: the player visibly sidesteps instead of flashing damage.
@@ -2481,6 +2603,8 @@ class GameScene: SKScene {
     private func makeRunState() -> GameState {
         tallyBaseline = lifetimeTallies
         let pool = currentWeaponPool()
+        let modifiers = activeModifiers
+        let powderKeg = modifiers.contains(.powderKeg)
         return GameState(
             weapon: devNextEquipped
                 ?? pickedLoadoutWeapon(loadoutMeleeName, from: pool.filter(\.isMelee)),
@@ -2488,9 +2612,10 @@ class GameScene: SKScene {
                 ?? pickedLoadoutWeapon(loadoutRangedName, from: pool.filter(\.isRanged)),
             playerHealth: devNextMaxHealth,
             maxArmor: devNextMaxArmor,
-            walls: allBarrelsMode ? 0 : 10,
-            barrels: allBarrelsMode ? 14 : 4,
-            weaponPool: currentWeaponPool()
+            walls: powderKeg ? 0 : 10,
+            barrels: powderKeg ? 14 : 4,
+            weaponPool: currentWeaponPool(),
+            modifiers: modifiers
         )
     }
 
@@ -2556,31 +2681,30 @@ class GameScene: SKScene {
 
         let title = SKLabelNode(text: "the draft before the draft")
         title.fontName = "Papyrus"
-        title.fontSize = 30
+        title.fontSize = 28
         title.fontColor = gold
-        title.position = CGPoint(x: centerX, y: centerY + 126)
+        title.position = CGPoint(x: centerX, y: centerY + 156)
         overlay.addChild(title)
 
-        let hint = SKLabelNode(text: "click a slot to change it")
+        let hint = SKLabelNode(text: "click a slot or condition to change it")
         hint.fontName = "HelveticaNeue"
         hint.fontSize = 13
         hint.fontColor = SKColor(white: 0.6, alpha: 1.0)
-        hint.position = CGPoint(x: centerX, y: centerY + 92)
+        hint.position = CGPoint(x: centerX, y: centerY + 128)
         overlay.addChild(hint)
 
         let pool = currentWeaponPool()
-        let slots: [(String, String, Weapon?)] = [
-            ("melee", "build:melee", pickedLoadoutWeapon(loadoutMeleeName, from: pool.filter(\.isMelee))),
-            ("ranged", "build:ranged", pickedLoadoutWeapon(loadoutRangedName, from: pool.filter(\.isRanged))),
+        let slots: [(String, String, Weapon?, CGFloat)] = [
+            ("melee", "build:melee", pickedLoadoutWeapon(loadoutMeleeName, from: pool.filter(\.isMelee)), centerY + 96),
+            ("ranged", "build:ranged", pickedLoadoutWeapon(loadoutRangedName, from: pool.filter(\.isRanged)), centerY + 48),
         ]
-        var y = centerY + 44
-        for (slot, action, weapon) in slots {
+        for (slot, action, weapon, rowY) in slots {
             let row = SKLabelNode(text: "\(slot): \(weapon?.name ?? "random") ▸")
             row.fontName = "HelveticaNeue-Bold"
-            row.fontSize = 19
+            row.fontSize = 18
             row.fontColor = SKColor(white: 0.9, alpha: 1.0)
             row.verticalAlignmentMode = .center
-            row.position = CGPoint(x: centerX, y: y)
+            row.position = CGPoint(x: centerX, y: rowY)
             row.name = action
             overlay.addChild(row)
 
@@ -2589,16 +2713,64 @@ class GameScene: SKScene {
             stats.fontSize = 12
             stats.fontColor = SKColor(white: 0.55, alpha: 1.0)
             stats.verticalAlignmentMode = .center
-            stats.position = CGPoint(x: centerX, y: y - 22)
+            stats.position = CGPoint(x: centerX, y: rowY - 21)
             overlay.addChild(stats)
-            y -= 66
         }
 
-        let begin = SKShapeNode(rectOf: CGSize(width: 180, height: 54), cornerRadius: 10)
+        // Conditions: each modifier is a toggle laid out two per row; turning
+        // them on lifts the score multiplier shown beneath.
+        let condHeader = SKLabelNode(text: "CONDITIONS")
+        condHeader.fontName = "HelveticaNeue-Bold"
+        condHeader.fontSize = 12
+        condHeader.fontColor = SKColor(white: 0.55, alpha: 1.0)
+        condHeader.horizontalAlignmentMode = .left
+        condHeader.verticalAlignmentMode = .center
+        condHeader.position = CGPoint(x: centerX - 150, y: centerY - 6)
+        overlay.addChild(condHeader)
+
+        let randomize = SKLabelNode(text: "randomize ▸")
+        randomize.fontName = "HelveticaNeue"
+        randomize.fontSize = 12
+        randomize.fontColor = SKColor(white: 0.6, alpha: 1.0)
+        randomize.horizontalAlignmentMode = .right
+        randomize.verticalAlignmentMode = .center
+        randomize.position = CGPoint(x: centerX + 150, y: centerY - 6)
+        randomize.name = "build:randomModifiers"
+        overlay.addChild(randomize)
+
+        let active = activeModifiers
+        for (index, modifier) in RunModifier.allCases.enumerated() {
+            let column = index % 2
+            let rowIndex = index / 2
+            let x = centerX + (column == 0 ? -95 : 95)
+            let rowY = centerY - 32 - CGFloat(rowIndex) * 22
+            let on = active.contains(modifier)
+            let label = SKLabelNode(text: "\(on ? "✓" : "·")  \(modifier.title)")
+            label.fontName = "HelveticaNeue-Bold"
+            label.fontSize = 14
+            label.fontColor = on ? gold : SKColor(white: 0.5, alpha: 1.0)
+            label.horizontalAlignmentMode = .center
+            label.verticalAlignmentMode = .center
+            label.position = CGPoint(x: x, y: rowY)
+            label.name = "build:mod:\(modifier.rawValue)"
+            overlay.addChild(label)
+        }
+
+        let rowCount = (RunModifier.allCases.count + 1) / 2
+        let multiplier = activeScoreMultiplier
+        let scoreLine = SKLabelNode(text: String(format: "score ×%.1f", multiplier))
+        scoreLine.fontName = "HelveticaNeue-Bold"
+        scoreLine.fontSize = 14
+        scoreLine.fontColor = multiplier > 1.0 ? gold : SKColor(white: 0.55, alpha: 1.0)
+        scoreLine.verticalAlignmentMode = .center
+        scoreLine.position = CGPoint(x: centerX, y: centerY - 32 - CGFloat(rowCount) * 22 - 4)
+        overlay.addChild(scoreLine)
+
+        let begin = SKShapeNode(rectOf: CGSize(width: 180, height: 48), cornerRadius: 10)
         begin.fillColor = SKColor(red: 0.20, green: 0.55, blue: 0.35, alpha: 1.0)
         begin.strokeColor = .white
         begin.lineWidth = 1.5
-        begin.position = CGPoint(x: centerX, y: centerY - 122)
+        begin.position = CGPoint(x: centerX, y: centerY - 142)
         begin.name = "build:start"
         let beginLabel = SKLabelNode(text: "BEGIN")
         beginLabel.fontName = "HelveticaNeue-Bold"
@@ -2613,7 +2785,7 @@ class GameScene: SKScene {
         spaceHint.fontName = "HelveticaNeue"
         spaceHint.fontSize = 12
         spaceHint.fontColor = SKColor(white: 0.55, alpha: 1.0)
-        spaceHint.position = CGPoint(x: centerX, y: centerY - 162)
+        spaceHint.position = CGPoint(x: centerX, y: centerY - 176)
         overlay.addChild(spaceHint)
 
         addChild(overlay)
@@ -2659,6 +2831,73 @@ class GameScene: SKScene {
         rebuildDevPanel()
     }
 
+    /// Which category of dev tools the panel is currently showing. Persists
+    /// while the panel is closed so it reopens on the last-used tab.
+    private enum DevTab: CaseIterable {
+        case player, spawn, score, run, profile
+        var title: String {
+            switch self {
+            case .player: return "PLAYER"
+            case .spawn: return "SPAWN"
+            case .score: return "SCORE"
+            case .run: return "RUN"
+            case .profile: return "PROFILE"
+            }
+        }
+    }
+    private var devTab: DevTab = .player
+
+    /// The rows for the active dev tab: (label, action) pairs; an empty action
+    /// marks a non-clickable note.
+    private func devTabRows() -> [(String, String)] {
+        switch devTab {
+        case .run:
+            return [
+                ("next equipped: \(devNextEquipped?.name ?? "random") ▸", "dev:equipped"),
+                ("next holstered: \(devNextHolstered?.name ?? "random") ▸", "dev:holstered"),
+                ("next max HP: \(devNextMaxHealth) ▸", "dev:hp"),
+                ("next armor cap: \(devNextMaxArmor) ▸", "dev:armor"),
+                ("— applies on R restart —", ""),
+            ]
+        case .player:
+            return [
+                ("heal fully", "dev:heal"),
+                ("fill ultimate", "dev:ultFill"),
+                ("zero ultimate", "dev:ultZero"),
+                ("invincible: \(state.devInvincible ? "ON" : "off")", "dev:invincible"),
+                ("stun immune: \(state.devStunImmune ? "ON" : "off")", "dev:stunImmune"),
+                ("knockback immune: \(state.devKnockbackImmune ? "ON" : "off")", "dev:kbImmune"),
+                ("infinite speed: \(state.devInfiniteSpeed ? "ON" : "off")", "dev:infiniteSpeed"),
+                ("no cooldown: \(state.devNoCooldown ? "ON" : "off")", "dev:noCooldown"),
+                ("attack damage: \(devDamageModeLabel) ▸", "dev:damageMode"),
+            ]
+        case .score:
+            return [
+                ("+100 score", "dev:score"),
+                ("freeze high score: \(devFreezeHighScore ? "ON" : "off")", "dev:freezeScore"),
+                ("freeze score gain: \(state.devFreezeScore ? "ON" : "off")", "dev:freezeScoreGain"),
+            ]
+        case .spawn:
+            var rows: [(String, String)] = [
+                ("elites: \(state.devNoElites ? "OFF" : "on")", "dev:noElites"),
+                ("next wave: \(devSpawnModeLabel) ▸", "dev:spawnMode"),
+            ]
+            if devSpawnMode == .normal {
+                rows.append(("spawn type: \(devArchetypeLabel(devSpawnArchetype)) ▸", "dev:spawnType"))
+                rows.append(("spawn weapon: \(devSpawnWeapon?.name ?? "random") ▸", "dev:spawnWeapon"))
+            } else if devSpawnMode == .formation {
+                let name = devSpawnFormationIndex.map { Formation.all[$0].name } ?? "random"
+                rows.append(("formation: \(name) ▸", "dev:spawnFormation"))
+            }
+            return rows
+        case .profile:
+            return [
+                ("unlock entire arsenal", "dev:unlockAll"),
+                ("reset profile (unlocks, tallies, best)", "dev:resetProfile"),
+            ]
+        }
+    }
+
     private func rebuildDevPanel() {
         devPanel?.removeFromParent()
         let overlay = SKNode()
@@ -2666,61 +2905,78 @@ class GameScene: SKScene {
         // "draft before the draft" isn't hidden behind that overlay's board dim.
         overlay.zPosition = 95
 
-        var rows: [(String, String)] = [
-            ("DEV MODE — click a row · ` or esc closes", ""),
-            ("next equipped: \(devNextEquipped?.name ?? "random") ▸", "dev:equipped"),
-            ("next holstered: \(devNextHolstered?.name ?? "random") ▸", "dev:holstered"),
-            ("next max HP: \(devNextMaxHealth) ▸", "dev:hp"),
-            ("next armor cap: \(devNextMaxArmor) ▸", "dev:armor"),
-            ("— the four above apply on R restart —", ""),
-            ("fill ultimate", "dev:ultFill"),
-            ("zero ultimate", "dev:ultZero"),
-            ("heal fully", "dev:heal"),
-            ("+100 score", "dev:score"),
-            ("invincible: \(state.devInvincible ? "ON" : "off")", "dev:invincible"),
-            ("freeze high score: \(devFreezeHighScore ? "ON" : "off")", "dev:freezeScore"),
-            ("freeze score gain: \(state.devFreezeScore ? "ON" : "off")", "dev:freezeScoreGain"),
-            ("elites: \(state.devNoElites ? "OFF" : "on")", "dev:noElites"),
-        ]
-        // Next-wave spawn override — standard hands back to the normal roll.
-        rows.append(("next wave: \(devSpawnModeLabel) ▸", "dev:spawnMode"))
-        if devSpawnMode == .normal {
-            rows.append(("  spawn type: \(devArchetypeLabel(devSpawnArchetype)) ▸", "dev:spawnType"))
-            rows.append(("  spawn weapon: \(devSpawnWeapon?.name ?? "random") ▸", "dev:spawnWeapon"))
-        } else if devSpawnMode == .formation {
-            let name = devSpawnFormationIndex.map { Formation.all[$0].name } ?? "random"
-            rows.append(("  formation: \(name) ▸", "dev:spawnFormation"))
-        }
-        rows.append(contentsOf: [
-            ("unlock entire arsenal", "dev:unlockAll"),
-            ("reset profile (unlocks, tallies, best)", "dev:resetProfile"),
-        ])
-
-        let rowHeight: CGFloat = 26
-        let panelSize = CGSize(width: 430, height: CGFloat(rows.count) * rowHeight + 28)
+        let bodyRows = devTabRows()
+        let rowHeight: CGFloat = 24
+        // A title row, the tab bar, then the active tab's rows.
+        let lineCount = 2 + bodyRows.count
+        let panelSize = CGSize(width: 440, height: CGFloat(lineCount) * rowHeight + 30)
         // Keep the panel clear of the "real god" transmission, which types out
         // just above centre (see showTransmission). Pin the panel's top edge
         // below that line, then clamp so a tall panel still sits on-screen.
         let boardSide = min(size.width, size.height) * boardScale
         let transmissionBottom = size.height / 2 + boardSide * 0.28 - 48
         let panelCenterY = max(panelSize.height / 2 + 20, transmissionBottom - panelSize.height / 2)
+        let centerX = size.width / 2
         let plate = SKShapeNode(rectOf: panelSize, cornerRadius: 10)
         plate.fillColor = SKColor(white: 0.05, alpha: 0.95)
         plate.strokeColor = SKColor(red: 0.55, green: 0.75, blue: 0.95, alpha: 0.9)
         plate.lineWidth = 1.5
-        plate.position = CGPoint(x: size.width / 2, y: panelCenterY)
+        plate.position = CGPoint(x: centerX, y: panelCenterY)
+        // Named so a click landing on the panel (but not a row) is caught as
+        // "inside" and doesn't dismiss it — only clicks outside close the panel.
+        plate.name = "dev:plate"
         overlay.addChild(plate)
 
-        var y = panelCenterY + panelSize.height / 2 - 26
-        for (text, action) in rows {
+        var y = panelCenterY + panelSize.height / 2 - 24
+
+        // Title.
+        let title = SKLabelNode(text: "DEV MODE — ` or esc closes")
+        title.fontName = "HelveticaNeue-Bold"
+        title.fontSize = 12
+        title.fontColor = SKColor(white: 0.5, alpha: 1.0)
+        title.verticalAlignmentMode = .center
+        title.horizontalAlignmentMode = .center
+        title.position = CGPoint(x: centerX, y: y)
+        overlay.addChild(title)
+        y -= rowHeight
+
+        // Tab bar: a row of category tabs, the active one lit like the HUD nav.
+        let selected = SKColor(red: 0.55, green: 0.75, blue: 0.95, alpha: 1.0)
+        let dim = SKColor(white: 0.5, alpha: 1.0)
+        let gap: CGFloat = 16
+        var tabLabels: [SKLabelNode] = []
+        var totalWidth: CGFloat = 0
+        for tab in DevTab.allCases {
+            let label = SKLabelNode(text: tab.title)
+            label.fontName = "HelveticaNeue-Bold"
+            label.fontSize = 13
+            label.fontColor = tab == devTab ? selected : dim
+            label.verticalAlignmentMode = .center
+            label.horizontalAlignmentMode = .left
+            label.name = "dev:tab:\(tab.title)"
+            tabLabels.append(label)
+            totalWidth += label.frame.width
+        }
+        totalWidth += gap * CGFloat(max(0, tabLabels.count - 1))
+        var tabX = centerX - totalWidth / 2
+        for label in tabLabels {
+            label.position = CGPoint(x: tabX, y: y)
+            overlay.addChild(label)
+            tabX += label.frame.width + gap
+        }
+        y -= rowHeight
+
+        // Active tab's rows.
+        for (text, action) in bodyRows {
             let label = SKLabelNode(text: text)
             label.fontName = action.isEmpty ? "HelveticaNeue-Bold" : "HelveticaNeue"
             label.fontSize = 14
             label.fontColor = action.isEmpty
-                ? SKColor(white: 0.55, alpha: 1.0)
-                : SKColor(white: 0.85, alpha: 1.0)
+                ? SKColor(white: 0.5, alpha: 1.0)
+                : SKColor(white: 0.88, alpha: 1.0)
             label.verticalAlignmentMode = .center
-            label.position = CGPoint(x: size.width / 2, y: y)
+            label.horizontalAlignmentMode = .center
+            label.position = CGPoint(x: centerX, y: y)
             if !action.isEmpty {
                 label.name = action
             }
@@ -2750,6 +3006,14 @@ class GameScene: SKScene {
         }
     }
 
+    private var devDamageModeLabel: String {
+        switch state.devDamageMode {
+        case .normal: return "normal"
+        case .instakill: return "insta-kill"
+        case .zero: return "zero"
+        }
+    }
+
     private func devArchetypeLabel(_ archetype: Archetype?) -> String {
         switch archetype {
         case .none: return "random"
@@ -2774,6 +3038,9 @@ class GameScene: SKScene {
 
     private func handleDevAction(_ action: String) {
         switch action {
+        case let tabAction where tabAction.hasPrefix("dev:tab:"):
+            let title = String(tabAction.dropFirst("dev:tab:".count))
+            devTab = DevTab.allCases.first { $0.title == title } ?? devTab
         case "dev:equipped": devNextEquipped = cycleDevWeapon(devNextEquipped)
         case "dev:holstered": devNextHolstered = cycleDevWeapon(devNextHolstered)
         case "dev:hp": devNextMaxHealth = devNextMaxHealth >= 20 ? 1 : devNextMaxHealth + 1
@@ -2783,6 +3050,23 @@ class GameScene: SKScene {
         case "dev:heal": state.devHealFully()
         case "dev:score": state.devAddScore(100)
         case "dev:invincible": state.devInvincible.toggle()
+        case "dev:stunImmune":
+            state.devStunImmune.toggle()
+            if state.devStunImmune { state.devClearPlayerStun() }
+            refreshStunMarkers()
+        case "dev:kbImmune": state.devKnockbackImmune.toggle()
+        case "dev:infiniteSpeed":
+            state.devInfiniteSpeed.toggle()
+            refreshTileHighlights()
+        case "dev:noCooldown":
+            state.devNoCooldown.toggle()
+            refreshTileHighlights()
+        case "dev:damageMode":
+            switch state.devDamageMode {
+            case .normal: state.devDamageMode = .instakill
+            case .instakill: state.devDamageMode = .zero
+            case .zero: state.devDamageMode = .normal
+            }
         case "dev:freezeScore": devFreezeHighScore.toggle()
         case "dev:freezeScoreGain": state.devFreezeScore.toggle()
         case "dev:noElites": state.devNoElites.toggle()
@@ -2954,10 +3238,11 @@ class GameScene: SKScene {
         let location = event.location(in: self)
         let clickedNames = nodes(at: location).compactMap(\.name)
         if devPanel != nil {
-            // The dev panel is modal: rows act, anything else closes it.
-            if let action = clickedNames.first(where: { $0.hasPrefix("dev:") }) {
+            // The dev panel is modal: a row acts, empty panel space is inert,
+            // and only a click outside the panel (or ` / esc) dismisses it.
+            if let action = clickedNames.first(where: { $0.hasPrefix("dev:") && $0 != "dev:plate" }) {
                 handleDevAction(action)
-            } else {
+            } else if !clickedNames.contains("dev:plate") {
                 toggleDevPanel()
             }
             return
@@ -2972,6 +3257,15 @@ class GameScene: SKScene {
                 showBuildPicker()
             } else if clickedNames.contains("build:ranged") {
                 loadoutRangedName = cycledLoadoutName(loadoutRangedName, options: pool.filter(\.isRanged))
+                showBuildPicker()
+            } else if let mod = clickedNames.first(where: { $0.hasPrefix("build:mod:") })
+                        .flatMap({ RunModifier(rawValue: String($0.dropFirst("build:mod:".count))) }) {
+                var mods = activeModifiers
+                if mods.contains(mod) { mods.remove(mod) } else { mods.insert(mod) }
+                activeModifiers = mods
+                showBuildPicker()
+            } else if clickedNames.contains("build:randomModifiers") {
+                activeModifiers = Set(RunModifier.allCases.filter { _ in Bool.random() })
                 showBuildPicker()
             } else if clickedNames.contains("build:start") {
                 startRun()
@@ -3144,9 +3438,13 @@ class GameScene: SKScene {
                 lastRestartKeyTime = event.timestamp
                 showToast("press R again to restart")
             }
-        case 0x0B: // B: next restart swaps every wall for an explosive barrel.
-            allBarrelsMode.toggle()
-            showToast(allBarrelsMode ? "BOOM MODE — walls become barrels on restart" : "boom mode off", duration: 1.0)
+        case 0x0B: // B: quick-toggle the Powder Keg condition (walls → barrels).
+            var mods = activeModifiers
+            if mods.contains(.powderKeg) { mods.remove(.powderKeg) } else { mods.insert(.powderKeg) }
+            activeModifiers = mods
+            showToast(mods.contains(.powderKeg)
+                ? "POWDER KEG on — walls become barrels next run"
+                : "powder keg off", duration: 1.0)
         default:
             break
         }
