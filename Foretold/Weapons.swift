@@ -3,8 +3,6 @@
 //  Foretold
 //
 
-import Foundation
-
 /// The tiles an attack covers. `offsets` is authored relative to an attacker
 /// facing right (+x): (x: 1, y: 0) is the tile directly ahead, (x: 1, y: 1)
 /// ahead and to the left, (x: 2, y: 0) two tiles ahead. `diagonalOffsets`, when
@@ -124,6 +122,7 @@ extension AttackPattern {
         isRadial: true
     )
     static let pike = AttackPattern.line(length: 3)
+    static let harpoon = AttackPattern.line(length: 5)
     static let bow = AttackPattern.line(length: 10)
     static let crossbow = AttackPattern.line(length: 14)
     static let greataxe = AttackPattern.circle(radius: 2)
@@ -230,6 +229,18 @@ struct Weapon: Equatable {
     /// barrels, walls, or hazard pools. Cuts both ways: an enemy wielding a
     /// knockback weapon shoves the player too. 0 = no knockback.
     let knockback: Int
+    /// A grappling line: the shot flies down its aim to the first thing it meets
+    /// and reels. In the player's hands an enemy is dragged toward you, a wall
+    /// pulls *you* to it, a barrel yanks you in and detonates. In an enemy's
+    /// hands it reels the player in — the inverse of knockback.
+    let grapples: Bool
+    /// A lobbed weapon (player only) that drops a live barrel on the target tile
+    /// instead of bursting — no damage, the payoff is detonating it later.
+    let placesBarrel: Bool
+    /// A lobbed weapon (player only) that deals no damage: it drags every enemy
+    /// in its blast one tile toward the eye, clustering them onto hazards, into
+    /// a barrel, or into your reach. Range/radius come from `thrown`.
+    let vortex: Bool
 
     var isMelee: Bool { !isRanged }
 
@@ -245,6 +256,9 @@ struct Weapon: Equatable {
         impactBlastRadius: Int = 0,
         stun: Int = 0,
         knockback: Int = 0,
+        grapples: Bool = false,
+        placesBarrel: Bool = false,
+        vortex: Bool = false,
         attackPattern: AttackPattern? = nil,
         thrown: Thrown? = nil,
         lingering: Lingering? = nil,
@@ -262,6 +276,9 @@ struct Weapon: Equatable {
         self.impactBlastRadius = impactBlastRadius
         self.stun = stun
         self.knockback = knockback
+        self.grapples = grapples
+        self.placesBarrel = placesBarrel
+        self.vortex = vortex
         self.attackPattern = attackPattern
         self.thrown = thrown
         self.lingering = lingering
@@ -312,15 +329,39 @@ extension Weapon {
     /// A blunt-tipped arrow that dazes on impact — the ranged answer to the
     /// hammer, trading damage for a stun at range.
     static let concussionBow = Weapon(name: "Concussion Bow", moveRange: 2, damage: 2, pierces: false, cooldown: 2, enemyHealth: 2, isRanged: true, projectileSpeed: 5, stun: 1, attackPattern: .bow)
+    /// Barely scratches (1 dmg) but shoves hard and never reloads — with 3 move
+    /// you dart in, fling a foe into a barrel or pool, and dart out. The board is
+    /// your real weapon.
+    static let ram = Weapon(name: "Ram", moveRange: 3, damage: 1, pierces: false, cooldown: 0, enemyHealth: 3, knockback: 3, attackPattern: .dagger)
+    /// A grappling line. Fire it down a row: it grabs the first enemy and reels
+    /// them in (raking any spikes on the way), or bites a wall to yank *you*
+    /// across the gap — bite a barrel and you're dragged into the blast. The
+    /// board is a place to move through, not just to shove into.
+    static let grapple = Weapon(name: "Grapple", moveRange: 2, damage: 1, pierces: false, cooldown: 1, enemyHealth: 2, isRanged: true, grapples: true, attackPattern: .harpoon)
+    /// Not a weapon so much as an escape hatch: 7 tiles of movement blink you to
+    /// any open tile — the far side of a foe included — but it barely pricks (1),
+    /// so you don't kill *with* it. Paired with free swaps it's a scalpel: blink
+    /// in next to your target, then next turn swap to a real weapon (free) and
+    /// land the kill, and the turn after swap back and blink clean out.
+    static let slipstep = Weapon(name: "Slipstep", moveRange: 7, damage: 1, pierces: false, cooldown: 0, enemyHealth: 2, attackPattern: .dagger)
+    /// Lobs an empty keg onto a nearby open tile, dropping a live barrel there
+    /// instead of dealing damage. Seed the board with powder, then set it off — a
+    /// knockback swing, a stray shot, or a foe flung into one does the real work.
+    static let keg = Weapon(name: "Keg", moveRange: 2, damage: 0, cooldown: 1, enemyHealth: 2, isRanged: true, placesBarrel: true, thrown: Thrown(range: 4, blastRadius: 0, flightTurns: 0))
+    /// Deals no damage: lob it at a cluster and every foe in the diamond is
+    /// dragged one tile toward the eye — onto live spikes, into a barrel, into a
+    /// tight knot for your next swing, or off the tile they'd telegraphed.
+    static let vortex = Weapon(name: "Vortex", moveRange: 2, damage: 1, cooldown: 1, enemyHealth: 2, isRanged: true, vortex: true, thrown: Thrown(range: 5, blastRadius: 2, flightTurns: 0))
     /// A dev-only toy: kept out of `all`, loot, and milestones, so it can only
     /// be handed out through the dev panel's weapon cycler.
     static let hi = Weapon(name: "Wrath of God", moveRange: 30, damage: 20, enemyHealth: 1, attackPattern: .hi)
-    static let all: [Weapon] = [.dagger, .sword, .hammer, .pike, .bow, .crossbow, .grenade, .poisonPotion, .tippedBow, .greataxe, .scythe, .cannon, .explosiveCrossbow, .serratedBow, .trident, .maul, .concussionBow]
+    static let yeet = Weapon(name: "Yeet", moveRange: 30, damage: 0, enemyHealth: 1, knockback: 30, attackPattern: .dagger)
+    static let all: [Weapon] = [.dagger, .sword, .hammer, .pike, .bow, .crossbow, .grenade, .poisonPotion, .tippedBow, .greataxe, .scythe, .cannon, .explosiveCrossbow, .serratedBow, .trident, .maul, .concussionBow, .ram, .grapple, .slipstep, .keg, .vortex]
 
     /// Weapons reachable only through the dev panel — the full arsenal plus the
     /// dev-only toys. Kept separate from `all` so these never leak into loot,
     /// the loadout draft, or milestone unlocks.
-    static let devArsenal: [Weapon] = all + [.hi]
+    static let devArsenal: [Weapon] = all + [.hi, .yeet]
 
     /// Everything that can appear as floor loot, arm rank-and-file enemies, or
     /// seed the starting loadout. The cannon is boss-exclusive: it only enters
@@ -363,6 +404,11 @@ extension Weapon {
         Milestone(weapon: .serratedBow, tally: "Focus", count: 5, requirement: "hit the same enemy 3 turns running, 5 times"),
         Milestone(weapon: .trident, tally: Weapon.pike.name, count: 10, requirement: "10 kills with the Pike"),
         Milestone(weapon: .maul, tally: "TilesMoved", count: 400, requirement: "move 400 tiles, lifetime"),
-        Milestone(weapon: .concussionBow, tally: "Dodges", count: 20, requirement: "dodge 20 attacks")
+        Milestone(weapon: .concussionBow, tally: "Dodges", count: 20, requirement: "dodge 20 attacks"),
+        Milestone(weapon: .ram, tally: "Barrels", count: 20, requirement: "20 kills with exploding barrels"),
+        Milestone(weapon: .grapple, tally: "TilesMoved", count: 600, requirement: "move 600 tiles, lifetime"),
+        Milestone(weapon: .slipstep, tally: "Dodges", count: 30, requirement: "dodge 30 attacks"),
+        Milestone(weapon: .keg, tally: "Barrels", count: 40, requirement: "40 kills with exploding barrels"),
+        Milestone(weapon: .vortex, tally: "ComboTurns", count: 15, requirement: "kill 3+ in a single turn, 15 times"),
     ]
 }

@@ -4,8 +4,6 @@
 //  The Final Draft?
 //  Name ^
 
-import Foundation
-
 /// Difficulty knobs for one level — the Tetris-style ramp.
 struct LevelConfig {
     /// Enemies placed when the level's board is generated.
@@ -18,6 +16,14 @@ struct LevelConfig {
     let walls: Int
     /// Barrels scattered on the level's board — more powder as the run goes on.
     let barrels: Int
+    /// Toggling spike traps scattered on the floor.
+    let spikeTraps: Int
+    /// Linked teleporter pairs on the floor.
+    let teleporterPairs: Int
+    /// Ice strips scattered on the floor (each a short run you slide across).
+    let icePatches: Int
+    /// Mud tiles scattered on the floor (each costs a step of movement).
+    let mudPatches: Int
 
     static func forLevel(_ level: Int) -> LevelConfig {
         LevelConfig(
@@ -25,7 +31,11 @@ struct LevelConfig {
             spawnInterval: max(2, 3 - (level - 1) / 4),
             spawnBatch: 1 + (level - 1) / 3,
             walls: 10,
-            barrels: min(3 + level, 12)
+            barrels: min(3 + level, 12),
+            spikeTraps: min(2 + level / 2, 6),
+            teleporterPairs: level >= 2 ? 1 : 0,
+            icePatches: level >= 2 ? min(1 + level / 3, 3) : 0,
+            mudPatches: level >= 2 ? min(2 + level / 2, 5) : 0
         )
     }
 }
@@ -36,14 +46,19 @@ struct LevelConfig {
 /// folds a chosen set into the plain knobs the turn logic reads.
 enum RunModifier: String, CaseIterable {
     // Boons ⚡ — purely in the player's favor.
-    case sharpened, quickdraw, quickhands, bulwark, vigor, momentum
+    case sharpened, quickdraw, quickhands, bulwark, vigor, momentum, warded, rampage, sidestep
+    case deadeye, lifelink, breach
     // Curses ☠ — purely against the player.
-    case fragile, swarm, brittle, warband, frenzy, powderKeg
+    case fragile, swarm, brittle, warband, frenzy, powderKeg, scarcity, leadfoot, volatile, sappers, impaler, barricades, blindfold
+    case rusting, overgrowth
 
     var isBoon: Bool {
         switch self {
-        case .sharpened, .quickdraw, .quickhands, .bulwark, .vigor, .momentum: return true
-        case .fragile, .swarm, .brittle, .warband, .frenzy, .powderKeg: return false
+        case .sharpened, .quickdraw, .quickhands, .bulwark, .vigor, .momentum,
+             .warded, .rampage, .sidestep, .deadeye, .lifelink, .breach: return true
+        case .fragile, .swarm, .brittle, .warband, .frenzy, .powderKeg,
+             .scarcity, .leadfoot, .volatile, .sappers, .impaler, .barricades, .blindfold,
+             .rusting, .overgrowth: return false
         }
     }
 
@@ -58,12 +73,27 @@ enum RunModifier: String, CaseIterable {
         case .bulwark: return "Bulwark"
         case .vigor: return "Vigor"
         case .momentum: return "Momentum"
+        case .warded: return "Warded"
+        case .rampage: return "Rampage"
+        case .sidestep: return "Sidestep"
+        case .deadeye: return "Deadeye"
+        case .lifelink: return "Lifelink"
+        case .breach: return "Breach"
         case .fragile: return "Fragile"
         case .swarm: return "Swarm"
         case .brittle: return "Brittle"
         case .warband: return "Warband"
         case .frenzy: return "Frenzy"
         case .powderKeg: return "Powder Keg"
+        case .scarcity: return "Scarcity"
+        case .leadfoot: return "Leadfoot"
+        case .volatile: return "Volatile"
+        case .sappers: return "Sappers"
+        case .impaler: return "Impaler"
+        case .barricades: return "Barricades"
+        case .blindfold: return "Blindfold"
+        case .rusting: return "Rusting"
+        case .overgrowth: return "Overgrowth"
         }
     }
 
@@ -75,12 +105,27 @@ enum RunModifier: String, CaseIterable {
         case .bulwark: return "+2 max armor"
         case .vigor: return "+2 max health"
         case .momentum: return "+1 move range"
+        case .warded: return "immune to barrel blasts"
+        case .rampage: return "a kill shaves your reload"
+        case .sidestep: return "dodge by moving just 1"
+        case .deadeye: return "your shots pierce foes and walls"
+        case .lifelink: return "every 3rd kill heals you 1 HP"
+        case .breach: return "your blasts level any wall"
         case .fragile: return "you take double damage"
         case .swarm: return "bigger, faster waves"
         case .brittle: return "no armor regen"
         case .warband: return "every gate is a boss"
         case .frenzy: return "enemies' cooldowns −1"
         case .powderKeg: return "walls become barrels"
+        case .scarcity: return "no weapons drop"
+        case .leadfoot: return "you can't dodge"
+        case .volatile: return "barrel blasts are bigger"
+        case .sappers: return "every foe is a bomber"
+        case .impaler: return "spikes never retract"
+        case .barricades: return "every tile starts walled — blast through"
+        case .blindfold: return "your health is hidden"
+        case .rusting: return "armor mends slower — every 3 turns"
+        case .overgrowth: return "spikes overrun the floor"
         }
     }
 }
@@ -102,6 +147,29 @@ struct RunRules {
     var armorRegen = true
     var bossEveryGate = false
     var freeSwap = false
+    var barrelImmune = false
+    var killRefundsCooldown = false
+    var noLoot = false
+    var barrelBlastBonus = 0
+    var allBombers = false
+    /// Spike traps stay armed every turn instead of toggling off.
+    var spikesAlwaysLive = false
+    /// Every open tile starts as a crumbling wall — blast/hack your way out.
+    var wallsEverywhere = false
+    /// The player's health readout is hidden — fight by feel.
+    var hideHealth = false
+    /// Your fired shots pierce foes and bore through walls.
+    var piercingShots = false
+    /// A kill restores 1 health.
+    var killHeals = false
+    /// Your attacks shatter any wall, not only crumbling ones.
+    var bustsAllWalls = false
+    /// Extra spike traps scattered on every level's floor.
+    var spikeTrapBonus = 0
+    /// Undamaged turns between each point of armor regen (Rusting stretches it).
+    var armorRegenInterval = 2
+    /// nil = normal dodge distance; 1 = easy dodge; huge = never dodge.
+    var dodgeDistanceOverride: Int?
 
     init(_ modifiers: Set<RunModifier> = []) {
         for modifier in modifiers {
@@ -112,6 +180,9 @@ struct RunRules {
             case .bulwark: bonusMaxArmor += 2
             case .vigor: bonusMaxHealth += 2
             case .momentum: bonusMoveRange += 1
+            case .warded: barrelImmune = true
+            case .rampage: killRefundsCooldown = true
+            case .sidestep: dodgeDistanceOverride = 1
             case .fragile: damageTakenMult *= 2
             case .swarm:
                 spawnBatchBonus += 1
@@ -121,6 +192,18 @@ struct RunRules {
             case .warband: bossEveryGate = true
             case .frenzy: enemyCooldownDelta -= 1
             case .powderKeg: allBarrels = true
+            case .scarcity: noLoot = true
+            case .leadfoot: dodgeDistanceOverride = .max
+            case .volatile: barrelBlastBonus += 1
+            case .sappers: allBombers = true
+            case .impaler: spikesAlwaysLive = true
+            case .barricades: wallsEverywhere = true
+            case .blindfold: hideHealth = true
+            case .deadeye: piercingShots = true
+            case .lifelink: killHeals = true
+            case .breach: bustsAllWalls = true
+            case .rusting: armorRegenInterval = 3
+            case .overgrowth: spikeTrapBonus += 3
             }
         }
     }
@@ -146,6 +229,16 @@ struct BossConfig {
     let novaRadius: Int
     /// Explosive barrels the boss rains around the player per barrage intent.
     let bossBarrageCount: Int
+    /// Summoner elite starting health.
+    let summonerHealth: Int
+    /// Recruits the summoner calls in per summon intent — a touch bigger than the
+    /// boss's, since flooding the board with fodder is its whole identity.
+    let summonerSummonCount: Int
+    /// Bombardier elite starting health.
+    let bombardierHealth: Int
+    /// Bombers the bombardier calls in per summon intent (kept smaller than the
+    /// summoner's fodder — a swarm of walking bombs is far deadlier).
+    let bombardierSummonCount: Int
 
     static func forLevel(_ level: Int) -> BossConfig {
         // base, then +step for every `every` levels cleared, never past cap.
@@ -160,7 +253,11 @@ struct BossConfig {
             bossSummonCount: ramp(3, step: 1, every: 3, cap: 5),
             retinueCap: ramp(4, step: 1, every: 3, cap: 6),
             novaRadius: ramp(3, step: 1, every: 3, cap: 4),
-            bossBarrageCount: ramp(2, step: 1, every: 4, cap: 4)
+            bossBarrageCount: ramp(2, step: 1, every: 4, cap: 4),
+            summonerHealth: ramp(14, step: 1, every: 1, cap: 30),
+            summonerSummonCount: ramp(4, step: 1, every: 3, cap: 6),
+            bombardierHealth: ramp(14, step: 1, every: 1, cap: 30),
+            bombardierSummonCount: ramp(2, step: 1, every: 3, cap: 4)
         )
     }
 }
@@ -176,6 +273,24 @@ struct BossConfig {
 struct GameState {
     /// Damage a barrel blast deals to everything on its surrounding tiles.
     static let barrelDamage = 3
+    /// Damage an active spike trap deals to whoever ends the turn on it.
+    static let spikeDamage = 2
+    /// Damage each body takes when a knockback flings one enemy into another.
+    static let knockbackImpactDamage = 2
+    /// Extra damage from being flung into a wall or the board's edge.
+    static let wallSlamDamage = 1
+    /// A barrel reeled in by a grapple bursts softer than a normal blast — the
+    /// price of a controlled pop at your own feet.
+    static let grappleBarrelDamage = 2
+    /// A yellow (Keg-lobbed) barrel's blast — half a standard barrel's.
+    static let weakBarrelDamage = 2
+    /// Yellow barrels are light empty kegs, so a knockback skids them this many
+    /// extra tiles.
+    static let weakBarrelPushBonus = 2
+    /// A green barrel deals no blast damage; it leaves fire burning this hot for
+    /// this many turns on the tiles it covered.
+    static let fireBarrelDamage = 2
+    static let fireBarrelDuration = 2
     /// How far (Manhattan) a barrel blast reaches.
     static let barrelBlastRadius = 2
     /// Moving at least this many tiles in a turn without attacking earns a
@@ -269,9 +384,14 @@ struct GameState {
     /// swapping back to it refunds, so fiddling costs nothing.
     private var turnStartWeapon: Weapon
 
+    /// Swaps are free (no attack spent) if a pact (Quickhands) or a held boon
+    /// (Quick Hands) grants it.
+    var swapsAreFree: Bool { devFreeSwap || rules.freeSwap || buffs.contains(where: \.freeSwap) }
+    /// A kill this turn shaves the reload, from a pact (Rampage) or a boon.
+    var killShavesReload: Bool { rules.killRefundsCooldown || buffs.contains(where: \.killRefundsCooldown) }
     /// True when the player has swapped to a different weapon this turn and the
-    /// run doesn't make swaps free — the swap has spent this turn's attack.
-    var weaponSwapCostsAttack: Bool { !rules.freeSwap && equippedWeapon != turnStartWeapon }
+    /// swap wasn't free — it has spent this turn's attack.
+    var weaponSwapCostsAttack: Bool { !swapsAreFree && equippedWeapon != turnStartWeapon }
     private(set) var playerPosition: GridPosition
     /// The destination chosen during planning; nil until a move is planned.
     private(set) var plannedTarget: GridPosition?
@@ -282,6 +402,13 @@ struct GameState {
     private(set) var plannedThrowTarget: GridPosition?
     private(set) var enemies: [Enemy]
     private(set) var obstacles: [Obstacle]
+    /// Toggling floor spikes and linked teleporter pairs — non-blocking board
+    /// hazards scattered into every level.
+    private(set) var spikes: [SpikeTrap] = []
+    private(set) var teleporters: [Teleporter] = []
+    /// Movement-warping floor patches (ice, mud); affect player and enemies
+    /// alike — see `TerrainPatch`.
+    private(set) var terrain: [TerrainPatch] = []
     private(set) var lingeringEffects: [LingeringEffect] = []
     private(set) var playerHealth: Int
     private(set) var playerArmor: Int
@@ -323,6 +450,8 @@ struct GameState {
     }
     // Run-long tallies for the death recap.
     private(set) var totalKills = 0
+    /// Kills banked toward the next Lifelink/Bloodthirst heal (every 3rd mends 1).
+    private var lifelinkKills = 0
     private(set) var elitesSlain = 0
     private(set) var bestCombo = 0
     private(set) var bestStreak = 0
@@ -344,6 +473,8 @@ struct GameState {
     /// Spawn tiles the boss called in this resolve via its summon intent;
     /// they telegraph next turn like any reinforcement, skipping wave cadence.
     private var queuedBossSummons: [GridPosition] = []
+    /// True when the queued summons are the bombardier's — every arrival a bomber.
+    private var queuedSummonsBomberOnly = false
     /// Tiles where the boss's barrage will drop explosive barrels this resolve;
     /// telegraphed next turn like any barrel delivery, skipping wave cadence.
     private var queuedBossBarrels: [GridPosition] = []
@@ -359,6 +490,11 @@ struct GameState {
     /// slot relative to it until the squad breaks. Keyed by formation id.
     private var formationAnchors: [Int: GridPosition] = [:]
     private var nextFormationID = 0
+    /// Shuffle-bag of the non-boss gate elites, so every gate cycles through all
+    /// three (juggernaut/summoner/artillery) rather than repeating on a streak.
+    private var lesserEliteBag: [Archetype] = []
+    /// The last lesser elite drawn, so a refilled bag doesn't repeat it back-to-back.
+    private var lastLesserElite: Archetype?
     /// Boon options awaiting the player's pick after a level-up; planning is
     /// paused while this is non-empty.
     private(set) var pendingBuffChoices: [Buff] = []
@@ -401,7 +537,9 @@ struct GameState {
     /// plus any buff bonuses. Dev infinite-speed opens the whole board.
     var moveRange: Int {
         if devInfiniteSpeed { return columns + rows }
-        return equippedWeapon.moveRange + buffs.reduce(0) { $0 + $1.bonusMoveRange } + rules.bonusMoveRange
+        let base = equippedWeapon.moveRange + buffs.reduce(0) { $0 + $1.bonusMoveRange } + rules.bonusMoveRange
+        // The floor underfoot gives (ice) or takes (mud) a step, never below 1.
+        return max(1, base + terrainMoveDelta(at: playerPosition))
     }
     /// Damage the player's attacks deal: the equipped weapon's plus buff
     /// bonuses. Dev damage mode overrides it for testing — one-shot everything,
@@ -419,8 +557,20 @@ struct GameState {
     var armorCap: Int { maxArmor + buffs.reduce(0) { $0 + $1.bonusArmor } }
     var isGameOver: Bool { playerHealth <= 0 }
 
-    /// Where a drafted attack or throw would originate right now.
-    var attackOrigin: GridPosition { plannedTarget ?? playerPosition }
+    /// The tile the drafted move truly ends on: the chosen tile, or — if that
+    /// tile is ice — wherever the ensuing slide comes to rest. This is what the
+    /// scene should draw as the destination, and where an attack originates.
+    var plannedLanding: GridPosition {
+        guard let target = plannedTarget else { return playerPosition }
+        guard terrainKind(at: target) == .ice,
+              let direction = Direction.aiming(from: playerPosition, toward: target, allowDiagonals: true)
+        else { return target }
+        return iceSlide(landingOn: target, heading: direction, moverIsPlayer: true).destination
+    }
+
+    /// Where a drafted attack or throw would originate right now — the post-slide
+    /// landing, so aiming previews from where the player actually ends up.
+    var attackOrigin: GridPosition { plannedLanding }
 
     /// Turns before the given carried weapon can attack again; 0 means ready.
     /// Dev no-cooldown reports every weapon as ready so it can be fired each turn.
@@ -503,21 +653,19 @@ struct GameState {
     }
 
     /// Flings the given enemies up to `distance` tiles down `direction`, one
-    /// cardinal step at a time. A shove stops short of the board edge, a wall,
-    /// another body, or the player; driving one into a barrel detonates it
-    /// (the marquee interaction). An enemy that ends on a hazard pool just
-    /// burns there at the usual end-of-turn tick — no special handling needed.
+    /// step at a time. The shove follows the actual swing — a diagonal hit shoves
+    /// diagonally — so a body can be driven into scenery lined up at 45°. It stops
+    /// short of the board edge, a wall, another body, or the player; driving one
+    /// into a barrel detonates it (the marquee interaction). An enemy that ends on
+    /// a hazard pool just burns there at the usual end-of-turn tick.
     private mutating func shoveEnemies(
         ids: [Int],
         direction: Direction,
         distance: Int
     ) -> (shoves: [TurnResolution.Shove], explosions: [TurnResolution.Explosion], hits: [TurnResolution.EnemyHit]) {
-        // Collapse the aim to a single cardinal step so the shove tracks a clean
-        // grid line even for a diagonal swing.
-        let s = direction.unitStep
-        let push: GridPosition = (abs(s.x) >= abs(s.y) && s.x != 0)
-            ? GridPosition(x: s.x > 0 ? 1 : -1, y: 0)
-            : GridPosition(x: 0, y: s.y > 0 ? 1 : -1)
+        // Push straight down the swing's facing (unitStep is already a clean
+        // ±1 step on each axis it touches, cardinal or diagonal).
+        let push = direction.unitStep
 
         var shoves: [TurnResolution.Shove] = []
         var explosions: [TurnResolution.Explosion] = []
@@ -535,57 +683,142 @@ struct GameState {
             guard let index = enemies.firstIndex(where: { $0.id == id }) else { continue }
             let from = enemies[index].position
             var current = from
+            var crossed: [GridPosition] = []
             var slammedBarrel: GridPosition?
+            var slammedEnemyTile: GridPosition?
+            var slammedWall = false
             for _ in 0..<distance {
                 let next = GridPosition(x: current.x + push.x, y: current.y + push.y)
-                guard contains(next) else { break }
+                guard contains(next) else { slammedWall = true; break }
                 if let scenery = obstacle(at: next) {
-                    if scenery.kind == .barrel { slammedBarrel = next }
+                    if scenery.kind == .barrel { slammedBarrel = next } else { slammedWall = true }
                     break
                 }
                 if next == playerPosition { break }
-                if enemies.contains(where: { $0.id != id && $0.position == next }) { break }
+                if let other = enemies.first(where: { $0.id != id && $0.position == next }) {
+                    slammedEnemyTile = other.position
+                    break
+                }
                 current = next
+                crossed.append(next)
             }
             if current != from {
                 enemies[index].position = current
                 shoves.append(TurnResolution.Shove(enemyID: id, from: from, to: current))
+            }
+            // Live spikes it was flung *across* bite it in passing — the tile it
+            // ends on is left to the usual end-of-turn tick, so it isn't double-
+            // counted. Route each bite through the enemy's resting tile so it
+            // lands on this specific body (which has already moved off the spike).
+            let raked = crossed.dropLast().filter { tile in
+                spikes.contains { $0.active && $0.position == tile }
+            }.count
+            for _ in 0..<raked {
+                hits += damageEnemies(on: [current], damage: Self.spikeDamage, chargesUltimate: false)
             }
             if let barrel = slammedBarrel {
                 let blast = detonateBarrels(struckTiles: [barrel])
                 explosions += blast.explosions
                 hits += blast.hits
             }
+            // Flung into another body: the crash rattles both — the one shoved
+            // (resting one tile short) and the one it slammed into.
+            if let bumpTile = slammedEnemyTile {
+                hits += damageEnemies(on: [bumpTile], damage: Self.knockbackImpactDamage, chargesUltimate: false)
+                hits += damageEnemies(on: [current], damage: Self.knockbackImpactDamage, chargesUltimate: false)
+            }
+            // Slammed into a wall or the board's edge: a bruising extra bump.
+            if slammedWall {
+                hits += damageEnemies(on: [current], damage: Self.wallSlamDamage, chargesUltimate: false)
+            }
         }
         return (shoves, explosions, hits)
     }
 
-    /// Knocks the player `distance` tiles down `direction`, one cardinal step at
-    /// a time — stopping at the board edge, a wall, or an enemy, and detonating
-    /// (and being caught by) any barrel they're driven into. Movement only; the
-    /// hit's own damage is applied by the caller. Returns any barrel blast so the
-    /// enemy phase can animate it.
+    /// Drags every enemy within the diamond one tile toward `center` (the eye of
+    /// a lobbed Vortex): bodies cluster onto the eye, over live spikes, into your
+    /// reach, or off their telegraphed tiles. Nearest-first so a tile a closer
+    /// body vacates opens for the one behind it; a foe hauled into a barrel sets
+    /// it off; walls, the player, and occupied tiles stop the pull.
+    private mutating func performVortex(center: GridPosition, radius: Int)
+        -> (shoves: [TurnResolution.Shove], explosions: [TurnResolution.Explosion], hits: [TurnResolution.EnemyHit]) {
+        var shoves: [TurnResolution.Shove] = []
+        var explosions: [TurnResolution.Explosion] = []
+        var hits: [TurnResolution.EnemyHit] = []
+
+        let pulled = enemies
+            .filter { $0.position != center && $0.position.distance(to: center) <= radius }
+            .map(\.id)
+            .sorted { a, b in
+                let pa = enemies.first { $0.id == a }?.position ?? center
+                let pb = enemies.first { $0.id == b }?.position ?? center
+                return pa.distance(to: center) < pb.distance(to: center)
+            }
+
+        for id in pulled {
+            guard let index = enemies.firstIndex(where: { $0.id == id }) else { continue }
+            let from = enemies[index].position
+            guard let dir = Direction.aiming(from: from, toward: center, allowDiagonals: true) else { continue }
+            let step = dir.unitStep
+            let next = GridPosition(x: from.x + step.x, y: from.y + step.y)
+            guard next != from, contains(next) else { continue }
+            if let scenery = obstacle(at: next) {
+                // Reeled into a barrel: it goes off. A wall just stops the pull.
+                if scenery.kind == .barrel {
+                    let blast = detonateBarrels(struckTiles: [next])
+                    explosions += blast.explosions
+                    hits += blast.hits
+                }
+                continue
+            }
+            if next == playerPosition { continue }
+            if enemies.contains(where: { $0.id != id && $0.position == next }) { continue }
+            enemies[index].position = next
+            shoves.append(TurnResolution.Shove(enemyID: id, from: from, to: next))
+        }
+        return (shoves, explosions, hits)
+    }
+
+    /// Knocks the player `distance` tiles down `direction`, one step at a time
+    /// (diagonally for a diagonal blow) — stopping at the board edge, a wall, or
+    /// an enemy, and detonating (and being caught by) any barrel they're driven
+    /// into. Movement only; the hit's own damage is applied by the caller.
+    /// Returns any barrel blast so the enemy phase can animate it.
     private mutating func shovePlayer(direction: Direction, distance: Int)
         -> (explosions: [TurnResolution.Explosion], hits: [TurnResolution.EnemyHit]) {
-        let s = direction.unitStep
-        let push: GridPosition = (abs(s.x) >= abs(s.y) && s.x != 0)
-            ? GridPosition(x: s.x > 0 ? 1 : -1, y: 0)
-            : GridPosition(x: 0, y: s.y > 0 ? 1 : -1)
+        let push = direction.unitStep
         var explosions: [TurnResolution.Explosion] = []
         var hits: [TurnResolution.EnemyHit] = []
         var current = playerPosition
+        var crossed: [GridPosition] = []
         var slammedBarrel: GridPosition?
+        var slammedWall = false
         for _ in 0..<distance {
             let next = GridPosition(x: current.x + push.x, y: current.y + push.y)
-            guard contains(next) else { break }
+            guard contains(next) else { slammedWall = true; break }
             if let scenery = obstacle(at: next) {
-                if scenery.kind == .barrel { slammedBarrel = next }
+                if scenery.kind == .barrel { slammedBarrel = next } else { slammedWall = true }
                 break
             }
             if enemies.contains(where: { $0.position == next }) { break }
             current = next
+            crossed.append(next)
         }
         playerPosition = current
+        // Spikes raked over in transit bite the player too (the resting tile is
+        // left to the end-of-turn tick), unless they're warded against hazards.
+        if !buffs.contains(where: \.hazardImmunity) {
+            let raked = crossed.dropLast().filter { tile in
+                spikes.contains { $0.active && $0.position == tile }
+            }.count
+            for _ in 0..<raked where !isGameOver {
+                applyDamage(Self.spikeDamage, from: "a spike trap")
+            }
+        }
+        // Slammed into a wall or the board's edge takes the same bruise it deals.
+        if slammedWall && !isGameOver {
+            applyDamage(Self.wallSlamDamage, from: "a wall")
+        }
         if let barrel = slammedBarrel {
             // Enemy-lit: no ultimate charge, no barrel-kill credit to the player.
             let blast = detonateBarrels(struckTiles: [barrel], chargesUltimate: false)
@@ -595,12 +828,197 @@ struct GameState {
         return (explosions, hits)
     }
 
+    /// Shoves every barrel on `tiles` up to `distance` down `direction`, one step
+    /// at a time. A barrel driven into a wall, body, edge, or another barrel
+    /// detonates where it ends up (full blast, chains as usual); one that stops on
+    /// open floor simply relocates, still live. Furthest-along barrels move first
+    /// so a row of them doesn't jam.
+    private mutating func shoveBarrels(
+        on tiles: Set<GridPosition>,
+        direction: Direction,
+        distance: Int
+    ) -> (explosions: [TurnResolution.Explosion], hits: [TurnResolution.EnemyHit], moves: [TurnResolution.BarrelMove]) {
+        let push = direction.unitStep
+        var explosions: [TurnResolution.Explosion] = []
+        var hits: [TurnResolution.EnemyHit] = []
+        var moves: [TurnResolution.BarrelMove] = []
+        let ids = obstacles
+            .filter { $0.kind == .barrel && tiles.contains($0.position) }
+            .sorted { ($0.position.x * push.x + $0.position.y * push.y) > ($1.position.x * push.x + $1.position.y * push.y) }
+            .map(\.id)
+        for id in ids {
+            guard let index = obstacles.firstIndex(where: { $0.id == id }) else { continue }
+            let from = obstacles[index].position
+            var current = from
+            var rammed = false
+            // Light empty kegs (yellow) skid further than a full barrel.
+            let reach = obstacles[index].barrelKind == .weak ? distance + Self.weakBarrelPushBonus : distance
+            for _ in 0..<reach {
+                let next = GridPosition(x: current.x + push.x, y: current.y + push.y)
+                guard contains(next), obstacle(at: next) == nil,
+                      next != playerPosition,
+                      !enemies.contains(where: { $0.position == next }) else { rammed = true; break }
+                current = next
+            }
+            obstacles[index].position = current
+            if current != from { moves.append(TurnResolution.BarrelMove(from: from, to: current)) }
+            if rammed {
+                let blast = detonateBarrels(struckTiles: [current])
+                explosions += blast.explosions
+                hits += blast.hits
+            }
+        }
+        return (explosions, hits, moves)
+    }
+
+    /// Fires the grapple down its aim: it bites the first thing in the line and
+    /// reels. An enemy is damaged and dragged toward you (raking live spikes on
+    /// the way); a wall pulls *you* to it; a barrel pulls you in and detonates,
+    /// catching you in the blast. A shot into open space just whips out and back.
+    /// Returns the hook's reach (for the visual) and where you were pulled, if
+    /// anywhere.
+    private mutating func performGrapple(
+        direction: Direction,
+        hits: inout [TurnResolution.EnemyHit],
+        explosions: inout [TurnResolution.Explosion],
+        shoves: inout [TurnResolution.Shove],
+        barrelMoves: inout [TurnResolution.BarrelMove]
+    ) -> (hook: TurnResolution.GrappleHook, playerTo: GridPosition?) {
+        enum Bite { case enemy(Int), wall, barrel, edge }
+        let step = direction.unitStep
+        let range = effectivePattern?.tiles(from: playerPosition, facing: direction).count ?? 0
+        let origin = playerPosition
+        var reach = playerPosition
+        var bite: Bite?
+        for _ in 0..<range {
+            let next = GridPosition(x: reach.x + step.x, y: reach.y + step.y)
+            // The board's rim is an anchor too: the hook catches the ledge and
+            // hauls you to the edge tile.
+            guard contains(next) else { bite = .edge; break }
+            if let scenery = obstacle(at: next) {
+                reach = next
+                bite = scenery.kind == .barrel ? .barrel : .wall
+                break
+            }
+            if let enemy = enemies.first(where: { $0.position == next }) {
+                reach = next
+                bite = .enemy(enemy.id)
+                break
+            }
+            reach = next
+        }
+
+        var playerTo: GridPosition?
+        switch bite {
+        case .enemy(let id):
+            let strike = damageEnemies(on: [reach], damage: attackDamage, credit: equippedWeapon.name, travelling: direction)
+            struckByPlayerThisTurn.formUnion(strike.map(\.enemyID))
+            applyStun(strike, turns: equippedWeapon.stun)
+            hits += strike
+            // Reel a survivor in, one step at a time, stopping just shy of you,
+            // a body, or scenery — and rake any live spikes it's dragged over.
+            if let hit = strike.first, !hit.died, let index = enemies.firstIndex(where: { $0.id == id }) {
+                let pull = GridPosition(x: -step.x, y: -step.y)
+                var current = reach
+                var crossed: [GridPosition] = []
+                while true {
+                    let next = GridPosition(x: current.x + pull.x, y: current.y + pull.y)
+                    if next == origin { break }
+                    guard contains(next), obstacle(at: next) == nil,
+                          !enemies.contains(where: { $0.id != id && $0.position == next }) else { break }
+                    current = next
+                    crossed.append(next)
+                }
+                if current != reach {
+                    enemies[index].position = current
+                    shoves.append(TurnResolution.Shove(enemyID: id, from: reach, to: current))
+                    let raked = crossed.dropLast().filter { tile in
+                        spikes.contains { $0.active && $0.position == tile }
+                    }.count
+                    for _ in 0..<raked {
+                        hits += damageEnemies(on: [current], damage: Self.spikeDamage, chargesUltimate: false)
+                    }
+                }
+            }
+        case .edge:
+            // No blocker tile ahead — the ledge is `reach` itself, so aim the
+            // stop one tile past it so the pull lands you on the rim.
+            let past = GridPosition(x: reach.x + step.x, y: reach.y + step.y)
+            playerTo = zipPlayer(toward: step, upTo: past, hits: &hits)
+        case .wall:
+            playerTo = zipPlayer(toward: step, upTo: reach, hits: &hits)
+        case .barrel:
+            // Reel the barrel in toward you instead of hauling yourself into it:
+            // it comes to rest just in front of you (or against whatever blocks
+            // the pull) and bursts soft — a controlled 2, blast and chains intact.
+            if let index = obstacles.firstIndex(where: { $0.kind == .barrel && $0.position == reach }) {
+                let pull = GridPosition(x: -step.x, y: -step.y)
+                var current = reach
+                while true {
+                    let next = GridPosition(x: current.x + pull.x, y: current.y + pull.y)
+                    if next == origin { break }
+                    guard contains(next), obstacle(at: next) == nil,
+                          !enemies.contains(where: { $0.position == next }) else { break }
+                    current = next
+                }
+                obstacles[index].position = current
+                if current != reach { barrelMoves.append(TurnResolution.BarrelMove(from: reach, to: current)) }
+                let blast = detonateBarrels(struckTiles: [current], damageOverride: Self.grappleBarrelDamage)
+                explosions += blast.explosions
+                hits += blast.hits
+            }
+        case nil:
+            break
+        }
+        return (TurnResolution.GrappleHook(from: origin, to: reach), playerTo)
+    }
+
+    /// Reels the player along `step` toward the thing at `stop`, halting on the
+    /// tile just before it (or before any body/scenery/edge in the way), raking
+    /// live spikes crossed. Returns the tile landed on, or nil if they didn't move.
+    private mutating func zipPlayer(
+        toward step: GridPosition,
+        upTo stop: GridPosition,
+        hits: inout [TurnResolution.EnemyHit]
+    ) -> GridPosition? {
+        var current = playerPosition
+        var crossed: [GridPosition] = []
+        while true {
+            let next = GridPosition(x: current.x + step.x, y: current.y + step.y)
+            if next == stop { break }
+            guard contains(next), obstacle(at: next) == nil,
+                  !enemies.contains(where: { $0.position == next }) else { break }
+            current = next
+            crossed.append(next)
+        }
+        guard current != playerPosition else { return nil }
+        playerPosition = current
+        if !buffs.contains(where: \.hazardImmunity) {
+            let raked = crossed.dropLast().filter { tile in
+                spikes.contains { $0.active && $0.position == tile }
+            }.count
+            for _ in 0..<raked where !isGameOver {
+                applyDamage(Self.spikeDamage, from: "a spike trap")
+            }
+        }
+        return current
+    }
+
+    /// Tiles the player must move (without acting) to earn a dodge. A pact can
+    /// make it trivial (Sidestep) or impossible (Leadfoot); the Sure Feet boon
+    /// also drops it to one (but Leadfoot's ban wins).
+    var effectiveDodgeDistance: Int {
+        if rules.dodgeDistanceOverride == .max { return .max }   // Leadfoot: never
+        let base = rules.dodgeDistanceOverride ?? Self.dodgeDistance
+        return buffs.contains(where: \.dodgeAtOne) ? min(base, 1) : base
+    }
+
     /// True when the current draft earns the dodge: no attack or throw drafted,
     /// no weapon pickup, and a move of at least dodgeDistance tiles.
     var plannedDodgeReady: Bool {
         guard plannedAttackDirection == nil, plannedThrowTarget == nil, !plannedPickup,
               !plannedUltimate, !weaponSwapCostsAttack, let target = plannedTarget else { return false }
-        return playerPosition.distance(to: target) >= Self.dodgeDistance
+        return playerPosition.distance(to: target) >= effectiveDodgeDistance
     }
 
     /// The on-board tiles the drafted attack hits right away: the directional
@@ -624,14 +1042,29 @@ struct GameState {
         return Array(plannedSweep().dropFirst(speed))
     }
 
+    /// The equipped weapon's attack shape, stretched to span the board when the
+    /// dev infinite-range toggle is on — line thrusts and bolts only; shaped
+    /// swings (arcs, rings) keep their footprint.
+    private var effectivePattern: AttackPattern? {
+        guard let pattern = equippedWeapon.attackPattern else { return nil }
+        if devInfiniteRange && pattern.isLine {
+            return AttackPattern.line(length: columns + rows)
+        }
+        return pattern
+    }
+
     private func plannedSweep() -> [GridPosition] {
         guard let direction = plannedAttackDirection,
-              let pattern = plannedBash ? AttackPattern.dagger : equippedWeapon.attackPattern else { return [] }
+              let pattern = plannedBash ? AttackPattern.dagger : effectivePattern else { return [] }
+        // Deadeye/piercing shots (ranged only) bore through walls, so the preview
+        // must foresee the shot carrying on rather than stopping at scenery.
+        let shotsPierce = equippedWeapon.projectileSpeed != nil
+            && (rules.piercingShots || buffs.contains(where: \.piercingShots))
         return sweep(
             pattern,
             from: attackOrigin,
             facing: direction,
-            pierces: plannedBash ? false : equippedWeapon.pierces,
+            pierces: plannedBash ? false : (equippedWeapon.pierces || shotsPierce),
             blockers: Set(enemies.map(\.position))
         )
     }
@@ -702,6 +1135,17 @@ struct GameState {
         )
         self.nextEnemyID = (self.enemies.map(\.id).max() ?? -1) + 1
         self.nextObstacleID = (self.obstacles.map(\.id).max() ?? -1) + 1
+        // Board hazards for the opening level (spikes from the start; teleporters
+        // begin appearing at level 2 per LevelConfig).
+        let openingConfig = LevelConfig.forLevel(1)
+        let occupied = Set(self.obstacles.map(\.position)).union(self.enemies.map(\.position)).union([start])
+        self.spikes = Self.scatterSpikes(count: openingConfig.spikeTraps + self.rules.spikeTrapBonus, columns: columns, rows: rows, occupied: occupied, playerStart: start)
+        if self.rules.spikesAlwaysLive {
+            for index in self.spikes.indices { self.spikes[index].active = true }
+        }
+        self.teleporters = Self.scatterTeleporters(pairs: openingConfig.teleporterPairs, columns: columns, rows: rows, occupied: occupied.union(self.spikes.map(\.position)), playerStart: start)
+        self.terrain = Self.scatterTerrain(icePatches: openingConfig.icePatches, mudPatches: openingConfig.mudPatches, columns: columns, rows: rows, occupied: occupied.union(self.spikes.map(\.position)).union(self.teleporters.flatMap { [$0.a, $0.b] }), playerStart: start)
+        if self.rules.wallsEverywhere { fillWithDestructibleWalls() }
         draftEnemyPlans()
     }
 
@@ -728,9 +1172,95 @@ struct GameState {
                       candidate.distance(to: playerStart) > 2,
                       !keepClear.contains(where: { $0.distance(to: candidate) <= 1 })
                 else { continue }
-                placed.append(Obstacle(id: nextID, kind: kind, position: candidate))
+                // Roughly a third of natural barrels are green fire barrels, and
+                // a third of natural walls are crumbling ones.
+                let barrelKind: Obstacle.BarrelKind = (kind == .barrel && Int.random(in: 0..<3) == 0) ? .fire : .standard
+                let destructible = kind == .wall && Int.random(in: 0..<3) == 0
+                placed.append(Obstacle(id: nextID, kind: kind, position: candidate, barrelKind: barrelKind, destructible: destructible))
                 blocked.insert(candidate)
                 nextID += 1
+                break
+            }
+        }
+        return placed
+    }
+
+    /// Scatters spike traps on open floor, each with a random starting phase so
+    /// they don't all bite in lockstep.
+    private static func scatterSpikes(count: Int, columns: Int, rows: Int, occupied: Set<GridPosition>, playerStart: GridPosition) -> [SpikeTrap] {
+        var placed: [SpikeTrap] = []
+        var blocked = occupied
+        for _ in 0..<count {
+            for _ in 0..<50 {
+                let candidate = GridPosition(x: Int.random(in: 0..<columns), y: Int.random(in: 0..<rows))
+                guard !blocked.contains(candidate), candidate.distance(to: playerStart) > 2 else { continue }
+                placed.append(SpikeTrap(position: candidate, active: Bool.random()))
+                blocked.insert(candidate)
+                break
+            }
+        }
+        return placed
+    }
+
+    /// Scatters linked teleporter pairs on open floor; the two ends of a pair are
+    /// kept a few tiles apart so a warp actually relocates you.
+    private static func scatterTeleporters(pairs: Int, columns: Int, rows: Int, occupied: Set<GridPosition>, playerStart: GridPosition) -> [Teleporter] {
+        var placed: [Teleporter] = []
+        var blocked = occupied
+        func freeTile() -> GridPosition? {
+            for _ in 0..<50 {
+                let candidate = GridPosition(x: Int.random(in: 0..<columns), y: Int.random(in: 0..<rows))
+                if !blocked.contains(candidate), candidate.distance(to: playerStart) > 2 { return candidate }
+            }
+            return nil
+        }
+        for _ in 0..<pairs {
+            guard let a = freeTile() else { continue }
+            blocked.insert(a)
+            guard let b = freeTile(), b.distance(to: a) > 3 else { continue }
+            blocked.insert(b)
+            placed.append(Teleporter(id: placed.count, a: a, b: b))
+        }
+        return placed
+    }
+
+    /// Scatters movement terrain on open floor: each ice patch is a short
+    /// contiguous strip (a random cardinal run of 2–4 tiles, so a slide has room
+    /// to build), and each mud patch is a single tile. Kept off scenery, other
+    /// board features, and the player's immediate surroundings.
+    private static func scatterTerrain(icePatches: Int, mudPatches: Int, columns: Int, rows: Int, occupied: Set<GridPosition>, playerStart: GridPosition) -> [TerrainPatch] {
+        var placed: [TerrainPatch] = []
+        var blocked = occupied
+        let cardinals = [GridPosition(x: 1, y: 0), GridPosition(x: -1, y: 0),
+                         GridPosition(x: 0, y: 1), GridPosition(x: 0, y: -1)]
+        for _ in 0..<icePatches {
+            for _ in 0..<50 {
+                let start = GridPosition(x: Int.random(in: 0..<columns), y: Int.random(in: 0..<rows))
+                guard !blocked.contains(start), start.distance(to: playerStart) > 2 else { continue }
+                let step = cardinals.randomElement()!
+                let length = Int.random(in: 2...4)
+                var strip: [GridPosition] = []
+                var current = start
+                for _ in 0..<length {
+                    guard current.x >= 0, current.x < columns, current.y >= 0, current.y < rows,
+                          !blocked.contains(current) else { break }
+                    strip.append(current)
+                    current = GridPosition(x: current.x + step.x, y: current.y + step.y)
+                }
+                guard strip.count >= 2 else { continue }
+                for tile in strip {
+                    placed.append(TerrainPatch(position: tile, kind: .ice))
+                    blocked.insert(tile)
+                }
+                break
+            }
+        }
+        for _ in 0..<mudPatches {
+            for _ in 0..<50 {
+                let candidate = GridPosition(x: Int.random(in: 0..<columns), y: Int.random(in: 0..<rows))
+                guard !blocked.contains(candidate), candidate.distance(to: playerStart) > 2 else { continue }
+                placed.append(TerrainPatch(position: candidate, kind: .mud))
+                blocked.insert(candidate)
                 break
             }
         }
@@ -747,6 +1277,101 @@ struct GameState {
 
     func obstacle(at position: GridPosition) -> Obstacle? {
         obstacles.first { $0.position == position }
+    }
+
+    /// Where a mover ending on `tile` actually lands: the far end of a teleporter
+    /// (a single hop, and only if that end is free of scenery, an enemy, or the
+    /// player), otherwise `tile` itself.
+    func teleportDestination(from tile: GridPosition) -> GridPosition {
+        guard let exit = teleporters.compactMap({ $0.exit(from: tile) }).first else { return tile }
+        let blocked = obstacle(at: exit) != nil
+            || enemies.contains { $0.position == exit }
+            || exit == playerPosition
+        return blocked ? tile : exit
+    }
+
+    /// Board-feature tiles new arrivals steer clear of: spike traps and
+    /// teleporter ends. They don't block movement, but nothing should *spawn*
+    /// sitting on one (an enemy materializing onto live spikes, or inside a
+    /// portal, reads as a bug).
+    var spawnAvoidTiles: Set<GridPosition> {
+        Set(spikes.map(\.position))
+            .union(teleporters.flatMap { [$0.a, $0.b] })
+            .union(terrain.map(\.position))
+    }
+
+    /// The kind of movement terrain on `position` (ice/mud), or nil for plain
+    /// floor.
+    func terrainKind(at position: GridPosition) -> TerrainPatch.Kind? {
+        terrain.first { $0.position == position }?.kind
+    }
+
+    /// The move-range change the floor on `tile` grants (ice, +1) or costs
+    /// (mud, −1). Shared by the player's `moveRange` and enemies' `movementBudget`
+    /// so both feel the floor the same way.
+    func terrainMoveDelta(at tile: GridPosition) -> Int {
+        switch terrainKind(at: tile) {
+        case .ice: return 1
+        case .mud: return -1
+        case nil: return 0
+        }
+    }
+
+    /// An enemy's move range with the floor it stands on folded in (never below
+    /// 1) — the enemy-side mirror of the player's terrain-aware `moveRange`.
+    func movementBudget(for enemy: Enemy) -> Int {
+        max(1, enemy.moveRange + terrainMoveDelta(at: enemy.position))
+    }
+
+    /// A move that ends on ice slides on: from `start`, step along `direction`
+    /// across every ice tile and then one tile *past* the ice onto solid ground
+    /// (the momentum carry), stopping short only if something blocks the way — a
+    /// wall/barrel, a body, the board edge, or an `extraBlocked` tile. Returns the
+    /// resting tile and the tiles crossed to reach it. If `start` isn't ice, the
+    /// mover stays put. `moverIsPlayer` decides whether the player's tile blocks;
+    /// `extraBlocked` lets an enemy slide respect the tiles its squad has already
+    /// claimed, so the telegraph stays honest.
+    func iceSlide(landingOn start: GridPosition, heading direction: Direction, moverIsPlayer: Bool, extraBlocked: Set<GridPosition> = []) -> (destination: GridPosition, crossed: [GridPosition]) {
+        guard terrainKind(at: start) == .ice else { return (start, []) }
+        let step = direction.unitStep
+        // A tile that halts the slide entirely (as opposed to merely ending the
+        // ice). An enemy drafted to step off its tile doesn't block — you glide
+        // onto the space it's vacating, as with `legalMoveTargets`.
+        func blocked(_ tile: GridPosition) -> Bool {
+            !contains(tile) || obstacle(at: tile) != nil || extraBlocked.contains(tile)
+                || enemies.contains(where: { !$0.isVacating && $0.position == tile })
+                || (!moverIsPlayer && tile == playerPosition)
+        }
+        var current = start
+        var crossed: [GridPosition] = []
+        while true {
+            let next = GridPosition(x: current.x + step.x, y: current.y + step.y)
+            guard terrainKind(at: next) == .ice, !blocked(next) else { break }
+            current = next
+            crossed.append(next)
+        }
+        // Momentum carries one tile past the ice onto the solid ground beyond,
+        // when that tile is clear.
+        let past = GridPosition(x: current.x + step.x, y: current.y + step.y)
+        if !blocked(past) {
+            current = past
+            crossed.append(past)
+        }
+        return (current, crossed)
+    }
+
+    /// Extends a drafted enemy move that ends on ice by the ensuing slide, folded
+    /// into the plan so the telegraph shows the true resting tile. `heading` is
+    /// taken from the last step into the ice; the slide stops before any tile in
+    /// `blocked` (the enemy's own avoid set). No move, or a non-ice landing, is
+    /// returned unchanged.
+    func slideEnemyPlan(from origin: GridPosition, target: GridPosition, path: [GridPosition], blocked: Set<GridPosition>) -> (target: GridPosition, path: [GridPosition]) {
+        guard target != origin, terrainKind(at: target) == .ice else { return (target, path) }
+        let prev = path.count >= 2 ? path[path.count - 2] : origin
+        guard let direction = Direction.aiming(from: prev, toward: target, allowDiagonals: true) else { return (target, path) }
+        let slid = iceSlide(landingOn: target, heading: direction, moverIsPlayer: false, extraBlocked: blocked)
+        guard slid.destination != target else { return (target, path) }
+        return (slid.destination, path + slid.crossed)
     }
 
     func weaponDrop(at position: GridPosition) -> WeaponDrop? {
@@ -861,7 +1486,7 @@ struct GameState {
         // The boss's nova rings its destination; a volley adds the cannon's
         // line to the primary sweep. A summon or barrage threatens no tiles
         // directly — the recruits and barrels telegraph as spawns once cast.
-        if enemy.archetype == .boss, let intent = enemy.plannedIntent {
+        if enemy.usesEliteIntents, let intent = enemy.plannedIntent {
             let origin = enemy.plannedTarget ?? enemy.position
             switch intent {
             case .nova:
@@ -929,8 +1554,9 @@ struct GameState {
         guard let thrown = equippedWeapon.thrown else { return [] }
         var targets: Set<GridPosition> = []
         let origin = attackOrigin
-        for dx in -thrown.range...thrown.range {
-            let remaining = thrown.range - abs(dx)
+        let range = devInfiniteRange ? (columns + rows) : thrown.range
+        for dx in -range...range {
+            let remaining = range - abs(dx)
             for dy in -remaining...remaining {
                 let candidate = GridPosition(x: origin.x + dx, y: origin.y + dy)
                 if contains(candidate) && obstacle(at: candidate)?.kind != .wall {
@@ -1073,13 +1699,29 @@ struct GameState {
     /// Returns a record of what happened so the scene can animate it.
     @discardableResult
     mutating func resolveTurn() -> TurnResolution {
+        var teleports: [TurnResolution.Teleport] = []
         let playerStart = playerPosition
-        playerPosition = plannedTarget ?? playerPosition
-        tilesMoved += playerStart.distance(to: playerPosition)
+        // A move onto ice slides on to its resting tile; the drafted tile is the
+        // legal pick, the slide carries the player the rest of the way.
+        var steppedTile = plannedTarget ?? playerPosition
+        if let target = plannedTarget, terrainKind(at: target) == .ice,
+           let direction = Direction.aiming(from: playerStart, toward: target, allowDiagonals: true) {
+            steppedTile = iceSlide(landingOn: target, heading: direction, moverIsPlayer: true).destination
+        }
+        tilesMoved += playerStart.distance(to: steppedTile)
         plannedTarget = nil
-        // The drafted landing, captured before any enemy knockback can shove the
-        // player off it — the scene animates the move here and the shove later.
-        let draftedDestination = playerPosition
+        playerPosition = steppedTile
+        // The tile the player visibly walks to (the scene slides here; a warp
+        // then pops from it). Captured before any enemy knockback shoves them.
+        let draftedDestination = steppedTile
+        // Stepping onto a teleporter this turn warps the player to its far end.
+        if steppedTile != playerStart {
+            let warped = teleportDestination(from: steppedTile)
+            if warped != steppedTile {
+                teleports.append(TurnResolution.Teleport(enemyID: nil, from: steppedTile, to: warped))
+                playerPosition = warped
+            }
+        }
         var playerShoveTo: GridPosition?
         killsThisTurn = 0
         struckByPlayerThisTurn = []
@@ -1244,6 +1886,12 @@ struct GameState {
             enemies[index].plannedPath = []
             moves.append(TurnResolution.EnemyMove(enemyID: enemyID, from: from, to: to))
 
+            // Boxed-in enemy smashes the wall it drafted to dig, opening a lane.
+            if let dig = enemies[index].plannedDigTile {
+                crumbleWalls(in: [dig])
+                enemies[index].plannedDigTile = nil
+            }
+
             // Wading through a hazard burns per tile stepped — the destination
             // itself is left to the end-of-turn tick. Careful enemies path
             // around pools anyway; the fearless pay in blood. Only kills in
@@ -1294,6 +1942,17 @@ struct GameState {
                             bolts.remove(at: boltIndex)
                         }
                     }
+                }
+            }
+
+            // Stepping onto a teleporter warps the mover to its far end, after
+            // any hazards/bolts along the walk have resolved. It may have died
+            // crossing, so re-check it still exists.
+            if to != from, let idx = enemies.firstIndex(where: { $0.id == enemyID }) {
+                let warped = teleportDestination(from: to)
+                if warped != to {
+                    teleports.append(TurnResolution.Teleport(enemyID: enemyID, from: to, to: warped))
+                    enemies[idx].position = warped
                 }
             }
         }
@@ -1347,6 +2006,9 @@ struct GameState {
         var playerPhaseHits: [TurnResolution.EnemyHit] = []
         var playerExplosions: [TurnResolution.Explosion] = []
         var shoves: [TurnResolution.Shove] = []
+        var barrelMoves: [TurnResolution.BarrelMove] = []
+        var grappleHook: TurnResolution.GrappleHook?
+        var playerGrappleTo: GridPosition?
         var didAttack = false
 
         // A stun eats only this turn's action: the player still moved, and a
@@ -1382,9 +2044,15 @@ struct GameState {
                 pierces: false,
                 blockers: Set(enemies.map(\.position))
             )
-        } else if let direction = plannedAttackDirection, let pattern = equippedWeapon.attackPattern {
+        } else if let direction = plannedAttackDirection, let pattern = effectivePattern {
             didAttack = true
-            if let speed = equippedWeapon.projectileSpeed {
+            if equippedWeapon.grapples {
+                // The grapple resolves entirely here (reel/self-pull/detonate);
+                // it sweeps no tiles, so the generic strike block is skipped.
+                let result = performGrapple(direction: direction, hits: &playerPhaseHits, explosions: &playerExplosions, shoves: &shoves, barrelMoves: &barrelMoves)
+                grappleHook = result.hook
+                playerGrappleTo = result.playerTo
+            } else if let speed = equippedWeapon.projectileSpeed {
                 // The shot becomes a traveling bolt: it flies its first window
                 // right now, then keeps going in later turns' projectile phases.
                 let shot = Bolt(
@@ -1394,7 +2062,7 @@ struct GameState {
                     speed: speed,
                     remainingRange: pattern.tiles(from: playerPosition, facing: direction).count,
                     damage: attackDamage,
-                    pierces: equippedWeapon.pierces,
+                    pierces: equippedWeapon.pierces || rules.piercingShots || buffs.contains(where: \.piercingShots),
                     impactBlastRadius: equippedWeapon.impactBlastRadius,
                     lingering: equippedWeapon.lingering,
                     chargesUltimate: true,
@@ -1418,7 +2086,25 @@ struct GameState {
             }
         } else if let target = plannedThrowTarget, let thrown = equippedWeapon.thrown {
             didAttack = true
-            if thrown.flightTurns > 0 {
+            if equippedWeapon.placesBarrel {
+                // Lob a keg: drop a live barrel on the target if the tile's clear
+                // (no scenery, body, or you). No damage — the payoff is setting it
+                // off later. barrelSpawns animates it popping in.
+                let blocked = obstacle(at: target) != nil
+                    || enemies.contains { $0.position == target }
+                    || target == playerPosition
+                if !blocked {
+                    obstacles.append(Obstacle(id: nextObstacleID, kind: .barrel, position: target, barrelKind: .weak))
+                    nextObstacleID += 1
+                    barrelSpawns.append(target)
+                }
+            } else if equippedWeapon.vortex {
+                // No blast — drag every foe in the diamond one tile inward.
+                let suck = performVortex(center: target, radius: thrown.blastRadius)
+                shoves += suck.shoves
+                playerExplosions += suck.explosions
+                playerPhaseHits += suck.hits
+            } else if thrown.flightTurns > 0 {
                 // The shot goes airborne instead of landing this turn.
                 projectiles.append(Projectile(
                     id: nextProjectileID,
@@ -1453,25 +2139,36 @@ struct GameState {
             let facing = (equippedWeapon.thrown == nil && !radial) ? plannedAttackDirection : nil
             let sweepHits = damageEnemies(on: struck, damage: strikeDamage, credit: bashing ? nil : equippedWeapon.name, travelling: facing)
             afflict(sweepHits, with: bashing ? nil : equippedWeapon.affliction, chargesUltimate: true, credit: equippedWeapon.name)
+            // The daze lands now, in the player's phase — a survivor's telegraphed
+            // attack this very turn fizzles in the enemy phase that follows. (A
+            // bare reload jab carries none of the weapon's tricks.)
+            applyStun(sweepHits, turns: bashing ? 0 : equippedWeapon.stun)
             struckByPlayerThisTurn.formUnion(sweepHits.map(\.enemyID))
             playerPhaseHits += sweepHits
             // A lobbed blast has no friendly immunity: catch yourself, hurt yourself.
             if equippedWeapon.thrown != nil && !bashing && !isGameOver && struck.contains(playerPosition) {
                 applyDamage(attackDamage, from: "your own \(equippedWeapon.name)")
             }
-            let blast = detonateBarrels(struckTiles: struck)
-            playerExplosions = blast.explosions
-            playerPhaseHits += blast.hits
             // Knockback flings the survivors of a direct hit down the swing's
             // facing — into walls, off their telegraphed tiles, or into a barrel
-            // that then goes off. Radial/thrown weapons carry no facing (and no
-            // knockback), so this only ever fires for a directional shove.
+            // that then goes off — and shoves any barrels the swing swept along
+            // with them (a rammed barrel detonates; one that stops on open floor
+            // just relocates). Radial/thrown weapons carry no facing (and no
+            // knockback), so every other attack just pops swept barrels in place.
             if !bashing, equippedWeapon.knockback > 0, let facing = plannedAttackDirection {
                 let survivors = sweepHits.filter { !$0.died }.map(\.enemyID)
                 let flung = shoveEnemies(ids: survivors, direction: facing, distance: equippedWeapon.knockback)
                 shoves += flung.shoves
                 playerExplosions += flung.explosions
                 playerPhaseHits += flung.hits
+                let pushed = shoveBarrels(on: struck, direction: facing, distance: equippedWeapon.knockback)
+                playerExplosions += pushed.explosions
+                playerPhaseHits += pushed.hits
+                barrelMoves += pushed.moves
+            } else {
+                let blast = detonateBarrels(struckTiles: struck)
+                playerExplosions += blast.explosions
+                playerPhaseHits += blast.hits
             }
             if !bashing, let lingering = equippedWeapon.lingering {
                 addLingeringEffect(at: attackTiles, damagePerTurn: lingering.damagePerTurn, duration: lingering.duration, creditName: equippedWeapon.name)
@@ -1485,11 +2182,12 @@ struct GameState {
         // Moving far without attacking (or grabbing a weapon) earns one dodge:
         // the first enemy hit this turn misses.
         var dodgeCharges = (!didAttack && pickedUp == nil && !ultimateFired && !weaponSwapCostsAttack
-            && playerStart.distance(to: playerPosition) >= Self.dodgeDistance) ? 1 : 0
+            && playerStart.distance(to: playerPosition) >= effectiveDodgeDistance) ? 1 : 0
 
         var enemyAttacks: [TurnResolution.EnemyAttack] = []
         var friendlyFireHits: [TurnResolution.EnemyHit] = []
         var enemyExplosions: [TurnResolution.Explosion] = []
+        var enemyGrappleHooks: [TurnResolution.GrappleHook] = []
 
         // Armed bombers burn their fuses first — and blow.
         for bomberID in enemies.compactMap({ $0.archetype == .bomber && $0.fuse != nil ? $0.id : nil }) {
@@ -1562,11 +2260,21 @@ struct GameState {
                 let taken = Set(enemies.map(\.position))
                     .union(obstacles.map(\.position))
                     .union(lingeringEffects.map(\.position))
+                    .union(spawnAvoidTiles)
                     .union([playerPosition])
                 let ring = blastTiles(around: attacker.position, radius: 2).filter {
                     !taken.contains($0) && $0.distance(to: playerPosition) > 1
                 }
-                queuedBossSummons = Array(ring.shuffled().prefix(BossConfig.forLevel(level).bossSummonCount))
+                let config = BossConfig.forLevel(level)
+                let summonCount: Int
+                switch attacker.archetype {
+                case .summoner: summonCount = config.summonerSummonCount
+                case .bombardier: summonCount = config.bombardierSummonCount
+                default: summonCount = config.bossSummonCount
+                }
+                queuedBossSummons = Array(ring.shuffled().prefix(summonCount))
+                // The bombardier's whole retinue is walking bombs.
+                queuedSummonsBomberOnly = attacker.archetype == .bombardier
                 lastBossSummonTurn = turnNumber
                 continue
             }
@@ -1576,6 +2284,7 @@ struct GameState {
                 // tiles from the player: telegraphed like any barrel delivery,
                 // and set off later with a detonate intent — reintroducing the
                 // board hazards a boss fight otherwise strips away.
+                // Only the boss barrages now, so this is always its count.
                 queuedBossBarrels = Array(barrageTiles().shuffled().prefix(BossConfig.forLevel(level).bossBarrageCount))
                 continue
             }
@@ -1695,6 +2404,10 @@ struct GameState {
                 dodged = true
                 dodgesMade += 1
                 hitsPlayer = false
+                // Aftershock: sidestepping a blow patches 1 armor back.
+                if buffs.contains(where: \.dodgeRepairsArmor) {
+                    playerArmor = min(armorCap, playerArmor + 1)
+                }
             }
             if hitsPlayer {
                 // Buffs blunt incoming weapon hits (but never below zero).
@@ -1704,9 +2417,16 @@ struct GameState {
                 let killer = attacker.plannedIntent == .nova
                     ? "the boss's cannon nova"
                     : attacker.slayerName
-                applyDamage(max(0, attackDamage - reduction), from: killer)
+                // A reaver drives one point straight through armor to the flesh.
+                let armorPiercing = attacker.archetype == .reaver ? 1 : 0
+                applyDamage(max(0, attackDamage - reduction), from: killer, armorPiercing: armorPiercing)
                 afflictPlayer(with: strikingWeapon.affliction)
                 applyPlayerStun(strikingWeapon.stun)
+                // Thorns: a melee attacker that draws blood takes a point back,
+                // striking its own tile (full kill bookkeeping included).
+                if strikingWeapon.isMelee, buffs.contains(where: \.retaliation), !isGameOver {
+                    friendlyFireHits += damageEnemies(on: [attacker.position], damage: 1)
+                }
                 // A knockback weapon flings the player down its swing — into a
                 // wall, an enemy, or a barrel that then goes off around them.
                 if strikingWeapon.knockback > 0, let facing = attacker.plannedDirection, !isGameOver, !devKnockbackImmune {
@@ -1715,6 +2435,16 @@ struct GameState {
                     enemyExplosions += flung.explosions
                     friendlyFireHits += flung.hits
                     if playerPosition != before { playerShoveTo = playerPosition }
+                }
+                // A grapple reels the player IN toward the attacker — the inverse
+                // of knockback — dragging them back up the line (over any live
+                // spikes) to just in front of the enemy.
+                if strikingWeapon.grapples, let facing = attacker.plannedDirection, !isGameOver, !devKnockbackImmune {
+                    let before = playerPosition
+                    enemyGrappleHooks.append(TurnResolution.GrappleHook(from: attacker.position, to: before))
+                    let pull = GridPosition(x: -facing.unitStep.x, y: -facing.unitStep.y)
+                    let landed = zipPlayer(toward: pull, upTo: attacker.position, hits: &friendlyFireHits)
+                    if let landed, landed != before { playerShoveTo = landed }
                 }
             }
             // Friendly fire: comrades in the sweep take the hit; a thrower caught
@@ -1760,6 +2490,20 @@ struct GameState {
         }
         lingeringEffects.removeAll { $0.turnsRemaining <= 0 }
 
+        // Active spike traps bite whoever ended the turn on them (player and
+        // enemies alike), then every spike flips — so the state the player saw
+        // while planning is the one that bit, and next turn shows the flip.
+        for spike in spikes where spike.active {
+            hazardHits += damageEnemies(on: [spike.position], damage: Self.spikeDamage, chargesUltimate: false)
+            if !isGameOver && spike.position == playerPosition && !buffs.contains(where: \.hazardImmunity) {
+                applyDamage(Self.spikeDamage, from: "a spike trap")
+            }
+        }
+        // Impaler keeps every spike armed; otherwise they flip for next turn.
+        if !rules.spikesAlwaysLive {
+            for index in spikes.indices { spikes[index].active.toggle() }
+        }
+
         // Wounds fester: afflicted survivors bleed at the end of the turn,
         // wherever they've run to. Fresh wounds skip their first tick.
         for enemyID in enemies.map(\.id) {
@@ -1797,7 +2541,8 @@ struct GameState {
             undamagedTurns = 0
         } else {
             undamagedTurns += 1
-            if rules.armorRegen && undamagedTurns.isMultiple(of: 2) && playerArmor < armorCap {
+            // Rusting stretches the cadence: a point of armor every few clean turns.
+            if rules.armorRegen && undamagedTurns.isMultiple(of: rules.armorRegenInterval) && playerArmor < armorCap {
                 playerArmor += 1
             }
         }
@@ -1807,7 +2552,9 @@ struct GameState {
         }
         // The jab doesn't restart the reload — the real weapon keeps counting.
         if didAttack && !bashing {
-            weaponCooldowns[equippedWeapon.name] = effectivePlayerCooldown(equippedWeapon.cooldown)
+            // Rampage: a kill this turn shaves a turn off the reload.
+            let refund = (killShavesReload && killsThisTurn > 0) ? 1 : 0
+            weaponCooldowns[equippedWeapon.name] = max(0, effectivePlayerCooldown(equippedWeapon.cooldown) - refund)
         }
 
         // The streak extends on any turn with a kill and snaps on a dry one.
@@ -1846,7 +2593,10 @@ struct GameState {
         // over — regenerating the board and offering a choice of boons.
         var leveledUpTo: Int?
         let milestone = Self.scoreThreshold(forLevel: level + 1)
-        if !isGameOver && score >= milestone && bossDefeatedThisLevel {
+        // Normally the milestone only turns the level over once the gatekeeper
+        // is down. With elites disabled in dev there's no gate to kill, so the
+        // milestone advances directly — otherwise boons could never be reached.
+        if !isGameOver && score >= milestone && (bossDefeatedThisLevel || devNoElites) {
             advanceLevel()
             leveledUpTo = level
         } else {
@@ -1871,6 +2621,11 @@ struct GameState {
             enemyHits: playerPhaseHits,
             playerExplosions: playerExplosions,
             shoves: shoves,
+            barrelMoves: barrelMoves,
+            teleports: teleports,
+            grappleHook: grappleHook,
+            playerGrappleTo: playerGrappleTo,
+            enemyGrappleHooks: enemyGrappleHooks,
             enemyMoves: moves,
             enemyAttacks: enemyAttacks,
             friendlyFireHits: friendlyFireHits,
@@ -1897,13 +2652,16 @@ struct GameState {
     /// Damages every enemy standing on the given tiles and removes the dead.
     /// Returns the hits for animation.
     private mutating func damageEnemies(on tiles: Set<GridPosition>, damage: Int, chargesUltimate: Bool = true, credit: String? = nil, travelling direction: Direction? = nil) -> [TurnResolution.EnemyHit] {
+        // Anything that hits a tile smashes a destructible wall standing on it —
+        // a melee sweep, a bolt, a blast. Solid walls are untouched.
+        crumbleWalls(in: tiles)
         var hits: [TurnResolution.EnemyHit] = []
         var diedBomberPositions: [GridPosition] = []
         for index in enemies.indices where tiles.contains(enemies[index].position) {
             // A shieldbearer parries a blow driven into its front: no damage,
             // and the shield drops for a turn (shieldCooldown) so it can't block
             // again immediately.
-            if enemies[index].parries(direction) {
+            if !devIgnoreShields && enemies[index].parries(direction) {
                 enemies[index].shieldCooldown = 2
                 hits.append(TurnResolution.EnemyHit(enemyID: enemies[index].id, healthAfter: enemies[index].health, died: false, blocked: true))
                 continue
@@ -1913,7 +2671,7 @@ struct GameState {
             enemies[index].health -= dealt
             let died = enemies[index].health <= 0
             if died {
-                let isElite = enemies[index].archetype == .juggernaut || enemies[index].archetype == .boss
+                let isElite = enemies[index].isElite
                 // Score is frozen during the boss fight — except the gate itself.
                 if (!bossPhase || isElite) && !devFreezeScore {
                     // Kills escalate within a turn and ride the multi-turn streak.
@@ -1931,8 +2689,18 @@ struct GameState {
                 }
                 if chargesUltimate {
                     // Full is full: no banking past the threshold, so firing
-                    // always costs the whole ten-kill climb.
-                    ultimateKillCharge = min(ultimateKillCharge + 1, Self.ultimateChargeKills)
+                    // always costs the whole ten-kill climb. Executioner doubles
+                    // the charge each kill grants.
+                    let gain = buffs.contains(where: \.killChargesExtra) ? 2 : 1
+                    ultimateKillCharge = min(ultimateKillCharge + gain, Self.ultimateChargeKills)
+                    // Lifelink / Bloodthirst: every third kill mends a point.
+                    if rules.killHeals || buffs.contains(where: \.killHeals) {
+                        lifelinkKills += 1
+                        if lifelinkKills >= 3 {
+                            lifelinkKills = 0
+                            playerHealth = min(maxHealth, playerHealth + 1)
+                        }
+                    }
                 }
                 if isElite {
                     // The gate falls: its weapons drop where it died, and the
@@ -2014,7 +2782,11 @@ struct GameState {
             spawnInterval: max(2, base.spawnInterval + rules.spawnIntervalDelta),
             spawnBatch: max(1, base.spawnBatch + rules.spawnBatchBonus),
             walls: rules.allBarrels ? 0 : base.walls,
-            barrels: rules.allBarrels ? min(14 + level, 20) : base.barrels
+            barrels: rules.allBarrels ? min(14 + level, 20) : base.barrels,
+            spikeTraps: base.spikeTraps + rules.spikeTrapBonus,
+            teleporterPairs: base.teleporterPairs,
+            icePatches: base.icePatches,
+            mudPatches: base.mudPatches
         )
     }
 
@@ -2037,6 +2809,7 @@ struct GameState {
         bossPhase = false
         bossDefeatedThisLevel = false
         queuedBossSummons = []
+        queuedSummonsBomberOnly = false
         queuedBossBarrels = []
         primedBarrelTiles = []
         lastBossSummonTurn = -100
@@ -2048,7 +2821,7 @@ struct GameState {
         var fresh: [Enemy] = []
         for tile in edgeTiles().shuffled() where fresh.count < config.startingEnemies {
             guard tile.distance(to: playerPosition) > 3 else { continue }
-            fresh.append(Enemy.recruit(id: nextEnemyID, at: tile, armory: weaponPool))
+            fresh.append(rollRecruit(id: nextEnemyID, at: tile))
             nextEnemyID += 1
         }
         enemies = fresh
@@ -2063,6 +2836,19 @@ struct GameState {
         )
         nextObstacleID = max(nextObstacleID, (obstacles.map(\.id).max() ?? -1) + 1)
 
+        // Fresh floor hazards each level, kept off the obstacles/enemies/drops/player.
+        let floorClear = Set(obstacles.map(\.position))
+            .union(enemies.map(\.position))
+            .union(weaponDrops.map(\.position))
+            .union([playerPosition])
+        spikes = Self.scatterSpikes(count: config.spikeTraps, columns: columns, rows: rows, occupied: floorClear, playerStart: playerPosition)
+        if rules.spikesAlwaysLive {
+            for index in spikes.indices { spikes[index].active = true }
+        }
+        teleporters = Self.scatterTeleporters(pairs: config.teleporterPairs, columns: columns, rows: rows, occupied: floorClear.union(spikes.map(\.position)), playerStart: playerPosition)
+        terrain = Self.scatterTerrain(icePatches: config.icePatches, mudPatches: config.mudPatches, columns: columns, rows: rows, occupied: floorClear.union(spikes.map(\.position)).union(teleporters.flatMap { [$0.a, $0.b] }), playerStart: playerPosition)
+        if rules.wallsEverywhere { fillWithDestructibleWalls() }
+
         // Held buffs age by one level and expired ones wear off; then a new boon
         // is granted. Non-stackable buffs leave the pool while owned.
         for index in heldBuffs.indices {
@@ -2075,8 +2861,24 @@ struct GameState {
         // cap — a breather each level, though health still never regenerates.
         playerArmor = armorCap
 
-        // Draw the boon options; play pauses until the player picks one.
-        let pool = Buff.all.filter { $0.stackable || !buffs.contains($0) }
+        // Dev: pin the level-up offer for testing. Either slot can be set; both
+        // set reproduces the exact two options, one set offers just that one.
+        let forcedBuffs = [devForcedBuff, devForcedBuff2].compactMap { $0 }
+        if !forcedBuffs.isEmpty {
+            pendingBuffChoices = forcedBuffs
+            return
+        }
+        // Draw the boon options; play pauses until the player picks one. Boons a
+        // pact already fully provides (barrel immunity under Warded, free swaps
+        // under Quickhands, etc.) are dropped so a pick is never a dead effect.
+        let pool = Buff.all.filter { buff in
+            guard buff.stackable || !buffs.contains(buff) else { return false }
+            if buff.barrelImmunity && rules.barrelImmune { return false }
+            if buff.freeSwap && rules.freeSwap { return false }
+            if buff.killRefundsCooldown && rules.killRefundsCooldown { return false }
+            if buff.dodgeAtOne && rules.dodgeDistanceOverride == 1 { return false }
+            return true
+        }
         pendingBuffChoices = Array(pool.shuffled().prefix(2))
         if pendingBuffChoices.isEmpty {
             pendingBuffChoices = [.secondWind]
@@ -2108,6 +2910,112 @@ struct GameState {
         advanceLevel()
     }
 
+    /// One illustrative board per advanced-tutorial beat. Sandbox only: wipes the
+    /// board clean and lays out the props (and equips the weapon) for one lesson.
+    enum TutorialDemo { case barrels, spikes, teleporters, walls, grapple, slipstep, ice, mud }
+
+    mutating func tutorialSetupDemo(_ demo: TutorialDemo) {
+        enemies.removeAll()
+        obstacles.removeAll()
+        spikes.removeAll()
+        teleporters.removeAll()
+        terrain.removeAll()
+        lingeringEffects.removeAll()
+        projectiles.removeAll()
+        bolts.removeAll()
+        pendingArrivals.removeAll()
+        pendingBarrelSpawns.removeAll()
+        plannedTarget = nil
+        plannedAttackDirection = nil
+        plannedThrowTarget = nil
+        // The board is live between lessons, so the player drifts; recenter them
+        // so every demo lays out consistently and no prop falls off the board.
+        playerPosition = GridPosition(x: columns / 2, y: rows / 2)
+
+        let p = playerPosition
+        func tile(_ dx: Int, _ dy: Int) -> GridPosition { GridPosition(x: p.x + dx, y: p.y + dy) }
+        func addEnemy(_ dx: Int, _ dy: Int) {
+            let t = tile(dx, dy)
+            guard contains(t) else { return }
+            enemies.append(Enemy(id: nextEnemyID, position: t, weapon: .dagger))
+            nextEnemyID += 1
+        }
+        func addObstacle(_ kind: Obstacle.Kind, _ dx: Int, _ dy: Int, barrelKind: Obstacle.BarrelKind = .standard, destructible: Bool = false) {
+            let t = tile(dx, dy)
+            guard contains(t) else { return }
+            obstacles.append(Obstacle(id: nextObstacleID, kind: kind, position: t, barrelKind: barrelKind, destructible: destructible))
+            nextObstacleID += 1
+        }
+        func addTerrain(_ kind: TerrainPatch.Kind, _ dx: Int, _ dy: Int) {
+            let t = tile(dx, dy)
+            guard contains(t) else { return }
+            terrain.append(TerrainPatch(position: t, kind: kind))
+        }
+
+        switch demo {
+        case .barrels:
+            // Ram the adjacent foe into the (orange) barrel behind it; a green
+            // one to the side leaves fire, a yellow one is the Keg's weak powder.
+            equippedWeapon = .ram
+            holsteredWeapon = .keg
+            addEnemy(1, 0)
+            addObstacle(.barrel, 2, 0)
+            addObstacle(.barrel, -2, 1, barrelKind: .fire)
+            addObstacle(.barrel, -2, -1, barrelKind: .weak)
+        case .spikes:
+            // Fling the foe across the live spikes with a knockback swing.
+            equippedWeapon = .ram
+            holsteredWeapon = .dagger
+            addEnemy(1, 0)
+            spikes.append(SpikeTrap(position: tile(2, 0), active: true))
+            spikes.append(SpikeTrap(position: tile(3, 0), active: true))
+            spikes.append(SpikeTrap(position: tile(2, 2), active: false))
+        case .teleporters:
+            // Step onto the portal to warp across.
+            equippedWeapon = .dagger
+            holsteredWeapon = .bow
+            let a = tile(2, 0), b = tile(-3, -2)
+            if contains(a) && contains(b) { teleporters.append(Teleporter(id: 0, a: a, b: b)) }
+        case .walls:
+            // Crumbling (brown) walls give way to any hit or blast; the grey one
+            // won't. A barrel to blow a hole, and a foe waiting behind the rubble.
+            equippedWeapon = .ram
+            holsteredWeapon = .grapple
+            addObstacle(.wall, 1, 0, destructible: true)
+            addObstacle(.wall, 2, 0, destructible: true)
+            addObstacle(.wall, 1, 2)
+            addObstacle(.barrel, 2, 3)
+            addEnemy(3, 0)
+        case .grapple:
+            // Aim right for the enemy, up for the wall, left for the barrel.
+            equippedWeapon = .grapple
+            holsteredWeapon = .sword
+            addEnemy(4, 0)
+            addObstacle(.wall, 0, 4)
+            addObstacle(.barrel, -3, 0)
+        case .slipstep:
+            // Blink in, swap to the sword (free), strike; next turn swap back out.
+            equippedWeapon = .slipstep
+            holsteredWeapon = .sword
+            addEnemy(5, 3)
+        case .ice:
+            // Step onto the ice strip and slide down it into the waiting foe.
+            equippedWeapon = .sword
+            holsteredWeapon = .bow
+            for dx in 1...5 { addTerrain(.ice, dx, 0) }
+            addEnemy(6, 0)
+        case .mud:
+            // Mud between you and the foe: standing in it costs a step of move.
+            equippedWeapon = .sword
+            holsteredWeapon = .bow
+            addTerrain(.mud, 1, 0)
+            addTerrain(.mud, 2, 0)
+            addEnemy(4, 0)
+        }
+        turnStartWeapon = equippedWeapon
+        draftEnemyPlans()
+    }
+
     /// Applies the picked boon and resumes play.
     mutating func chooseBuff(at index: Int) {
         guard pendingBuffChoices.indices.contains(index) else { return }
@@ -2136,6 +3044,22 @@ struct GameState {
         return edges
     }
 
+    /// Draws the next non-boss gate elite from a shuffle-bag: each bag holds one
+    /// of each (juggernaut/summoner/artillery), reshuffled when emptied, and never
+    /// hands back the last one drawn — so gates cycle through all three.
+    private mutating func nextLesserElite() -> Archetype {
+        if lesserEliteBag.isEmpty {
+            var bag: [Archetype] = [.juggernaut, .summoner, .bombardier].shuffled()
+            if bag.first == lastLesserElite, bag.count > 1 {
+                bag.swapAt(0, bag.count - 1)
+            }
+            lesserEliteBag = bag
+        }
+        let pick = lesserEliteBag.removeFirst()
+        lastLesserElite = pick
+        return pick
+    }
+
     /// Picks the next wave's telegraphed arrivals: enemies on random open edge
     /// tiles a safe distance from the player (cadence and batch size set by the
     /// level), plus one fresh barrel anywhere open while under the cap — so
@@ -2143,9 +3067,15 @@ struct GameState {
     /// The level's gatekeeper arrives on an open edge tile: a juggernaut, or a
     /// full boss every third level. Waves pause until it falls.
     private mutating func summonElite(into spawns: inout [TurnResolution.SpawnEvent]) {
-        let archetype: Archetype = (rules.bossEveryGate || level.isMultiple(of: 3)) ? .boss : .juggernaut
+        // Every third level (or under the Warband pact) is a full boss; the
+        // other gates draw from a shuffle-bag so they cycle through all three
+        // lesser elites instead of streaking on one.
+        let archetype: Archetype = (rules.bossEveryGate || level.isMultiple(of: 3))
+            ? .boss
+            : nextLesserElite()
         let taken = Set(enemies.map(\.position))
             .union(obstacles.map(\.position))
+            .union(spawnAvoidTiles)
             .union([playerPosition])
         guard let tile = edgeTiles().shuffled().first(where: {
             !taken.contains($0) && $0.distance(to: playerPosition) > 3
@@ -2153,14 +3083,24 @@ struct GameState {
         let elite = Enemy.elite(archetype, id: nextEnemyID, at: tile, config: BossConfig.forLevel(level))
         nextEnemyID += 1
         enemies.append(elite)
-        spawns.append(TurnResolution.SpawnEvent(position: tile, enemyID: elite.id))
+        spawns.append(TurnResolution.SpawnEvent(position: tile, enemyID: elite.id, late: true))
         bossPhase = true
+    }
+
+    /// A rank-and-file recruit for waves and level starts — every one a bomber
+    /// under the Sappers curse, otherwise the usual mixed roll.
+    private func rollRecruit(id: Int, at tile: GridPosition) -> Enemy {
+        rules.allBombers
+            ? Enemy.recruit(.bomber, id: id, at: tile, armory: weaponPool)
+            : Enemy.recruit(id: id, at: tile, armory: weaponPool)
     }
 
     /// Rolls next turn's arrival for a telegraph tile — decided now, so the
     /// marker can honestly say what's coming.
-    private mutating func rollArrival(at tile: GridPosition) -> Enemy {
-        let arrival = Enemy.recruit(id: nextEnemyID, at: tile, armory: weaponPool)
+    private mutating func rollArrival(at tile: GridPosition, bomberOnly: Bool = false) -> Enemy {
+        let arrival = bomberOnly
+            ? Enemy.recruit(.bomber, id: nextEnemyID, at: tile, armory: weaponPool)
+            : rollRecruit(id: nextEnemyID, at: tile)
         nextEnemyID += 1
         return arrival
     }
@@ -2171,10 +3111,12 @@ struct GameState {
         // A drafted boss summon or barrage overrides the wave cadence: the
         // called recruits and lobbed barrels telegraph immediately.
         if !queuedBossSummons.isEmpty || !queuedBossBarrels.isEmpty {
-            pendingArrivals = queuedBossSummons.map { rollArrival(at: $0) }
+            let bomberOnly = queuedSummonsBomberOnly
+            pendingArrivals = queuedBossSummons.map { rollArrival(at: $0, bomberOnly: bomberOnly) }
             pendingBarrelSpawns = queuedBossBarrels
             primedBarrelTiles = Set(queuedBossBarrels)
             queuedBossSummons = []
+            queuedSummonsBomberOnly = false
             queuedBossBarrels = []
             return
         }
@@ -2188,11 +3130,12 @@ struct GameState {
         if bossPhase {
             guard let elite = enemies.first(where: { $0.archetype == .juggernaut }) else { return }
             let boss = BossConfig.forLevel(level)
-            let retinue = enemies.filter { $0.archetype != .juggernaut && $0.archetype != .boss }.count
+            let retinue = enemies.filter { !$0.isElite }.count
             guard retinue < boss.retinueCap else { return }
             let taken = Set(enemies.map(\.position))
                 .union(obstacles.map(\.position))
                 .union(lingeringEffects.map(\.position))
+                .union(spawnAvoidTiles)
                 .union([playerPosition])
             let ring = blastTiles(around: elite.position, radius: 2).filter {
                 !taken.contains($0) && $0.distance(to: playerPosition) > 1
@@ -2228,6 +3171,7 @@ struct GameState {
         let taken = Set(enemies.map(\.position))
             .union(obstacles.map(\.position))
             .union(lingeringEffects.map(\.position))
+            .union(spawnAvoidTiles)
         let candidates = edgeTiles().filter {
             !taken.contains($0) && $0.distance(to: playerPosition) > 3
         }
@@ -2259,6 +3203,7 @@ struct GameState {
         let taken = Set(enemies.map(\.position))
             .union(obstacles.map(\.position))
             .union(lingeringEffects.map(\.position))
+            .union(spawnAvoidTiles)
         let anchorPool = edgeTiles()
             .filter { !taken.contains($0) && $0.distance(to: playerPosition) > 3 }
             .shuffled()
@@ -2324,7 +3269,7 @@ struct GameState {
     /// Every few turns a random weapon appears on an open tile (up to a cap),
     /// so the player can trade their loadout mid-run.
     private mutating func spawnWeaponDrop() {
-        guard !bossPhase,
+        guard !rules.noLoot, !bossPhase,
               turnNumber % Self.weaponDropInterval == 0,
               weaponDrops.filter({ !$0.isBossDrop }).count < Self.weaponDropCap else { return }
         let taken = Set(enemies.map(\.position))
@@ -2333,6 +3278,7 @@ struct GameState {
             .union(weaponDrops.map(\.position))
             .union(pendingSpawns)
             .union(pendingBarrelSpawns)
+            .union(spawnAvoidTiles)
             .union([playerPosition])
         var open: [GridPosition] = []
         for x in 0..<columns {
@@ -2376,7 +3322,10 @@ struct GameState {
         flights: inout [TurnResolution.BoltFlight]
     ) -> Bolt? {
         var bolt = bolt
-        let flightStart = bolt.position
+        // A bolt can warp through a portal mid-window, so its flight is recorded
+        // in straight segments split at each warp (this is the current segment's
+        // origin; a fresh one opens on the far side of every portal).
+        var segmentStart = bolt.position
         var steps = min(bolt.speed, bolt.remainingRange)
         var alive = true
         let step = bolt.direction.unitStep
@@ -2391,9 +3340,18 @@ struct GameState {
                     let chained = detonateBarrels(struckTiles: [next], chargesUltimate: bolt.chargesUltimate)
                     impacts += chained.explosions
                     hits += chained.hits
+                    alive = false
+                    break
                 }
-                alive = false
-                break
+                // A wall. crumbleWalls shatters it if it's destructible (or Breach
+                // is active); a piercing bolt then bores straight on through any
+                // wall, a plain one dies against it.
+                crumbleWalls(in: [next])
+                if !bolt.pierces {
+                    alive = false
+                    break
+                }
+                // Piercing: fall through and keep flying past this tile.
             }
             bolt.position = next
             bolt.remainingRange -= 1
@@ -2432,6 +3390,24 @@ struct GameState {
                     }
                 }
             }
+
+            // A bolt that flies onto a portal (with a clear far end) is whisked
+            // across and flies on in the same heading — closing this segment and
+            // opening a new one on the exit. Never consumes a step, so range is
+            // measured by tiles travelled, not portals taken.
+            if alive {
+                let warped = teleportDestination(from: bolt.position)
+                if warped != bolt.position {
+                    flights.append(TurnResolution.BoltFlight(
+                        boltID: bolt.id,
+                        from: segmentStart,
+                        to: bolt.position,
+                        direction: bolt.direction
+                    ))
+                    bolt.position = warped
+                    segmentStart = warped
+                }
+            }
         }
 
         let spent = !(alive && bolt.remainingRange > 0)
@@ -2464,7 +3440,7 @@ struct GameState {
 
         flights.append(TurnResolution.BoltFlight(
             boltID: bolt.id,
-            from: flightStart,
+            from: segmentStart,
             to: bolt.position,
             direction: bolt.direction
         ))
@@ -2478,9 +3454,16 @@ struct GameState {
         var result: [GridPosition] = []
         for tile in pattern.tiles(from: origin, facing: direction) where contains(tile) {
             let obstacle = obstacle(at: tile)
-            if obstacle?.kind == .wall {
-                // A wall stops a thrust dead, but a shaped swing just can't hit
-                // the wall tile itself — it sweeps around it.
+            if let obstacle, obstacle.kind == .wall {
+                // A crumbling wall can be struck: it's a hittable tile (so it
+                // gets smashed), and it still stops a thrust like any wall.
+                if obstacle.destructible {
+                    result.append(tile)
+                    if pattern.isLine { break }
+                    continue
+                }
+                // A solid wall stops a thrust dead, but a shaped swing just can't
+                // hit the wall tile itself — it sweeps around it.
                 if pattern.isLine {
                     break
                 }
@@ -2494,10 +3477,42 @@ struct GameState {
         return result
     }
 
+    /// Packs every open tile with a crumbling wall (the Barricades pact): you and
+    /// the enemies have to break out. Bodies, scenery, and board features are left
+    /// in their clear spots.
+    private mutating func fillWithDestructibleWalls() {
+        let occupied = Set(obstacles.map(\.position))
+            .union(enemies.map(\.position))
+            .union(spikes.map(\.position))
+            .union(teleporters.flatMap { [$0.a, $0.b] })
+            .union(terrain.map(\.position))
+            .union([playerPosition])
+        for x in 0..<columns {
+            for y in 0..<rows {
+                let tile = GridPosition(x: x, y: y)
+                guard !occupied.contains(tile) else { continue }
+                obstacles.append(Obstacle(id: nextObstacleID, kind: .wall, position: tile, destructible: true))
+                nextObstacleID += 1
+            }
+        }
+    }
+
+    /// Removes any destructible walls on the given tiles (a hit or a blast
+    /// crumbles them). Solid walls and barrels are left alone.
+    /// Whether the player's blows level even solid walls (Breach pact / Siegecraft boon).
+    private var wallsAllBreakable: Bool {
+        rules.bustsAllWalls || buffs.contains(where: \.siege)
+    }
+
+    private mutating func crumbleWalls(in tiles: Set<GridPosition>) {
+        let bustAll = wallsAllBreakable
+        obstacles.removeAll { $0.kind == .wall && (bustAll || $0.destructible) && tiles.contains($0.position) }
+    }
+
     /// Detonates every barrel in the struck tiles: each blast damages the player
     /// and enemies on surrounding tiles and sets off neighboring barrels in a
     /// chain. Detonated barrels are removed from the board.
-    private mutating func detonateBarrels(struckTiles: Set<GridPosition>, chargesUltimate: Bool = true) -> (explosions: [TurnResolution.Explosion], hits: [TurnResolution.EnemyHit]) {
+    private mutating func detonateBarrels(struckTiles: Set<GridPosition>, chargesUltimate: Bool = true, damageOverride: Int? = nil) -> (explosions: [TurnResolution.Explosion], hits: [TurnResolution.EnemyHit]) {
         var queue = obstacles.filter { $0.kind == .barrel && struckTiles.contains($0.position) }
         var detonatedIDs = Set<Int>()
         var explosions: [TurnResolution.Explosion] = []
@@ -2507,20 +3522,32 @@ struct GameState {
             guard !detonatedIDs.contains(barrel.id) else { continue }
             detonatedIDs.insert(barrel.id)
 
-            let blast = blastTiles(around: barrel.position, radius: Self.barrelBlastRadius)
+            let blast = blastTiles(around: barrel.position, radius: Self.barrelBlastRadius + rules.barrelBlastBonus)
             explosions.append(TurnResolution.Explosion(center: barrel.position, tiles: blast))
 
             let blastSet = Set(blast)
-            // Player-lit barrel chains tally toward the explosives milestones and
-            // ride the deal-double boon (Sharpened); enemy-lit ones stay at base.
-            let enemyBlastDamage = chargesUltimate
-                ? Int((Double(Self.barrelDamage) * rules.damageDealtMult).rounded())
-                : Self.barrelDamage
-            hits += damageEnemies(on: blastSet, damage: enemyBlastDamage, chargesUltimate: chargesUltimate, credit: chargesUltimate ? "Barrels" : nil)
-            // Damage to the player runs through applyDamage, which already scales
-            // it by the take-double curse (Fragile).
-            if !isGameOver && blastSet.contains(playerPosition) && !buffs.contains(where: \.barrelImmunity) {
-                applyDamage(Self.barrelDamage, from: "an exploding barrel")
+            if barrel.barrelKind == .fire {
+                // A green barrel spreads flame instead of a concussion: no blast
+                // damage, but the tiles it covered burn for a few turns. It still
+                // crumbles walls and chains neighbors.
+                crumbleWalls(in: blastSet)
+                addLingeringEffect(at: blast, damagePerTurn: Self.fireBarrelDamage, duration: Self.fireBarrelDuration,
+                                   chargesUltimate: chargesUltimate, creditName: chargesUltimate ? "Barrels" : nil)
+            } else {
+                // Standard barrels deal a full blast, the Keg's yellow ones half.
+                let base = barrel.barrelKind == .weak ? Self.weakBarrelDamage : Self.barrelDamage
+                // Player-lit chains tally toward the explosives milestones and ride
+                // the deal-double boon (Sharpened); enemy-lit ones stay at base.
+                let enemyBlastDamage = damageOverride ?? (chargesUltimate
+                    ? Int((Double(base) * rules.damageDealtMult).rounded())
+                    : base)
+                hits += damageEnemies(on: blastSet, damage: enemyBlastDamage, chargesUltimate: chargesUltimate, credit: chargesUltimate ? "Barrels" : nil)
+                // Damage to the player runs through applyDamage, which already
+                // scales it by the take-double curse (Fragile).
+                if !isGameOver && blastSet.contains(playerPosition)
+                    && !buffs.contains(where: \.barrelImmunity) && !rules.barrelImmune {
+                    applyDamage(damageOverride ?? base, from: "an exploding barrel")
+                }
             }
             queue += obstacles.filter {
                 $0.kind == .barrel && !detonatedIDs.contains($0.id) && blastSet.contains($0.position)
@@ -2549,8 +3576,22 @@ struct GameState {
     /// Dev: while true, the player can move to any tile on the board, so it's
     /// easy to line up a shove into a barrel or reach anything to test it.
     var devInfiniteSpeed = false
+    /// Dev: while true, the player's reach is unbounded — throws land anywhere,
+    /// bolts fly the whole board, the grapple bites across it, and line swings
+    /// extend to the far edge.
+    var devInfiniteRange = false
     /// Dev: while true, the player's weapons never go on cooldown.
     var devNoCooldown = false
+    /// Dev: while true, weapon swaps never cost the turn's attack.
+    var devFreeSwap = false
+    /// Dev: while true, shieldbearers never parry — every hit lands, so their
+    /// shield facing can be ignored while testing.
+    var devIgnoreShields = false
+    /// Dev: when set, pins the level-up offer. `devForcedBuff` is the first
+    /// option and `devForcedBuff2` the second; set both to reproduce an exact
+    /// two-boon choice, or just one to narrow the offer.
+    var devForcedBuff: Buff?
+    var devForcedBuff2: Buff?
     /// Dev override for the player's attack damage.
     enum DevDamageMode: CaseIterable {
         /// The weapon's real damage.
@@ -2570,6 +3611,9 @@ struct GameState {
         case formation(index: Int?)
         /// Force a single enemy; nil archetype/weapon means "roll it normally".
         case single(archetype: Archetype?, weapon: Weapon?)
+        /// Drop a gatekeeper of the given archetype (scaled to the level) and
+        /// enter the boss phase — a dev shortcut to the gate fights.
+        case elite(archetype: Archetype)
     }
     var devSpawnOverride: DevSpawnOverride?
 
@@ -2583,11 +3627,25 @@ struct GameState {
             let taken = Set(enemies.map(\.position))
                 .union(obstacles.map(\.position))
                 .union(lingeringEffects.map(\.position))
+                .union(spawnAvoidTiles)
             guard let tile = edgeTiles().filter({
                 !taken.contains($0) && $0.distance(to: playerPosition) > 3
             }).randomElement() else { return }
             pendingArrivals = [Enemy.devSpawn(archetype: archetype, weapon: weapon, id: nextEnemyID, at: tile, armory: weaponPool)]
             nextEnemyID += 1
+        case .elite(let archetype):
+            let taken = Set(enemies.map(\.position))
+                .union(obstacles.map(\.position))
+                .union(lingeringEffects.map(\.position))
+                .union(spawnAvoidTiles)
+            guard let tile = edgeTiles().filter({
+                !taken.contains($0) && $0.distance(to: playerPosition) > 3
+            }).randomElement() else { return }
+            pendingArrivals = [Enemy.elite(archetype, id: nextEnemyID, at: tile, config: BossConfig.forLevel(level))]
+            nextEnemyID += 1
+            // Enter the gate fight: waves and score freeze until it falls, just
+            // like a real gatekeeper.
+            bossPhase = true
         }
     }
 
@@ -2612,13 +3670,16 @@ struct GameState {
 
     /// Armor absorbs damage first; only the overflow reaches health. The
     /// source label feeds the death recap when the hit proves fatal.
-    private mutating func applyDamage(_ amount: Int, from source: String) {
+    private mutating func applyDamage(_ amount: Int, from source: String, armorPiercing: Int = 0) {
         guard !devInvincible else { return }
         // Glass and kin scale incoming damage as well as outgoing.
         let amount = Int((Double(amount) * rules.damageTakenMult).rounded())
-        let absorbed = min(playerArmor, amount)
+        // A reaver rends past guard: this many points skip armor and bite health.
+        let pierce = min(amount, max(0, armorPiercing))
+        let throughArmor = amount - pierce
+        let absorbed = min(playerArmor, throughArmor)
         playerArmor -= absorbed
-        playerHealth -= amount - absorbed
+        playerHealth -= (throughArmor - absorbed) + pierce
         totalDamageTaken += amount
         if playerHealth <= 0 && causeOfDeath == nil {
             causeOfDeath = source
@@ -2633,7 +3694,10 @@ struct GameState {
     /// thrown ones — whenever its weapon is off cooldown and could hit the
     /// player's current tile from the drafted position.
     private mutating func draftEnemyPlans() {
+        // Active spike traps count as hazard tiles careful enemies route around
+        // (the fearless still barrel through, as with pools).
         let hazardTiles = Set(lingeringEffects.map(\.position))
+            .union(spikes.filter(\.active).map(\.position))
         // Telegraphed danger: tiles taking a hit next turn (landing shells, bolt
         // paths, arriving reinforcements). Enemies won't step into them — or
         // into lingering pools — so both count as blocked for pathing.
@@ -2660,6 +3724,10 @@ struct GameState {
         // still inbound this turn count too, so a freshly drafted squad isn't
         // disbanded before it even lands; and the anchor only marches once the
         // squad is actually on the board.
+        // A squad marches only as fast as its slowest member, so the swift ranks
+        // don't outrun the shieldbearers and tear the formation apart. Cached per
+        // squad here and reused when its members draft their march below.
+        var formationSpeed: [Int: Int] = [:]
         for (fid, anchor) in formationAnchors {
             let live = enemies.filter { $0.formationID == fid }
             let inbound = pendingArrivals.filter { $0.formationID == fid }.count
@@ -2667,6 +3735,8 @@ struct GameState {
             // drag the whole squad's break early — measure from the others.
             let nearest = live.filter { $0.archetype != .bomber }
                 .map { $0.position.distance(to: playerPosition) }.min() ?? Int.max
+            let packSpeed = max(1, live.map(\.moveRange).min() ?? 1)
+            formationSpeed[fid] = packSpeed
             if live.count + inbound < 2
                 || anchor.distance(to: playerPosition) <= Self.formationBreakDistance
                 || nearest <= Self.formationBreakDistance {
@@ -2677,8 +3747,16 @@ struct GameState {
             } else if !live.isEmpty {
                 // Route the anchor around scenery — marching it straight through
                 // walls would drag members' slots onto tiles they can't reach and
-                // shred the squad against the wall.
-                formationAnchors[fid] = stepToward(playerPosition, from: anchor, avoiding: Set(obstacles.map(\.position)))
+                // shred the squad against the wall. It advances the pack's speed in
+                // one turn so the whole squad keeps station as it closes in.
+                let obstacleTiles = Set(obstacles.map(\.position))
+                var marched = anchor
+                for _ in 0..<packSpeed {
+                    let next = stepToward(portalAwareGoal(playerPosition, from: marched), from: marched, avoiding: obstacleTiles)
+                    if next == marched { break }
+                    marched = next
+                }
+                formationAnchors[fid] = marched
             }
         }
 
@@ -2725,13 +3803,18 @@ struct GameState {
                     let goal = GridPosition(x: anchor.x + enemy.formationOffset.x, y: anchor.y + enemy.formationOffset.y)
                     var target = enemy.position
                     var path: [GridPosition] = []
-                    for _ in 0..<enemy.moveRange {
+                    // March at the squad's pace, not the member's own — a swift in
+                    // the ranks keeps station instead of surging to its slot early.
+                    let stride = formationSpeed[fid] ?? enemy.moveRange
+                    for _ in 0..<stride {
                         let next = stepToward(goal, from: target, avoiding: avoid)
                         if next == target { break }
                         target = next
                         path.append(next)
                         if target == goal { break }
                     }
+                    // A member marching onto ice slides on like anyone else.
+                    (target, path) = slideEnemyPlan(from: enemy.position, target: target, path: path, blocked: avoid)
                     enemies[index].plannedTarget = target
                     enemies[index].plannedPath = path
                     enemies[index].plannedDirection = nil
@@ -2765,8 +3848,8 @@ struct GameState {
                 if enemy.fuse == nil {
                     // Close enough already: arm in place. Otherwise close in.
                     if enemy.position.distance(to: playerPosition) > Self.bomberArmDistance {
-                        let goal = attackGoal(for: enemy, avoiding: avoid)
-                        for _ in 0..<enemy.moveRange {
+                        let goal = portalAwareGoal(attackGoal(for: enemy, avoiding: avoid), from: enemy.position)
+                        for _ in 0..<movementBudget(for: enemy) {
                             let next = stepToward(goal, from: target, avoiding: avoid)
                             if next == target {
                                 break
@@ -2778,9 +3861,11 @@ struct GameState {
                             }
                         }
                     }
-                    if target.distance(to: playerPosition) <= Self.bomberArmDistance {
-                        enemies[index].fuse = Self.bomberFuseTurns
-                    }
+                }
+                // Ice carries the bomber on; arm from wherever the slide leaves it.
+                (target, path) = slideEnemyPlan(from: enemy.position, target: target, path: path, blocked: avoid)
+                if enemy.fuse == nil && target.distance(to: playerPosition) <= Self.bomberArmDistance {
+                    enemies[index].fuse = Self.bomberFuseTurns
                 }
                 enemies[index].plannedTarget = target
                 enemies[index].plannedPath = path
@@ -2839,7 +3924,7 @@ struct GameState {
                 if let goal {
                     var lastFiringTile: GridPosition?
                     var firingPath: [GridPosition] = []
-                    for _ in 0..<enemy.moveRange {
+                    for _ in 0..<movementBudget(for: enemy) {
                         let next = stepToward(goal, from: target, avoiding: avoid)
                         if next == target {
                             break
@@ -2858,6 +3943,9 @@ struct GameState {
                     }
                 }
             }
+            // A move that lands on ice slides on; fold it in before drafting the
+            // aim so the shot (and shield facing) come from the true resting tile.
+            (target, path) = slideEnemyPlan(from: enemy.position, target: target, path: path, blocked: avoid)
             enemies[index].plannedTarget = target
             enemies[index].plannedPath = path
             enemies[index].plannedDirection = nil
@@ -2870,7 +3958,7 @@ struct GameState {
             if enemy.archetype == .shieldbearer {
                 enemies[index].facing = Direction.aiming(from: target, toward: playerPosition, allowDiagonals: true)
             }
-            if enemy.archetype == .boss {
+            if enemy.usesEliteIntents {
                 draftBossIntent(at: index, from: target)
             } else if ready && canHitPlayer(enemy, from: target) {
                 if enemy.weapon.thrown != nil {
@@ -2881,6 +3969,30 @@ struct GameState {
             }
             claimed.remove(enemy.position)
             claimed.insert(target)
+        }
+
+        // Walled in (Barricades or just cornered): an enemy that can't advance
+        // and isn't attacking smashes the crumbling wall between it and the
+        // player, opening a path to move through next turn.
+        for index in enemies.indices {
+            enemies[index].plannedDigTile = nil
+            let enemy = enemies[index]
+            guard enemy.stunTurns == 0,
+                  (enemy.plannedTarget ?? enemy.position) == enemy.position,
+                  enemy.plannedDirection == nil, enemy.plannedThrowTarget == nil, enemy.plannedIntent == nil
+            else { continue }
+            let from = enemy.position
+            let dx = (playerPosition.x - from.x).signum()
+            let dy = (playerPosition.y - from.y).signum()
+            let candidates = abs(playerPosition.x - from.x) >= abs(playerPosition.y - from.y)
+                ? [GridPosition(x: from.x + dx, y: from.y), GridPosition(x: from.x, y: from.y + dy)]
+                : [GridPosition(x: from.x, y: from.y + dy), GridPosition(x: from.x + dx, y: from.y)]
+            for candidate in candidates where candidate != from && contains(candidate) {
+                if let wall = obstacle(at: candidate), wall.kind == .wall, wall.destructible {
+                    enemies[index].plannedDigTile = candidate
+                    break
+                }
+            }
         }
     }
 
@@ -2902,8 +4014,8 @@ struct GameState {
     private func pressApproach(_ enemy: Enemy, blocked: Set<GridPosition>, danger: Set<GridPosition>) -> (target: GridPosition, path: [GridPosition]) {
         var target = enemy.position
         var path: [GridPosition] = []
-        let goal = attackGoal(for: enemy, avoiding: blocked)
-        for _ in 0..<enemy.moveRange {
+        let goal = portalAwareGoal(attackGoal(for: enemy, avoiding: blocked), from: enemy.position)
+        for _ in 0..<movementBudget(for: enemy) {
             var next = stepToward(goal, from: target, avoiding: blocked)
             if next == target && danger.contains(target) {
                 next = stepToward(goal, from: target, avoiding: blocked.subtracting(danger))
@@ -2927,13 +4039,56 @@ struct GameState {
     private mutating func draftBossIntent(at index: Int, from tile: GridPosition) {
         let boss = enemies[index]
         let config = BossConfig.forLevel(level)
-        let retinue = enemies.filter { $0.archetype != .boss && $0.archetype != .juggernaut }.count
+        let retinue = enemies.filter { !$0.isElite }.count
         // Summoning is gated both by the retinue cap (how many) and a cadence
         // (how often) — a fresh wave of fodder mostly dies to bombers, the
         // boss's own greataxe/nova friendly fire, and the player's blasts, so
         // without the cadence the boss would resummon every single turn.
         let canSummon = retinue < config.retinueCap
             && turnNumber - lastBossSummonTurn >= Self.bossSummonInterval
+
+        // The lesser casters (summoner, bombardier) share the summon intent but
+        // carry no cannon, so they branch off here before the boss's nova/volley.
+        if boss.archetype != .boss {
+            let primaryReady = boss.cooldownRemaining == 0
+            let primaryAim = primaryReady ? aimDirection(weapon: boss.weapon, attackerID: boss.id, from: tile) : nil
+            switch boss.archetype {
+            case .summoner:
+                // Calls in fodder whenever it can; otherwise pokes with the bow.
+                if canSummon {
+                    enemies[index].plannedIntent = .summon
+                } else if let aim = primaryAim {
+                    enemies[index].plannedIntent = .volley
+                    enemies[index].plannedDirection = aim
+                }
+            case .bombardier:
+                // The explosives specialist, all under one theme: cash in a primed
+                // barrel that boxes you, else call in a bomber swarm, else seed a
+                // fresh barrel barrage, else fend you off with its ordnance — a
+                // lobbed grenade or an exploding bolt.
+                if let detonateTile = bossDetonationTarget() {
+                    enemies[index].plannedIntent = .detonate
+                    enemies[index].plannedDetonateTile = detonateTile
+                } else if canSummon {
+                    enemies[index].plannedIntent = .summon
+                } else {
+                    let liveVolatile = obstacles.filter { $0.kind == .barrel && $0.volatile }.count
+                    if liveVolatile < config.bossBarrageCount && !barrageTiles().isEmpty {
+                        enemies[index].plannedIntent = .barrage
+                    } else if primaryReady && canHitPlayer(boss, from: tile) {
+                        if boss.weapon.thrown != nil {
+                            enemies[index].plannedThrowTarget = playerPosition
+                        } else if let aim = primaryAim {
+                            enemies[index].plannedIntent = .volley
+                            enemies[index].plannedDirection = aim
+                        }
+                    }
+                }
+            default:
+                break
+            }
+            return
+        }
 
         // The cannon and primary reload independently, so nova and volley
         // interleave — one keeps pressure up while the other is cooling.
@@ -2995,6 +4150,7 @@ struct GameState {
         let taken = Set(enemies.map(\.position))
             .union(obstacles.map(\.position))
             .union(lingeringEffects.map(\.position))
+            .union(spawnAvoidTiles)
             .union([playerPosition])
         return blastTiles(around: playerPosition, radius: 3).filter { !taken.contains($0) }
     }
@@ -3155,13 +4311,47 @@ struct GameState {
 
     /// One orthogonal tile toward the goal, preferring the axis with the larger
     /// gap; blocked enemies stay put.
+    /// The tile an enemy should actually head for, factoring in teleporters: if
+    /// stepping onto a portal end and popping out the far side gets it meaningfully
+    /// closer to `finalGoal`, that near end becomes the interim goal (the enemy
+    /// walks onto it, stops, and warps at resolve). Otherwise `finalGoal` itself.
+    private func portalAwareGoal(_ finalGoal: GridPosition, from: GridPosition) -> GridPosition {
+        guard !teleporters.isEmpty else { return finalGoal }
+        var best = finalGoal
+        var bestCost = from.distance(to: finalGoal)
+        for tp in teleporters {
+            // Only route to an end whose exit is currently clear — otherwise the
+            // warp would fizzle and the enemy would idle on a dead portal.
+            if tp.a != from, teleportDestination(from: tp.a) == tp.b {
+                let cost = from.distance(to: tp.a) + tp.b.distance(to: finalGoal)
+                if cost < bestCost { bestCost = cost; best = tp.a }
+            }
+            if tp.b != from, teleportDestination(from: tp.b) == tp.a {
+                let cost = from.distance(to: tp.b) + tp.a.distance(to: finalGoal)
+                if cost < bestCost { bestCost = cost; best = tp.b }
+            }
+        }
+        return best
+    }
+
     private func stepToward(_ goal: GridPosition, from: GridPosition, avoiding claimed: Set<GridPosition>) -> GridPosition {
         let dx = (goal.x - from.x).signum()
         let dy = (goal.y - from.y).signum()
         let stepX = GridPosition(x: from.x + dx, y: from.y)
         let stepY = GridPosition(x: from.x, y: from.y + dy)
         let xGapIsLarger = abs(goal.x - from.x) >= abs(goal.y - from.y)
-        let candidates = xGapIsLarger ? [stepX, stepY] : [stepY, stepX]
+        // First choice: close the gap on whichever axis is wider.
+        var candidates = xGapIsLarger ? [stepX, stepY] : [stepY, stepX]
+        // Deflections: when the direct step is walled off, slide perpendicular to
+        // round the obstacle instead of halting. Only added along an axis with no
+        // remaining gap, so an approach straight down a row/column can still slip
+        // past a wall parked in front of it (the old code just stopped dead here).
+        if dx == 0 {
+            candidates += [GridPosition(x: from.x + 1, y: from.y), GridPosition(x: from.x - 1, y: from.y)]
+        }
+        if dy == 0 {
+            candidates += [GridPosition(x: from.x, y: from.y + 1), GridPosition(x: from.x, y: from.y - 1)]
+        }
         for candidate in candidates where candidate != from && contains(candidate) && !claimed.contains(candidate) {
             return candidate
         }

@@ -18,6 +18,7 @@ class GameScene: SKScene {
     private var obstacleNodes: [GridPosition: SKNode] = [:]
     private var spikeNodes: [GridPosition: SKNode] = [:]
     private var teleporterNodes: [GridPosition: SKShapeNode] = [:]
+    private var terrainNodes: [GridPosition: SKNode] = [:]
     private var planArrowNode: SKShapeNode?
     private var enemyPlanArrowNodes: [SKShapeNode] = []
     private var enemyInfoLabel: SKLabelNode?
@@ -30,7 +31,10 @@ class GameScene: SKScene {
     private var afflictionLabel: SKLabelNode!
     private var itemsLabel: SKLabelNode!
     private var scoreLabel: SKLabelNode!
-    private var conditionsLabel: SKLabelNode!
+    /// The pact row (boon + curse) as separate colored, hoverable pieces.
+    private var pactHUD: SKNode!
+    private var pactTooltip: SKLabelNode?
+    private var pactTooltipMod: RunModifier?
     private var buffsLabel: SKLabelNode!
     private var spawnMarkerNodes: [SKNode] = []
     private var weaponDropNodes: [SKNode] = []
@@ -67,13 +71,20 @@ class GameScene: SKScene {
         get { Set(UserDefaults.standard.stringArray(forKey: "activeModifiers")?.compactMap(RunModifier.init(rawValue:)) ?? []) }
         set { UserDefaults.standard.set(newValue.map(\.rawValue).sorted(), forKey: "activeModifiers") }
     }
-    /// Dev: forces the boon half of the next rolled pact (nil = random).
+    /// The pact rolled for the current draft — remembered so toggling the pact
+    /// off and on re-applies the same bargain rather than dodging the reroll cap.
+    private var draftedPact: Set<RunModifier> = []
+    /// Rerolls left this draft. The reroll button is the only way to a new pact.
+    private static let maxPactRerolls = 3
+    private var pactRerollsRemaining = maxPactRerolls
+    /// Dev: forces the boon / curse halves of the next rolled pact (nil = random).
     private var devForcedPactBoon: RunModifier?
-    /// A fresh pact: one random boon paired with one random curse (the boon can
-    /// be pinned via the dev panel).
+    private var devForcedPactCurse: RunModifier?
+    /// A fresh pact: one boon paired with one curse. Either half can be pinned
+    /// via the dev panel.
     private func rolledPact() -> Set<RunModifier> {
         guard let boon = devForcedPactBoon ?? RunModifier.boons.randomElement(),
-              let curse = RunModifier.curses.randomElement() else { return [] }
+              let curse = devForcedPactCurse ?? RunModifier.curses.randomElement() else { return [] }
         return [boon, curse]
     }
     /// The level-up boon chooser; input is captive while it's up.
@@ -112,6 +123,110 @@ class GameScene: SKScene {
     private var tallyBaseline: [String: Int] = [:]
     /// The launch title screen; input is captive while it's up.
     private var titleOverlay: SKNode?
+    /// The settings overlay (natural scrolling, keybinds); modal while up.
+    private var settingsOverlay: SKNode?
+    /// The action currently listening for its next keypress to rebind (nil = not
+    /// capturing).
+    private var rebindingAction: KeyAction?
+
+    /// A gameplay key the player can remap in settings. Each maps a keyCode.
+    private enum KeyAction: String, CaseIterable {
+        case resolve, swap, pickup, ultimate, restart
+        var title: String {
+            switch self {
+            case .resolve: return "resolve turn"
+            case .swap: return "swap weapon"
+            case .pickup: return "pick up weapon"
+            case .ultimate: return "omen (ultimate)"
+            case .restart: return "restart run"
+            }
+        }
+        /// The out-of-the-box keyCode (Space, Tab, E, F, R).
+        var defaultCode: UInt16 {
+            switch self {
+            case .resolve: return 0x31
+            case .swap: return 0x30
+            case .pickup: return 0x0E
+            case .ultimate: return 0x03
+            case .restart: return 0x0F
+            }
+        }
+    }
+
+    /// Whether the wheel scrolls the side dropdowns "naturally" (content follows
+    /// the fingers). Persisted so it survives launches.
+    private var naturalScrolling: Bool {
+        get { UserDefaults.standard.bool(forKey: "naturalScrolling") }
+        set { UserDefaults.standard.set(newValue, forKey: "naturalScrolling") }
+    }
+    /// Fast-forwards every turn animation (sets the scene's action speed high) so
+    /// resolutions resolve near-instantly. Persisted.
+    private var skipAnimations: Bool {
+        get { UserDefaults.standard.bool(forKey: "skipAnimations") }
+        set { UserDefaults.standard.set(newValue, forKey: "skipAnimations") }
+    }
+    /// Whether a mid-run restart needs the double-tap confirmation (default on).
+    /// Off = R restarts instantly at any time.
+    private var confirmRestart: Bool {
+        get { UserDefaults.standard.object(forKey: "confirmRestart") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "confirmRestart") }
+    }
+    /// Whether picking a boon takes two clicks/presses (select, then confirm).
+    private var confirmBoonChoice: Bool {
+        get { UserDefaults.standard.bool(forKey: "confirmBoonChoice") }
+        set { UserDefaults.standard.set(newValue, forKey: "confirmBoonChoice") }
+    }
+    /// Whether starting a run from the draft needs a confirming second press.
+    private var confirmStartRun: Bool {
+        get { UserDefaults.standard.bool(forKey: "confirmStartRun") }
+        set { UserDefaults.standard.set(newValue, forKey: "confirmStartRun") }
+    }
+    /// Whether the SKView's FPS / node-count overlays are shown (default on).
+    private var showFPS: Bool {
+        get { UserDefaults.standard.object(forKey: "showFPS") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "showFPS") }
+    }
+    /// Timestamp of the last "begin run" press awaiting its confirming repeat.
+    private var lastStartConfirmTime: TimeInterval = 0
+    /// The boon awaiting a confirming second click (nil = none pending).
+    private var pendingBuffIndex: Int?
+    /// Player keybind overrides, keyed by KeyAction.rawValue → keyCode. Missing
+    /// entries fall back to the action's default.
+    private var keyBindings: [String: Int] {
+        get { UserDefaults.standard.dictionary(forKey: "keyBindings") as? [String: Int] ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: "keyBindings") }
+    }
+    /// The keyCode currently bound to an action (override or default).
+    private func boundCode(for action: KeyAction) -> UInt16 {
+        if let raw = keyBindings[action.rawValue] { return UInt16(raw) }
+        return action.defaultCode
+    }
+    /// Human-readable name for a keyCode, for the settings list.
+    private func keyName(_ code: UInt16) -> String {
+        switch code {
+        case 0x31: return "Space"
+        case 0x24: return "Return"
+        case 0x30: return "Tab"
+        case 0x35: return "Esc"
+        case 0x33: return "Delete"
+        case 0x7B: return "←"
+        case 0x7C: return "→"
+        case 0x7D: return "↓"
+        case 0x7E: return "↑"
+        default:
+            // Letter/number keys carry a stable code; map the common ones.
+            let letters: [UInt16: String] = [
+                0x00: "A", 0x0B: "B", 0x08: "C", 0x02: "D", 0x0E: "E", 0x03: "F",
+                0x05: "G", 0x04: "H", 0x22: "I", 0x26: "J", 0x28: "K", 0x25: "L",
+                0x2E: "M", 0x2D: "N", 0x1F: "O", 0x23: "P", 0x0C: "Q", 0x0F: "R",
+                0x01: "S", 0x11: "T", 0x20: "U", 0x09: "V", 0x0D: "W", 0x07: "X",
+                0x10: "Y", 0x06: "Z",
+                0x12: "1", 0x13: "2", 0x14: "3", 0x15: "4", 0x17: "5",
+                0x16: "6", 0x1A: "7", 0x1C: "8", 0x19: "9", 0x1D: "0",
+            ]
+            return letters[code] ?? "key \(code)"
+        }
+    }
     /// The right column's pages, switched by the nav bar. HOME shows the
     /// title overlay instead of a page.
     private enum HUDPage {
@@ -152,6 +267,8 @@ class GameScene: SKScene {
 
     override func didMove(to view: SKView) {
         backgroundColor = SKColor(white: 0.10, alpha: 1.0)
+        applyAnimationSpeed()
+        applyDebugOverlays()
         state = makeRunState()
         setUpScene()
         showTitleScreen()
@@ -175,6 +292,7 @@ class GameScene: SKScene {
         setUpPlayer()
         setUpEnemies()
         setUpObstacles()
+        setUpTerrain()
         setUpTeleporters()
         setUpSpikes()
         setUpHUD()
@@ -236,10 +354,18 @@ class GameScene: SKScene {
             return (SKColor(white: 0.15, alpha: 1.0), SKColor(red: 0.90, green: 0.55, blue: 0.15, alpha: 1.0), 1.5, 0.45)
         case .shieldbearer:
             return (SKColor(red: 0.42, green: 0.48, blue: 0.55, alpha: 1.0), SKColor(red: 0.80, green: 0.85, blue: 0.90, alpha: 1.0), 2.5, 0.55)
+        case .reaver:
+            return (SKColor(red: 0.55, green: 0.05, blue: 0.20, alpha: 1.0), SKColor(red: 0.98, green: 0.85, blue: 0.55, alpha: 1.0), 2.5, 0.5)
         case .juggernaut:
             return (SKColor(red: 0.60, green: 0.25, blue: 0.75, alpha: 1.0), .white, 1.5, 0.7)
         case .boss:
             return (SKColor(red: 0.45, green: 0.10, blue: 0.60, alpha: 1.0), .white, 3, 0.85)
+        case .summoner:
+            // Teal caster, sized between a juggernaut and a boss.
+            return (SKColor(red: 0.15, green: 0.65, blue: 0.60, alpha: 1.0), SKColor(red: 0.75, green: 1.0, blue: 0.95, alpha: 1.0), 2.5, 0.75)
+        case .bombardier:
+            // Slate-and-amber explosives handler.
+            return (SKColor(red: 0.30, green: 0.35, blue: 0.50, alpha: 1.0), SKColor(red: 0.98, green: 0.70, blue: 0.25, alpha: 1.0), 2.5, 0.75)
         }
     }
 
@@ -496,26 +622,75 @@ class GameScene: SKScene {
         }
     }
 
+    /// A tinted, inset square on each movement-terrain tile, below the entities:
+    /// pale blue for ice (slippery, +1 move), muddy brown for mud (−1 move).
+    /// Static — terrain doesn't change during a level.
+    private func setUpTerrain() {
+        terrainNodes.values.forEach { $0.removeFromParent() }
+        terrainNodes.removeAll()
+        for patch in state.terrain {
+            let side = tileSize * 0.9
+            let square = SKShapeNode(rectOf: CGSize(width: side, height: side), cornerRadius: tileSize * 0.12)
+            switch patch.kind {
+            case .ice:
+                square.fillColor = SKColor(red: 0.62, green: 0.82, blue: 0.95, alpha: 0.45)
+                square.strokeColor = SKColor(red: 0.78, green: 0.92, blue: 1.0, alpha: 0.9)
+            case .mud:
+                square.fillColor = SKColor(red: 0.42, green: 0.32, blue: 0.20, alpha: 0.55)
+                square.strokeColor = SKColor(red: 0.30, green: 0.22, blue: 0.13, alpha: 0.9)
+            }
+            square.lineWidth = 1.5
+            square.zPosition = 1
+            square.position = point(for: patch.position)
+            boardNode.addChild(square)
+            terrainNodes[patch.position] = square
+        }
+    }
+
     @discardableResult
     private func addObstacleNode(for obstacle: Obstacle) -> SKNode {
         let node: SKNode
         switch obstacle.kind {
         case .wall:
-            node = SKSpriteNode(
-                color: SKColor(white: 0.45, alpha: 1.0),
+            // Destructible walls read as cracked brown blocks; solid ones stay
+            // flat grey.
+            let wall = SKSpriteNode(
+                color: obstacle.destructible
+                    ? SKColor(red: 0.42, green: 0.34, blue: 0.24, alpha: 1.0)
+                    : SKColor(white: 0.45, alpha: 1.0),
                 size: CGSize(width: tileSize - 2, height: tileSize - 2)
             )
+            if obstacle.destructible {
+                // A pale seam hints it can be broken.
+                let crack = SKSpriteNode(color: SKColor(white: 0.75, alpha: 0.35),
+                                         size: CGSize(width: 2, height: tileSize - 8))
+                crack.zRotation = .pi / 8
+                wall.addChild(crack)
+            }
+            node = wall
         case .barrel:
             let barrel = SKShapeNode(circleOfRadius: tileSize * 0.30)
-            // Boss-primed barrels burn red so the player can tell them (and the
-            // detonate threat they carry) from ordinary orange powder.
+            // Colour tells the flavor apart: red = boss-primed, green = fire (no
+            // blast, leaves flame), yellow = weak (the Keg's), orange = standard.
+            let (fill, stroke): (SKColor, SKColor)
             if obstacle.volatile {
-                barrel.fillColor = SKColor(red: 0.85, green: 0.18, blue: 0.15, alpha: 1.0)
-                barrel.strokeColor = SKColor(red: 0.45, green: 0.05, blue: 0.05, alpha: 1.0)
+                fill = SKColor(red: 0.85, green: 0.18, blue: 0.15, alpha: 1.0)
+                stroke = SKColor(red: 0.45, green: 0.05, blue: 0.05, alpha: 1.0)
             } else {
-                barrel.fillColor = SKColor(red: 0.85, green: 0.50, blue: 0.15, alpha: 1.0)
-                barrel.strokeColor = SKColor(red: 0.40, green: 0.22, blue: 0.05, alpha: 1.0)
+                switch obstacle.barrelKind {
+                case .fire:
+                    fill = SKColor(red: 0.30, green: 0.72, blue: 0.32, alpha: 1.0)
+                    stroke = SKColor(red: 0.12, green: 0.34, blue: 0.14, alpha: 1.0)
+                case .weak:
+                    fill = SKColor(red: 0.88, green: 0.82, blue: 0.22, alpha: 1.0)
+                    stroke = SKColor(red: 0.45, green: 0.40, blue: 0.06, alpha: 1.0)
+                case .standard:
+                    fill = SKColor(red: 0.85, green: 0.50, blue: 0.15, alpha: 1.0)
+                    stroke = SKColor(red: 0.40, green: 0.22, blue: 0.05, alpha: 1.0)
+                }
             }
+            barrel.fillColor = fill
+            barrel.strokeColor = stroke
             barrel.lineWidth = 2
             node = barrel
         }
@@ -571,7 +746,7 @@ class GameScene: SKScene {
         // The nav bar across the top of the column.
         navTabLabels = [:]
         var tabX = columnLeft
-        for (title, key) in [("BOARD", "board"), ("MILESTONES", "milestones"), ("HOME", "home")] {
+        for (title, key) in [("BOARD", "board"), ("MILESTONES", "milestones"), ("SETTINGS", "settings"), ("HOME", "home")] {
             let tab = SKLabelNode(text: title)
             tab.fontName = "HelveticaNeue-Bold"
             tab.fontSize = 14
@@ -647,16 +822,12 @@ class GameScene: SKScene {
         scoreLabel.zPosition = 20
         addChild(scoreLabel)
 
-        // Just under the score: which run conditions are active and their score
-        // multiplier, so the player never forgets what they signed up for.
-        conditionsLabel = SKLabelNode()
-        conditionsLabel.fontName = "HelveticaNeue-Bold"
-        conditionsLabel.fontSize = 12
-        conditionsLabel.fontColor = SKColor(red: 0.93, green: 0.80, blue: 0.45, alpha: 1.0)
-        conditionsLabel.verticalAlignmentMode = .center
-        conditionsLabel.position = CGPoint(x: size.width / 2, y: scoreLabel.position.y - 42)
-        conditionsLabel.zPosition = 20
-        addChild(conditionsLabel)
+        // Just under the score: the pact in play, its boon and curse as separate
+        // pieces so the curse can burn red and each can be hovered for its effect.
+        pactHUD = SKNode()
+        pactHUD.position = CGPoint(x: size.width / 2, y: scoreLabel.position.y - 42)
+        pactHUD.zPosition = 20
+        addChild(pactHUD)
 
         buffsLabel = SKLabelNode()
         buffsLabel.fontName = "HelveticaNeue"
@@ -730,7 +901,13 @@ class GameScene: SKScene {
 
         let available = Set(currentWeaponPool().map(\.name))
         let lifetime = lifetimeTallies
-        for weapon in Weapon.all {
+        // Unlocked weapons rise to the top; alphabetical within each group.
+        let sortedArsenal = Weapon.all.sorted { a, b in
+            let aOwned = available.contains(a.name), bOwned = available.contains(b.name)
+            if aOwned != bOwned { return aOwned }
+            return a.name < b.name
+        }
+        for weapon in sortedArsenal {
             let owned = available.contains(weapon.name)
             let nameColor = owned ? earned : locked
             addLine(owned ? "✓ \(weapon.name)" : "· \(weapon.name)",
@@ -799,6 +976,10 @@ class GameScene: SKScene {
 
     private var legendNode: SKNode?
     private var expandedLegendSections: Set<LegendSection> = []
+    /// Scroll wheel offset for the left dropdowns, so a long open section (the
+    /// weapon list) can be read past the bottom edge.
+    private var legendScroll: CGFloat = 0
+    private var legendMaxScroll: CGFloat = 0
 
     /// The left margin, two columns: weapon/enemy reference dropdowns at the
     /// far edge, how-to-play primer and keybinds beside them. Rebuilt whenever
@@ -808,7 +989,7 @@ class GameScene: SKScene {
     }
 
     private enum LegendSection: String {
-        case howToPlay, keys, weapons, enemies, tiles
+        case howToPlay, turnOrder, keys, weapons, enemies, tiles
     }
 
     private func rebuildLegend() {
@@ -868,7 +1049,10 @@ class GameScene: SKScene {
 
         addLine("▸ new here? play the tutorial", x: referenceX,
                 font: "HelveticaNeue-Bold", size: 14, color: toggleColor,
-                name: "tutorialButton", drop: 30)
+                name: "tutorialButton", drop: 22)
+        addLine("▸ advanced tactics", x: referenceX,
+                font: "HelveticaNeue-Bold", size: 14, color: toggleColor,
+                name: "advancedTutorialButton", drop: 30)
 
         if header("HOW TO PLAY", .howToPlay) {
             addBody([
@@ -897,6 +1081,32 @@ class GameScene: SKScene {
             ])
         }
         y -= 8
+        if header("TURN ORDER", .turnOrder) {
+            addBody([
+                "Each GO resolves in this order —",
+                "plan around it:",
+                "",
+                "1 · daze & cooldowns tick down",
+                "2 · you move",
+                "3 · enemies move (their arrows)",
+                "4 · airborne bolts & shells fly",
+                "5 · your action: attack / grapple",
+                "     / omen (knockback & barrel",
+                "     shoves happen here)",
+                "6 · enemies strike — bombers blow,",
+                "     then swings; you're knocked",
+                "     back or reeled in now",
+                "7 · end of turn: spikes & pools",
+                "     bite, bleeds tick",
+                "8 · reinforcements telegraph for",
+                "     next turn",
+                "",
+                "So: you always move before your",
+                "hit lands, and enemies move before",
+                "it too — aim where they'll be.",
+            ])
+        }
+        y -= 8
         if header("KEYS", .keys) {
             addBody([
                 "click · draft move",
@@ -915,7 +1125,7 @@ class GameScene: SKScene {
             // Only the collected arsenal shows here; locked weapons and their
             // requirements live on the MILESTONES page.
             let available = Set(currentWeaponPool().map(\.name))
-            for weapon in Weapon.all where available.contains(weapon.name) {
+            for weapon in Weapon.all.filter({ available.contains($0.name) }).sorted(by: { $0.name < $1.name }) {
                 let (name, stats) = weaponLegendEntry(weapon)
                 addLine(name, x: referenceX, font: "HelveticaNeue-Bold", size: 15, color: entryColor, drop: 20)
                 addLine(stats, x: referenceX + 12, size: 13.5, color: statColor, drop: 26)
@@ -933,13 +1143,18 @@ class GameScene: SKScene {
                                      "blast r\(GameState.bomberBlastRadius), on fuse or death"]),
                 (.shieldbearer, "Shieldbearer", ["parries the first head-on",
                                                  "swing; flank it or blast it"]),
+                (.reaver, "Reaver", ["rare; 1 dmg per hit", "pierces your armor"]),
                 (.juggernaut, "Juggernaut", ["the gate,", "summons waves"]),
+                (.summoner, "Summoner", ["the gate; frail caster that",
+                                         "floods the board with fodder"]),
+                (.bombardier, "Bombardier", ["the gate; summons bomber swarms,",
+                                             "rains red barrels, lobs ordnance"]),
                 (.boss, "Boss", ["the gate, drafts:",
                                  "volley, cannon nova, summon,",
                                  "or lob red barrels then",
                                  "detonate — all scale w/ depth"]),
             ]
-            for (archetype, name, details) in entries {
+            for (archetype, name, details) in entries.sorted(by: { $0.name < $1.name }) {
                 // A little rotated-square swatch in the archetype's colour and
                 // relative size — the same art the board draws.
                 let style = enemyStyle(archetype)
@@ -970,7 +1185,9 @@ class GameScene: SKScene {
                 (SKColor(red: 0.18, green: 0.36, blue: 0.48, alpha: 1.0), "throw range"),
                 (SKColor(white: 0.95, alpha: 1.0), "ult wave / blocked spawn"),
                 (SKColor(red: 0.90, green: 0.28, blue: 0.24, alpha: 1.0), "spike trap — bites while lit, toggles each turn"),
-                (SKColor(red: 0.55, green: 0.80, blue: 1.0, alpha: 1.0), "portal — warps you to its linked end"),
+                (SKColor(red: 0.55, green: 0.80, blue: 1.0, alpha: 1.0), "portal — warps you (and enemies) across"),
+                (SKColor(red: 0.42, green: 0.34, blue: 0.24, alpha: 1.0), "crumbling wall — a hit or blast breaks it"),
+                (SKColor(red: 0.85, green: 0.50, blue: 0.15, alpha: 1.0), "barrel — orange bursts, green burns, yellow weak"),
             ]
             for (color, text) in swatches {
                 let swatch = SKSpriteNode(color: color, size: CGSize(width: 13, height: 13))
@@ -979,6 +1196,22 @@ class GameScene: SKScene {
                 addLine(text, x: referenceX + 20, size: 14, color: statColor, drop: 22)
             }
         }
+
+        // Whatever spilled past the bottom edge becomes scrollable: shift the
+        // whole column up by the wheel offset, clamped to the overflow.
+        let bottomMargin: CGFloat = 16
+        legendMaxScroll = max(0, bottomMargin - y)
+        legendScroll = min(legendScroll, legendMaxScroll)
+        column.position = CGPoint(x: 0, y: legendScroll)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard legendMaxScroll > 0 else { return }
+        // Scrolling down reveals lower entries (content shifts up); natural
+        // scrolling flips that so the content tracks the fingers.
+        let delta = naturalScrolling ? -event.scrollingDeltaY : event.scrollingDeltaY
+        legendScroll = min(legendMaxScroll, max(0, legendScroll - delta))
+        rebuildLegend()
     }
 
     // MARK: - Tutorial
@@ -1016,6 +1249,24 @@ class GameScene: SKScene {
     /// The next showcase beat, run on the player's click so they read at their
     /// own pace. Nil during the boon-pick beat (the picker drives that one).
     private var tutorialAdvance: (() -> Void)?
+    /// True on the beginner showcase's closing beat, where a click rolls into the
+    /// advanced tutorial and Esc skips it.
+    private var offeringAdvanced = false
+    /// True while an interactive lesson runs (beginner showcase or advanced): the
+    /// board is LIVE, a persistent NEXT/EXIT banner drives it, and it's sandboxed
+    /// over the real run.
+    private var advancedTutorialActive = false
+    private var advancedLessonIndex = 0
+    private var advancedOverlay: SKNode?
+    /// What the NEXT button does on the current lesson beat (nil = no NEXT button;
+    /// something else, like the boon picker, drives the advance).
+    private var lessonNext: (() -> Void)?
+    /// True through the beginner showcase (swap → formation → gatekeeper → level),
+    /// so the boon pick knows to roll into the closing card.
+    private var beginnerShowcaseActive = false
+    /// When the advanced tutorial was opened from the draft, SKIP/FINISH returns
+    /// there rather than dropping the player into a run they never configured.
+    private var advancedReturnToBuildPicker = false
 
     private func startTutorial() {
         // Snapshot the real run, then coach on a plain, pact-free copy so the
@@ -1028,6 +1279,7 @@ class GameScene: SKScene {
         // a mid-run replay's progress accounting survives the sandbox.
         let savedBaseline = tallyBaseline
         state = makeRunState(modifiersOverride: [])
+        state.devInvincible = true   // no dying in the sandbox tutorial
         tallyBaseline = savedBaseline
         resyncBoardToState()
         tutorialStep = .hover
@@ -1114,9 +1366,14 @@ class GameScene: SKScene {
     /// level-up on a throwaway copy — so the player sees each system without
     /// grinding, and the run is restored untouched afterward.
     private func startTutorialShowcase() {
-        // Snapshot was taken back in startTutorial, so the guided turn is undone
-        // on restore too — just freeze input and roll the beats.
-        tutorialShowcasing = true
+        // Snapshot was taken back in startTutorial. Run the showcase as live,
+        // interactive lessons (same as the advanced track): board playable, a
+        // NEXT/EXIT banner drives it, so the player tries each system firsthand.
+        tutorialPrompt?.removeFromParent()
+        tutorialPrompt = nil
+        beginnerShowcaseActive = true
+        advancedTutorialActive = true
+        advancedReturnToBuildPicker = false   // launched from a live run
         showcaseSwap()
     }
 
@@ -1126,57 +1383,179 @@ class GameScene: SKScene {
         let cost = state.swapsAreFree
             ? "and you took Quickhands, so it's free."
             : "but it costs your attack that turn (a boon can make it free)."
-        showTutorialPrompt(
-            "SWAP WEAPONS · press Tab (or tap the weapon button) to swap to your holstered weapon — it changes your reach and attack, \(cost)  ▸ click to continue"
-        )
-        tutorialAdvance = { [weak self] in self?.showcaseFormation() }
+        buildLessonOverlay(
+            text: "SWAP WEAPONS · press Tab (or tap the weapon button) to swap to your holstered weapon — try it. It changes your reach and attack, \(cost)"
+        ) { [weak self] in self?.showcaseFormation() }
     }
 
     private func showcaseFormation() {
-        showTutorialPrompt(
-            "FORMATIONS · enemies sometimes march in as a squad — a shield wall, a bomber charge — holding ranks until they close, then breaking to swarm.  ▸ click to continue"
-        )
         state.tutorialSpawnFormation()
         resyncBoardToState()
-        tutorialAdvance = { [weak self] in self?.showcaseGatekeeper() }
+        buildLessonOverlay(
+            text: "FORMATIONS · enemies sometimes march in as a squad — a shield wall, a bomber charge — holding ranks until they close, then breaking to swarm. Take a swing if you like."
+        ) { [weak self] in self?.showcaseGatekeeper() }
     }
 
     private func showcaseGatekeeper() {
-        showTutorialPrompt(
-            "GATEKEEPERS · a JUGGERNAUT or BOSS locks the level until it falls. Bosses draft telegraphed volleys, cannon novas, summons, and barrel barrages — read before you commit.  ▸ click to continue"
-        )
         state.tutorialSpawnGatekeeper()
         resyncBoardToState()
-        tutorialAdvance = { [weak self] in self?.showcaseLevelUp() }
+        buildLessonOverlay(
+            text: "GATEKEEPERS · a JUGGERNAUT or BOSS locks the level until it falls. Bosses draft telegraphed volleys, cannon novas, summons, and barrel barrages — read them before you commit."
+        ) { [weak self] in self?.showcaseLevelUp() }
     }
 
     private func showcaseLevelUp() {
-        // No click-advance here: the level-up opens the boon picker, and picking
-        // a boon (see chooseBuff) drives the hand-off to the closing card.
-        tutorialAdvance = nil
-        showTutorialPrompt("LEVELING · hit the score bar to level up — the board resets, your armor refills, and you pick a boon.")
+        // The boon picker drives this beat, so no NEXT button — picking a boon
+        // (see chooseBuff) rolls into the closing card.
         state.tutorialLevelUp()
         resyncBoardToState()
+        buildLessonOverlay(
+            text: "LEVELING · hit the score bar to level up — the board resets, your armor refills, and you pick a boon. Pick one to continue.",
+            next: nil
+        )
         showBuffChoice(forLevel: state.level)
     }
 
-    /// The boon pick's hand-off (called from chooseBuff): a closing card that
-    /// waits for one more click, then restores the run to where it was.
+    /// The boon pick's hand-off (called from chooseBuff): a closing card. NEXT
+    /// rolls into the advanced tutorial; EXIT drops straight into the run.
     private func finishTutorialShowcase() {
-        showTutorialPrompt(
-            "THAT'S THE GIST · move 2+ tiles without acting to dodge a hit; the rest is in the dropdowns on the left. Good luck out there.  ▸ click to begin"
-        )
-        tutorialAdvance = { [weak self] in self?.endTutorialShowcase() }
+        beginnerShowcaseActive = false
+        buildLessonOverlay(
+            text: "THAT'S THE GIST · move 2+ tiles without acting to dodge a hit; the rest is in the dropdowns on the left. Want the ADVANCED tactics — barrels, grapple, blink? NEXT to learn them, EXIT to play."
+        ) { [weak self] in
+            self?.advancedReturnToBuildPicker = false   // chained into a live run
+            self?.startAdvancedTutorial()
+        }
     }
 
-    private func endTutorialShowcase() {
-        tutorialAdvance = nil
+    // MARK: - Advanced tutorial
+    // A separate opt-in track for environmental combat and the utility weapons.
+    // Unlike the beginner showcase, these lessons are *played*: the board is live,
+    // free swaps are on, and a persistent banner + NEXT/SKIP drives progression.
+    // It sandboxes over the live context and restores it when done.
+
+    private struct AdvancedLesson {
+        let demo: GameState.TutorialDemo
+        let text: String
+    }
+
+    private let advancedLessons: [AdvancedLesson] = [
+        AdvancedLesson(demo: .barrels, text: "KNOCKBACK & BARRELS · you're holding the Ram (knockback 2). Attack the enemy beside you to fling it into the orange barrel behind it. Barrels have flavors: orange bursts, green leaves fire, yellow (the Keg's) bursts weak. Flinging a foe into a wall or off the edge bruises it too — and it cuts both ways. (Tab swaps to the Keg — lob it to drop your own barrel.)"),
+        AdvancedLesson(demo: .spikes, text: "SPIKES · lit tiles bite whoever ends the turn on them, then toggle. Attack the enemy — the Ram flings it across the live spikes, and it takes a bite on the way. Mind your own footing."),
+        AdvancedLesson(demo: .teleporters, text: "TELEPORTERS · step onto the portal to warp to its linked twin across the board. Enemies path through them to reach you, and a bolt fired through one flies out the far side."),
+        AdvancedLesson(demo: .ice, text: "ICE · standing on ice gives +1 move, and a move that ends on ice slides you on down the strip until it runs out or something stops you. The gold marker shows where you'll really land — draft a step onto the ice and slide into the foe."),
+        AdvancedLesson(demo: .mud, text: "MUD · while you're stood in mud your move range drops by 1, so it bogs you down. Watch your footing — ending a turn in mud next to a threat leaves you a step short of escaping it."),
+        AdvancedLesson(demo: .walls, text: "WALLS · brown walls crumble — smash one with a swing or blow it apart with a blast to open a path. Grey walls are solid. (The Barricades pact packs the whole board with crumbling walls to dig through.)"),
+        AdvancedLesson(demo: .grapple, text: "GRAPPLE · right-click a direction to fire it: aim RIGHT at the enemy to reel it in, UP at the wall to haul yourself over, or LEFT at the barrel to yank it into your lap for a soft pop."),
+        AdvancedLesson(demo: .slipstep, text: "SLIPSTEP · blinks you 7 tiles but barely scratches. Blink next to the enemy, then Tab to the Sword (free) and strike the same turn. Next turn, swap back and blink clean out."),
+    ]
+
+    private func startAdvancedTutorial() {
+        // Standalone launch snapshots the live context; chained off the beginner
+        // tutorial it keeps that snapshot. Roll a clean sandbox with free swaps on
+        // so the swap combos are actually learnable.
+        if tutorialSnapshot == nil { tutorialSnapshot = state }
+        let savedBaseline = tallyBaseline
+        state = makeRunState(modifiersOverride: [])
+        state.devFreeSwap = true
+        state.devInvincible = true   // no dying in the sandbox tutorial
+        tallyBaseline = savedBaseline
         tutorialPrompt?.removeFromParent()
         tutorialPrompt = nil
+        offeringAdvanced = false
+        beginnerShowcaseActive = false      // advanced has no boon-pick beat
+        tutorialShowcasing = false          // the board is LIVE for these lessons
+        advancedTutorialActive = true
+        showAdvancedLesson(0)
+    }
+
+    private func showAdvancedLesson(_ index: Int) {
+        guard advancedLessons.indices.contains(index) else { endAdvancedTutorial(); return }
+        advancedLessonIndex = index
+        state.tutorialSetupDemo(advancedLessons[index].demo)
+        resyncBoardToState()
+        buildLessonOverlay(text: advancedLessons[index].text, isLast: index == advancedLessons.count - 1) { [weak self] in
+            self?.showAdvancedLesson(index + 1)
+        }
+    }
+
+    private func endAdvancedTutorial() {
+        advancedTutorialActive = false
+        beginnerShowcaseActive = false
+        lessonNext = nil
+        advancedOverlay?.removeFromParent()
+        advancedOverlay = nil
+        // Bailing mid boon-pick (the level-up beat) leaves the picker up; clear it.
+        buffChoiceOverlay?.removeFromParent()
+        buffChoiceOverlay = nil
         if let snapshot = tutorialSnapshot { state = snapshot }
         tutorialSnapshot = nil
-        tutorialShowcasing = false
         resyncBoardToState()
+        // Opened from the draft: return there so the player picks their own run,
+        // rather than being dropped into the sandbox loadout.
+        if advancedReturnToBuildPicker {
+            advancedReturnToBuildPicker = false
+            showBuildPicker()
+        }
+    }
+
+    /// A persistent coaching banner for an interactive lesson, plus an EXIT
+    /// button and — when `next` is given — a NEXT/FINISH button. The board stays
+    /// playable beneath it, so the player experiments before advancing.
+    private func buildLessonOverlay(text: String, isLast: Bool = false, next: (() -> Void)?) {
+        lessonNext = next
+        advancedOverlay?.removeFromParent()
+        let overlay = SKNode()
+        overlay.zPosition = 80
+        addChild(overlay)
+        advancedOverlay = overlay
+
+        let boardSide = min(size.width, size.height) * boardScale
+        let topEdge = (size.height + boardSide) / 2
+
+        let label = SKLabelNode(text: text)
+        label.fontName = "HelveticaNeue-Bold"
+        label.fontSize = 14
+        label.fontColor = SKColor(red: 0.93, green: 0.80, blue: 0.45, alpha: 1.0)
+        label.verticalAlignmentMode = .center
+        label.horizontalAlignmentMode = .center
+        label.numberOfLines = 0
+        label.preferredMaxLayoutWidth = boardSide - 60
+        label.position = CGPoint(x: size.width / 2, y: topEdge - 6)
+
+        let plate = SKShapeNode(
+            rectOf: CGSize(width: label.frame.width + 36, height: label.frame.height + 22),
+            cornerRadius: 9
+        )
+        plate.fillColor = SKColor(white: 0.06, alpha: 0.92)
+        plate.strokeColor = SKColor(red: 0.93, green: 0.80, blue: 0.45, alpha: 0.8)
+        plate.lineWidth = 1.5
+        plate.position = label.position
+        overlay.addChild(plate)
+        overlay.addChild(label)
+
+        func button(_ title: String, name: String, x: CGFloat, fill: SKColor) {
+            let node = SKShapeNode(rectOf: CGSize(width: 124, height: 30), cornerRadius: 6)
+            node.fillColor = fill
+            node.strokeColor = SKColor(white: 0.9, alpha: 0.9)
+            node.lineWidth = 1.5
+            node.position = CGPoint(x: x, y: plate.position.y - plate.frame.height / 2 - 24)
+            node.name = name
+            let title = SKLabelNode(text: title)
+            title.fontName = "HelveticaNeue-Bold"
+            title.fontSize = 13
+            title.fontColor = .white
+            title.verticalAlignmentMode = .center
+            title.name = name
+            node.addChild(title)
+            overlay.addChild(node)
+        }
+        button("EXIT ✕", name: "advTutorial:skip", x: next == nil ? size.width / 2 : size.width / 2 - 72,
+               fill: SKColor(white: 0.20, alpha: 0.95))
+        if next != nil {
+            button(isLast ? "FINISH ▸" : "NEXT ▸", name: "advTutorial:next", x: size.width / 2 + 72,
+                   fill: SKColor(red: 0.20, green: 0.42, blue: 0.62, alpha: 0.95))
+        }
     }
 
     /// Rebuilds the board sprites and HUD to match the current `state` — used at
@@ -1297,12 +1676,24 @@ class GameScene: SKScene {
     }
 
     private func updateHUD() {
-        drawPips(
-            in: healthBarNode,
-            filled: max(0, state.playerHealth),
-            total: max(state.maxHealth, state.playerHealth),
-            color: SKColor(red: 0.85, green: 0.25, blue: 0.30, alpha: 1.0)
-        )
+        if state.rules.hideHealth {
+            // Blindfold pact: no health readout — fight by feel.
+            healthBarNode.removeAllChildren()
+            let hidden = SKLabelNode(text: "HP ? ? ?")
+            hidden.fontName = "HelveticaNeue-Bold"
+            hidden.fontSize = 15
+            hidden.fontColor = SKColor(red: 0.85, green: 0.25, blue: 0.30, alpha: 1.0)
+            hidden.horizontalAlignmentMode = .left
+            hidden.verticalAlignmentMode = .center
+            healthBarNode.addChild(hidden)
+        } else {
+            drawPips(
+                in: healthBarNode,
+                filled: max(0, state.playerHealth),
+                total: max(state.maxHealth, state.playerHealth),
+                color: SKColor(red: 0.85, green: 0.25, blue: 0.30, alpha: 1.0)
+            )
+        }
         drawPips(
             in: armorBarNode,
             filled: max(0, state.playerArmor),
@@ -1329,16 +1720,9 @@ class GameScene: SKScene {
         scoreLabel.text = "LVL \(state.level) · SCORE \(progress)\(streak) · TURN \(state.turnNumber) · BEST \(best)"
         scoreLabel.fontColor = devFreezeHighScore ? SKColor(red: 0.45, green: 0.65, blue: 0.95, alpha: 1.0) : .white
 
-        // The run's pact: the boon and curse in play (no score multiplier).
-        let mods = state.modifiers
-        if mods.isEmpty {
-            conditionsLabel.isHidden = true
-        } else {
-            let boon = mods.first(where: \.isBoon).map { "⚡ \($0.title)" }
-            let curse = mods.first(where: { !$0.isBoon }).map { "☠ \($0.title)" }
-            conditionsLabel.text = "PACT · " + [boon, curse].compactMap { $0 }.joined(separator: " · ")
-            conditionsLabel.isHidden = false
-        }
+        // The run's pact: the boon (gold) and curse (red) as separate hoverable
+        // pieces, laid out as one centered row.
+        rebuildPactHUD(state.modifiers)
 
         // Held buffs, deduplicated into "name ×2 (3 lv)" style in pickup order;
         // the level count shows the soonest expiry of the stack.
@@ -1444,9 +1828,12 @@ class GameScene: SKScene {
         }
         // Planning a move onto a portal foresees the warp: the exit lights up gold
         // as the true destination.
+        // Planning a move onto ice or a portal foresees where the player truly
+        // ends up: the slide's resting tile (plannedLanding), then any warp from
+        // it, lit gold as the real destination.
         var plannedWarpExit: GridPosition?
         if planning, let target = state.plannedTarget {
-            let exit = state.teleportDestination(from: target)
+            let exit = state.teleportDestination(from: state.plannedLanding)
             if exit != target { plannedWarpExit = exit }
         }
 
@@ -1492,6 +1879,23 @@ class GameScene: SKScene {
                 isSpawnTelegraph: spawnTiles.contains(position),
                 isPlannedDestination: position == plannedWarpExit
             )
+        }
+        // A destructible wall sits on top of its tile, hiding the tile-color
+        // telegraph, so tint the wall itself: orange when the planned attack
+        // covers it, red when an enemy will smash it open this turn.
+        let crumbleBase = SKColor(red: 0.42, green: 0.34, blue: 0.24, alpha: 1.0)
+        let attackTint = SKColor(red: 0.85, green: 0.40, blue: 0.15, alpha: 1.0)
+        let digTint = SKColor(red: 0.60, green: 0.28, blue: 0.20, alpha: 1.0)
+        let digTiles = planning ? Set(state.enemies.compactMap(\.plannedDigTile)) : []
+        for (position, node) in obstacleNodes {
+            guard let wall = node as? SKSpriteNode, state.obstacle(at: position)?.destructible == true else { continue }
+            if attackTiles.contains(position) {
+                wall.color = attackTint
+            } else if digTiles.contains(position) {
+                wall.color = digTint
+            } else {
+                wall.color = crumbleBase
+            }
         }
     }
 
@@ -1616,12 +2020,22 @@ class GameScene: SKScene {
                     at: hovered,
                     color: SKColor(red: 0.95, green: 0.85, blue: 0.35, alpha: 1.0)
                 )
-            } else if state.obstacle(at: hovered)?.kind == .barrel {
-                addHoverLabel(
-                    "barrel · \(GameState.barrelDamage) dmg · blast r\(GameState.barrelBlastRadius + state.rules.barrelBlastBonus) · chains",
-                    at: hovered,
-                    color: SKColor(red: 0.90, green: 0.55, blue: 0.15, alpha: 1.0)
-                )
+            } else if let barrel = state.obstacle(at: hovered), barrel.kind == .barrel {
+                let radius = GameState.barrelBlastRadius + state.rules.barrelBlastBonus
+                let text: String
+                let color: SKColor
+                switch barrel.barrelKind {
+                case .fire:
+                    text = "green barrel · no blast · leaves fire \(GameState.fireBarrelDamage)/turn · blast r\(radius) · chains"
+                    color = SKColor(red: 0.35, green: 0.80, blue: 0.40, alpha: 1.0)
+                case .weak:
+                    text = "yellow barrel · \(GameState.weakBarrelDamage) dmg · blast r\(radius) · chains"
+                    color = SKColor(red: 0.90, green: 0.85, blue: 0.30, alpha: 1.0)
+                case .standard:
+                    text = "barrel · \(GameState.barrelDamage) dmg · blast r\(radius) · chains"
+                    color = SKColor(red: 0.90, green: 0.55, blue: 0.15, alpha: 1.0)
+                }
+                addHoverLabel(text, at: hovered, color: color)
             } else if let bolt = state.bolt(at: hovered) ?? state.bolt(threatening: hovered) {
                 addHoverLabel(
                     boltHoverText(bolt, at: hovered),
@@ -1658,6 +2072,21 @@ class GameScene: SKScene {
                     at: hovered,
                     color: SKColor(red: 0.55, green: 0.80, blue: 1.0, alpha: 1.0)
                 )
+            } else if let terrain = state.terrainKind(at: hovered) {
+                switch terrain {
+                case .ice:
+                    addHoverLabel(
+                        "ice · +1 move · a move ending here slides you on",
+                        at: hovered,
+                        color: SKColor(red: 0.70, green: 0.88, blue: 1.0, alpha: 1.0)
+                    )
+                case .mud:
+                    addHoverLabel(
+                        "mud · −1 move while stood in it",
+                        at: hovered,
+                        color: SKColor(red: 0.72, green: 0.58, blue: 0.40, alpha: 1.0)
+                    )
+                }
             } else if let arrival = state.pendingArrivals.first(where: { $0.position == hovered }) {
                 addHoverLabel(
                     "\(arrival.displayName) arrives next turn · stand here to block (1 dmg)",
@@ -1693,6 +2122,9 @@ class GameScene: SKScene {
         }
         if enemy.archetype == .shieldbearer, let facing = enemy.facing {
             status += enemy.shieldReady ? " · shield \(facing.arrow)" : " · shield down"
+        }
+        if enemy.archetype == .reaver {
+            status += " · pierces 1 armor"
         }
         // The boss telegraphs which of its three plays comes next resolve.
         if let intent = enemy.plannedIntent {
@@ -1748,7 +2180,11 @@ class GameScene: SKScene {
     private func updatePlanArrow() {
         planArrowNode?.removeFromParent()
         planArrowNode = nil
-        guard let target = state.plannedTarget, target != state.playerPosition else { return }
+        // Draw to the true resting tile: an ice slide carries the player past
+        // the drafted tile, so the arrow follows all the way there.
+        guard state.plannedTarget != nil else { return }
+        let target = state.plannedLanding
+        guard target != state.playerPosition else { return }
 
         let arrow = makeArrowNode(
             from: point(for: state.playerPosition),
@@ -2038,6 +2474,23 @@ class GameScene: SKScene {
         }
     }
 
+    /// Slides shoved/reeled barrels from their old tile to their new one, matching
+    /// the shove skid, and re-keys their node so a later explosion (or the board
+    /// reconcile) finds it at the right place.
+    private func animateBarrelMoves(_ moves: [TurnResolution.BarrelMove]) {
+        for move in moves {
+            guard let node = obstacleNodes[move.from] else { continue }
+            obstacleNodes[move.from] = nil
+            obstacleNodes[move.to] = node
+            let destination = point(for: move.to)
+            let distanceInTiles = hypot(destination.x - node.position.x,
+                                        destination.y - node.position.y) / tileSize
+            let skid = SKAction.move(to: destination, duration: 0.08 + 0.04 * distanceInTiles)
+            skid.timingMode = .easeOut
+            node.run(skid)
+        }
+    }
+
     /// Bolts glide along the stretch they flew and lob shells arc onward (or
     /// dive into their targets), then anything that landed or struck blows up —
     /// all before anyone attacks.
@@ -2248,7 +2701,8 @@ class GameScene: SKScene {
         // its explosion (and the barrels it popped) must play regardless.
         guard !resolution.attackTiles.isEmpty
             || !resolution.playerExplosions.isEmpty || !resolution.enemyHits.isEmpty
-            || !resolution.shoves.isEmpty || resolution.grappleHook != nil else {
+            || !resolution.shoves.isEmpty || !resolution.barrelMoves.isEmpty
+            || resolution.grappleHook != nil else {
             playEnemyAttacks(resolution)
             return
         }
@@ -2259,8 +2713,10 @@ class GameScene: SKScene {
         // Whip the grapple line out to whatever it bit, and reel the player in if
         // it grabbed a wall or barrel (a dragged enemy rides `shoves`, below).
         animateGrapple(resolution)
-        // Slide the flung enemies first (they're still in enemyNodes here) so a
-        // shove into a barrel reads as the body arriving just as it goes off.
+        // Slide shoved/reeled barrels and flung enemies (both still in their node
+        // maps here) so a body or barrel driven into scenery arrives just as it
+        // goes off.
+        animateBarrelMoves(resolution.barrelMoves)
         animateShoves(resolution.shoves)
         animateEnemyHits(resolution.enemyHits)
         animateExplosions(resolution.playerExplosions)
@@ -2612,6 +3068,7 @@ class GameScene: SKScene {
         obstacleNodes.removeAll()
         setUpEnemies()
         setUpObstacles()
+        setUpTerrain()
         setUpTeleporters()
         setUpSpikes()
     }
@@ -2620,7 +3077,7 @@ class GameScene: SKScene {
         // An elite stepping onto the field earns a transmission.
         let arrivedElite = resolution.spawns.contains { event in
             guard let id = event.enemyID, let enemy = state.enemies.first(where: { $0.id == id }) else { return false }
-            return enemy.archetype == .juggernaut || enemy.archetype == .boss
+            return enemy.isElite
         }
         if arrivedElite {
             showTransmission(Self.eliteChatter.randomElement()!)
@@ -2659,6 +3116,12 @@ class GameScene: SKScene {
         for (position, node) in obstacleNodes where !solid.contains(position) {
             obstacleNodes[position] = nil
             node.removeFromParent()
+        }
+        // Barrels can be shoved or reeled to a new tile mid-turn; place a node for
+        // any that moved and now have none at their destination, so they don't
+        // vanish (nodes are keyed by position).
+        for obstacle in state.obstacles where obstacleNodes[obstacle.position] == nil {
+            addObstacleNode(for: obstacle)
         }
 
         heldHazardTiles = nil
@@ -2743,7 +3206,26 @@ class GameScene: SKScene {
         addLine("best turn - ×\(state.bestCombo) kills · longest streak - x\(state.bestStreak)",
                 font: "HelveticaNeue", size: 16, color: statColor, drop: 28)
         addLine("\(state.totalDamageTaken) damage endured",
-                font: "HelveticaNeue", size: 16, color: statColor, drop: 48)
+                font: "HelveticaNeue", size: 16, color: statColor, drop: 32)
+
+        // The run's own flavor: the loadout you fell with, and the pact you swore.
+        addLine("wielding \(state.equippedWeapon.name) · \(state.holsteredWeapon.name)",
+                font: "HelveticaNeue-Bold", size: 15, color: SKColor(red: 0.55, green: 0.75, blue: 0.95, alpha: 1.0), drop: 26)
+        let boon = state.modifiers.first(where: \.isBoon)
+        let curse = state.modifiers.first(where: { !$0.isBoon })
+        if boon != nil || curse != nil {
+            let parts = [boon.map { "\($0.title) ⚡" }, curse.map { "\($0.title) ☠" }].compactMap { $0 }
+            addLine("pact — \(parts.joined(separator: " · "))",
+                    font: "HelveticaNeue", size: 15, color: gold.withAlphaComponent(0.85), drop: 26)
+        } else {
+            addLine("no pact sworn", font: "HelveticaNeue", size: 15, color: SKColor(white: 0.55, alpha: 1.0), drop: 26)
+        }
+        // A single earned accolade, if the run had a standout beat.
+        if let accolade = deathAccolade() {
+            addLine(accolade, font: "Baskerville-Italic", size: 16, color: gold, drop: 40)
+        } else {
+            y -= 14
+        }
 
         let prompt = SKLabelNode(text: "press R to defy fate again")
         prompt.fontName = "HelveticaNeue-Bold"
@@ -2760,11 +3242,24 @@ class GameScene: SKScene {
         addChild(overlay)
     }
 
+    /// One earned epithet for the death card, drawn from the run's standout beat
+    /// (nil when nothing stood out — the card just skips the line then).
+    private func deathAccolade() -> String? {
+        if state.elitesSlain >= 3 { return "a bane of gatekeepers" }
+        if state.bestCombo >= 4 { return "a whirlwind — ×\(state.bestCombo) felled in a breath" }
+        if state.bestStreak >= 5 { return "relentless — a \(state.bestStreak)-turn killing streak" }
+        if state.totalDamageTaken == 0 && state.turnNumber >= 8 { return "untouched to the very last" }
+        if state.level >= 6 { return "a delver of the deep floors" }
+        if state.totalKills >= 40 { return "a tireless reaper of \(state.totalKills)" }
+        return nil
+    }
+
     // MARK: - Level up
 
     /// Full-screen level-up moment, styled like the death banner: dimmed board,
     /// big title, and a choice of two boons that pauses play until picked.
     private func showBuffChoice(forLevel level: Int) {
+        pendingBuffIndex = nil
         let overlay = SKNode()
         overlay.zPosition = 50
 
@@ -2790,6 +3285,7 @@ class GameScene: SKScene {
         subtitle.fontColor = SKColor(white: 0.8, alpha: 1.0)
         subtitle.verticalAlignmentMode = .center
         subtitle.position = CGPoint(x: size.width / 2, y: size.height / 2 + 62)
+        subtitle.name = "buffSubtitle"
         overlay.addChild(subtitle)
 
         let choices = state.pendingBuffChoices
@@ -2850,9 +3346,41 @@ class GameScene: SKScene {
         buffChoiceOverlay = overlay
     }
 
+    /// Routes a click/press on a boon: with two-click confirmation on, the first
+    /// pick highlights and waits, and only a repeat pick on the same boon commits.
+    private func pickBuff(_ index: Int) {
+        guard buffChoiceOverlay != nil, state.pendingBuffChoices.indices.contains(index) else { return }
+        if confirmBoonChoice && pendingBuffIndex != index {
+            pendingBuffIndex = index
+            highlightPendingBuff()
+            return
+        }
+        pendingBuffIndex = nil
+        chooseBuff(index)
+    }
+
+    /// Lights up the boon awaiting confirmation and nudges the subtitle.
+    private func highlightPendingBuff() {
+        guard let overlay = buffChoiceOverlay else { return }
+        let gold = SKColor(red: 0.98, green: 0.82, blue: 0.35, alpha: 1.0)
+        let idle = SKColor(red: 0.20, green: 0.40, blue: 0.55, alpha: 1.0)
+        let picked = SKColor(red: 0.28, green: 0.50, blue: 0.62, alpha: 1.0)
+        for index in state.pendingBuffChoices.indices {
+            let selected = index == pendingBuffIndex
+            overlay.enumerateChildNodes(withName: "buffChoice:\(index)") { node, _ in
+                guard let shape = node as? SKShapeNode else { return }
+                shape.strokeColor = selected ? gold : .white
+                shape.lineWidth = selected ? 4 : 1.5
+                shape.fillColor = selected ? picked : idle
+            }
+        }
+        (overlay.childNode(withName: "buffSubtitle") as? SKLabelNode)?.text = "click again to confirm"
+    }
+
     /// Applies the picked boon, tears down the overlay, and resumes play.
     private func chooseBuff(_ index: Int) {
         guard buffChoiceOverlay != nil, state.pendingBuffChoices.indices.contains(index) else { return }
+        pendingBuffIndex = nil
         let name = state.pendingBuffChoices[index].name
         state.chooseBuff(at: index)
         buffChoiceOverlay?.removeFromParent()
@@ -2860,9 +3388,9 @@ class GameScene: SKScene {
         showToast("gained \(name)", duration: 1.2)
         updateHUD()
         refreshTileHighlights()
-        // The showcase's level-up beat paused here for the pick; now wrap up and
-        // restore the run.
-        if tutorialShowcasing {
+        // The showcase's level-up beat paused here for the pick; now roll into
+        // the closing card.
+        if beginnerShowcaseActive {
             finishTutorialShowcase()
         }
     }
@@ -2994,11 +3522,81 @@ class GameScene: SKScene {
         ]))
     }
 
+    /// Lays the active pact out as "PACT · ⚡ Boon · ☠ Curse" — separate labels so
+    /// the curse burns red and each half carries a name for its hover tooltip.
+    private func rebuildPactHUD(_ mods: Set<RunModifier>) {
+        pactHUD.removeAllChildren()
+        pactHUD.isHidden = mods.isEmpty
+        guard !mods.isEmpty else {
+            pactTooltip?.removeFromParent()
+            pactTooltip = nil
+            pactTooltipMod = nil
+            return
+        }
+        let gold = SKColor(red: 0.93, green: 0.80, blue: 0.45, alpha: 1.0)
+        let curseRed = SKColor(red: 0.95, green: 0.42, blue: 0.38, alpha: 1.0)
+        var pieces: [(text: String, color: SKColor, mod: RunModifier?)] = [("PACT ", gold, nil)]
+        if let boon = mods.first(where: \.isBoon) {
+            pieces.append(("· \(boon.title) ", gold, boon))
+        }
+        if let curse = mods.first(where: { !$0.isBoon }) {
+            pieces.append(("· \(curse.title)", curseRed, curse))
+        }
+        var labels: [SKLabelNode] = []
+        var total: CGFloat = 0
+        for piece in pieces {
+            let label = SKLabelNode(text: piece.text)
+            label.fontName = "HelveticaNeue-Bold"
+            label.fontSize = 12
+            label.fontColor = piece.color
+            label.verticalAlignmentMode = .center
+            label.horizontalAlignmentMode = .left
+            if let mod = piece.mod { label.name = "pactHover:\(mod.rawValue)" }
+            labels.append(label)
+            total += label.frame.width
+        }
+        var x = -total / 2
+        for label in labels {
+            label.position = CGPoint(x: x, y: 0)
+            x += label.frame.width
+            pactHUD.addChild(label)
+        }
+    }
+
+    /// Shows the hovered pact half's full effect just under the pact row.
+    private func updatePactTooltip(at location: CGPoint) {
+        let name = nodes(at: location).compactMap(\.name).first { $0.hasPrefix("pactHover:") }
+        let mod = name.flatMap { RunModifier(rawValue: String($0.dropFirst("pactHover:".count))) }
+        guard mod != pactTooltipMod else { return }
+        pactTooltipMod = mod
+        pactTooltip?.removeFromParent()
+        pactTooltip = nil
+        guard let mod else { return }
+        let label = SKLabelNode(text: "\(mod.isBoon ? "BOON" : "CURSE") · \(mod.title) — \(mod.blurb)")
+        label.fontName = "HelveticaNeue"
+        label.fontSize = 12
+        label.fontColor = mod.isBoon
+            ? SKColor(red: 0.60, green: 0.85, blue: 0.60, alpha: 1.0)
+            : SKColor(red: 0.95, green: 0.45, blue: 0.40, alpha: 1.0)
+        label.verticalAlignmentMode = .center
+        label.zPosition = 60
+        label.position = CGPoint(x: size.width / 2, y: pactHUD.position.y - 16)
+        addChild(label)
+        pactTooltip = label
+    }
+
     /// Restarting deals a fresh board, then routes back through the draft with a
     /// freshly rolled pact — every new run offers a new bargain.
     private func restartGame() {
         rebuildRun()
-        activeModifiers = rolledPact()
+        openFreshPactDraft()
+    }
+
+    /// Rolls a fresh pact, refills the reroll allowance, and opens the draft.
+    private func openFreshPactDraft() {
+        draftedPact = rolledPact()
+        activeModifiers = draftedPact
+        pactRerollsRemaining = Self.maxPactRerolls
         showBuildPicker()
     }
 
@@ -3011,6 +3609,14 @@ class GameScene: SKScene {
         tutorialShowcasePending = false
         tutorialSnapshot = nil
         tutorialAdvance = nil
+        offeringAdvanced = false
+        advancedTutorialActive = false
+        advancedOverlay?.removeFromParent()
+        advancedOverlay = nil
+        advancedReturnToBuildPicker = false
+        pactTooltip?.removeFromParent()
+        pactTooltip = nil
+        pactTooltipMod = nil
         devPanel = nil
         buildPickerOverlay = nil
         // Kill any in-flight resolve callbacks (they run on the scene itself and
@@ -3023,6 +3629,7 @@ class GameScene: SKScene {
         obstacleNodes.removeAll()
         spikeNodes.removeAll()
         teleporterNodes.removeAll()
+        terrainNodes.removeAll()
         enemyPlanArrowNodes.removeAll()
         spawnMarkerNodes.removeAll()
         weaponDropNodes.removeAll()
@@ -3183,25 +3790,32 @@ class GameScene: SKScene {
         let hasPact = !active.isEmpty
         let curseColor = SKColor(red: 0.90, green: 0.42, blue: 0.42, alpha: 1.0)
 
-        let pactControl = SKLabelNode(text: hasPact ? "reroll ▸" : "strike a bargain ▸")
+        let canReroll = pactRerollsRemaining > 0
+        let pactText: String
+        if hasPact {
+            pactText = canReroll ? "reroll (\(pactRerollsRemaining)) ▸" : "no rerolls left"
+        } else {
+            pactText = "strike a bargain ▸"
+        }
+        let pactControl = SKLabelNode(text: pactText)
         pactControl.fontName = "HelveticaNeue"
         pactControl.fontSize = 12
-        pactControl.fontColor = SKColor(white: 0.6, alpha: 1.0)
+        pactControl.fontColor = SKColor(white: (hasPact && !canReroll) ? 0.35 : 0.6, alpha: 1.0)
         pactControl.horizontalAlignmentMode = .right
         pactControl.verticalAlignmentMode = .center
         pactControl.position = CGPoint(x: centerX + 150, y: centerY - 6)
-        pactControl.name = hasPact ? "build:pactReroll" : "build:pactToggle"
+        pactControl.name = hasPact ? (canReroll ? "build:pactReroll" : nil) : "build:pactToggle"
         overlay.addChild(pactControl)
 
         if hasPact {
             let entries: [(RunModifier?, String, SKColor)] = [
-                (active.first(where: \.isBoon), "⚡", gold),
-                (active.first(where: { !$0.isBoon }), "☠", curseColor),
+                (active.first(where: \.isBoon), "BOON", gold),
+                (active.first(where: { !$0.isBoon }), "CURSE", curseColor),
             ]
             var lineY = centerY - 34
             for (modifier, glyph, color) in entries {
                 guard let modifier else { continue }
-                let label = SKLabelNode(text: "\(glyph)  \(modifier.title) — \(modifier.blurb)")
+                let label = SKLabelNode(text: "\(glyph) · \(modifier.title) — \(modifier.blurb)")
                 label.fontName = "HelveticaNeue-Bold"
                 label.fontSize = 14
                 label.fontColor = color
@@ -3287,14 +3901,17 @@ class GameScene: SKScene {
     private var devFreezeHighScore = false
     /// Next-wave override: how the coming waves spawn, and (in normal mode) the
     /// forced enemy type and weapon. `.standard` hands back to the normal code.
-    private enum DevSpawnMode { case standard, normal, formation }
+    private enum DevSpawnMode { case standard, normal, formation, elite }
     private var devSpawnMode: DevSpawnMode = .standard
     private var devSpawnArchetype: Archetype?
+    /// Which gatekeeper the elite spawn mode drops.
+    private var devSpawnEliteArchetype: Archetype = .boss
+    private let devEliteArchetypes: [Archetype] = [.boss, .juggernaut, .summoner, .bombardier]
     private var devSpawnWeapon: Weapon?
     /// Which formation the override forces (nil = random).
     private var devSpawnFormationIndex: Int?
     /// The archetypes offered by the spawn-type cycler (nil = roll one).
-    private let devSpawnArchetypes: [Archetype?] = [nil, .fighter, .berserker, .swift, .shieldbearer, .bomber]
+    private let devSpawnArchetypes: [Archetype?] = [nil, .fighter, .berserker, .swift, .shieldbearer, .bomber, .reaver]
 
     private func toggleDevPanel() {
         if devPanel != nil {
@@ -3334,7 +3951,9 @@ class GameScene: SKScene {
                 ("next armor cap: \(devNextMaxArmor) ▸", "dev:armor"),
                 ("— applies on R restart —", ""),
                 ("next pact boon: \(devForcedPactBoon?.title ?? "random") ▸", "dev:pactBoon"),
-                ("next level boon: \(state.devForcedBuff?.name ?? "random") ▸", "dev:levelBoon"),
+                ("next pact curse: \(devForcedPactCurse?.title ?? "random") ▸", "dev:pactCurse"),
+                ("next level boon 1: \(state.devForcedBuff?.name ?? "random") ▸", "dev:levelBoon"),
+                ("next level boon 2: \(state.devForcedBuff2?.name ?? "random") ▸", "dev:levelBoon2"),
             ]
         case .player:
             return [
@@ -3345,8 +3964,10 @@ class GameScene: SKScene {
                 ("stun immune: \(state.devStunImmune ? "ON" : "off")", "dev:stunImmune"),
                 ("knockback immune: \(state.devKnockbackImmune ? "ON" : "off")", "dev:kbImmune"),
                 ("infinite speed: \(state.devInfiniteSpeed ? "ON" : "off")", "dev:infiniteSpeed"),
+                ("infinite range: \(state.devInfiniteRange ? "ON" : "off")", "dev:infiniteRange"),
                 ("no cooldown: \(state.devNoCooldown ? "ON" : "off")", "dev:noCooldown"),
                 ("free swap: \(state.devFreeSwap ? "ON" : "off")", "dev:freeSwap"),
+                ("ignore shields: \(state.devIgnoreShields ? "ON" : "off")", "dev:ignoreShields"),
                 ("attack damage: \(devDamageModeLabel) ▸", "dev:damageMode"),
             ]
         case .score:
@@ -3366,6 +3987,8 @@ class GameScene: SKScene {
             } else if devSpawnMode == .formation {
                 let name = devSpawnFormationIndex.map { Formation.all[$0].name } ?? "random"
                 rows.append(("formation: \(name) ▸", "dev:spawnFormation"))
+            } else if devSpawnMode == .elite {
+                rows.append(("elite: \(devArchetypeLabel(devSpawnEliteArchetype)) ▸", "dev:eliteType"))
             }
             return rows
         case .profile:
@@ -3466,10 +4089,158 @@ class GameScene: SKScene {
         devPanel = overlay
     }
 
+    // MARK: - Settings
+
+    private func showSettings() {
+        rebindingAction = nil
+        rebuildSettings()
+    }
+
+    /// Scales every timed action: near-instant when animations are skipped.
+    private func applyAnimationSpeed() {
+        speed = skipAnimations ? 10 : 1
+    }
+
+    /// Shows or hides the SKView's FPS and node-count readouts per the pref.
+    private func applyDebugOverlays() {
+        guard let skView = view else { return }
+        skView.showsFPS = showFPS
+        skView.showsNodeCount = showFPS
+    }
+
+    /// Starts the run, or on the first press (with confirmation on) asks again.
+    private func attemptStartRun(at time: TimeInterval) {
+        if !confirmStartRun || time - lastStartConfirmTime < Self.restartDoubleTapWindow {
+            startRun()
+        } else {
+            lastStartConfirmTime = time
+            showToast("press again to begin the run")
+        }
+    }
+
+    private func closeSettings() {
+        settingsOverlay?.removeFromParent()
+        settingsOverlay = nil
+        rebindingAction = nil
+    }
+
+    /// The settings rows: (label, action) — an empty action marks a plain note.
+    private func settingsRows() -> [(String, String)] {
+        var rows: [(String, String)] = [
+            ("— preferences —", ""),
+            ("natural scrolling: \(naturalScrolling ? "ON" : "off")", "set:naturalScroll"),
+            ("skip animations: \(skipAnimations ? "ON" : "off")", "set:skipAnim"),
+            ("confirm restarts: \(confirmRestart ? "ON" : "off")", "set:confirmRestart"),
+            ("confirm starting a run: \(confirmStartRun ? "ON" : "off")", "set:confirmStart"),
+            ("click twice to pick a boon: \(confirmBoonChoice ? "ON" : "off")", "set:confirmBoon"),
+            ("show FPS counter: \(showFPS ? "ON" : "off")", "set:showFPS"),
+            ("— keybinds —", ""),
+        ]
+        for action in KeyAction.allCases {
+            let key = rebindingAction == action ? "press a key…" : keyName(boundCode(for: action))
+            rows.append(("\(action.title): \(key)", "set:bind:\(action.rawValue)"))
+        }
+        rows.append(("reset keybinds to defaults", "set:resetBinds"))
+        rows.append(("— note —", ""))
+        rows.append(("Return always resolves · Esc always cancels", ""))
+        rows.append(("done ▸", "set:close"))
+        return rows
+    }
+
+    private func rebuildSettings() {
+        settingsOverlay?.removeFromParent()
+        let overlay = SKNode()
+        overlay.zPosition = 95
+
+        let bodyRows = settingsRows()
+        let rowHeight: CGFloat = 24
+        let lineCount = 1 + bodyRows.count // title + rows.
+        let panelSize = CGSize(width: 440, height: CGFloat(lineCount) * rowHeight + 30)
+        let centerX = size.width / 2
+        let panelCenterY = size.height / 2
+        let plate = SKShapeNode(rectOf: panelSize, cornerRadius: 10)
+        plate.fillColor = SKColor(white: 0.05, alpha: 0.97)
+        plate.strokeColor = SKColor(red: 0.55, green: 0.75, blue: 0.95, alpha: 0.9)
+        plate.lineWidth = 1.5
+        plate.position = CGPoint(x: centerX, y: panelCenterY)
+        plate.name = "set:plate"
+        overlay.addChild(plate)
+
+        var y = panelCenterY + panelSize.height / 2 - 24
+
+        let title = SKLabelNode(text: "SETTINGS — esc closes")
+        title.fontName = "HelveticaNeue-Bold"
+        title.fontSize = 12
+        title.fontColor = SKColor(white: 0.5, alpha: 1.0)
+        title.verticalAlignmentMode = .center
+        title.horizontalAlignmentMode = .center
+        title.position = CGPoint(x: centerX, y: y)
+        overlay.addChild(title)
+        y -= rowHeight
+
+        for (text, action) in bodyRows {
+            let label = SKLabelNode(text: text)
+            label.fontName = action.isEmpty ? "HelveticaNeue-Bold" : "HelveticaNeue"
+            label.fontSize = 14
+            label.fontColor = action.isEmpty
+                ? SKColor(white: 0.5, alpha: 1.0)
+                : SKColor(white: 0.88, alpha: 1.0)
+            label.verticalAlignmentMode = .center
+            label.horizontalAlignmentMode = .center
+            label.position = CGPoint(x: centerX, y: y)
+            if !action.isEmpty {
+                label.name = action
+            }
+            overlay.addChild(label)
+            y -= rowHeight
+        }
+
+        addChild(overlay)
+        settingsOverlay = overlay
+    }
+
+    private func handleSettingsAction(_ action: String) {
+        switch action {
+        case "set:naturalScroll":
+            naturalScrolling.toggle()
+            rebuildSettings()
+        case "set:skipAnim":
+            skipAnimations.toggle()
+            applyAnimationSpeed()
+            rebuildSettings()
+        case "set:confirmRestart":
+            confirmRestart.toggle()
+            rebuildSettings()
+        case "set:confirmStart":
+            confirmStartRun.toggle()
+            rebuildSettings()
+        case "set:confirmBoon":
+            confirmBoonChoice.toggle()
+            rebuildSettings()
+        case "set:showFPS":
+            showFPS.toggle()
+            applyDebugOverlays()
+            rebuildSettings()
+        case "set:resetBinds":
+            keyBindings = [:]
+            rebindingAction = nil
+            rebuildSettings()
+        case "set:close":
+            closeSettings()
+        default:
+            if action.hasPrefix("set:bind:"),
+               let bind = KeyAction(rawValue: String(action.dropFirst("set:bind:".count))) {
+                // Toggle capture: click the row again to cancel listening.
+                rebindingAction = (rebindingAction == bind) ? nil : bind
+                rebuildSettings()
+            }
+        }
+    }
+
     /// Cycles a next-run weapon slot through random and the whole arsenal,
     /// including the dev-only toys that never appear in normal pools.
     private func cycleDevWeapon(_ current: Weapon?) -> Weapon? {
-        let pool = Weapon.devArsenal
+        let pool = Weapon.devArsenal.sorted { $0.name < $1.name }
         guard let current else { return pool.first }
         guard let index = pool.firstIndex(where: { $0.name == current.name }),
               index + 1 < pool.count else { return nil }
@@ -3481,6 +4252,7 @@ class GameScene: SKScene {
         case .standard: return "standard (normal code)"
         case .normal: return "normal"
         case .formation: return "formation"
+        case .elite: return "elite gate"
         }
     }
 
@@ -3500,7 +4272,11 @@ class GameScene: SKScene {
         case .swift: return "swift"
         case .shieldbearer: return "shieldbearer"
         case .bomber: return "bomber"
-        default: return "random"
+        case .reaver: return "reaver"
+        case .juggernaut: return "juggernaut"
+        case .boss: return "boss"
+        case .summoner: return "summoner"
+        case .bombardier: return "bombardier"
         }
     }
 
@@ -3511,6 +4287,7 @@ class GameScene: SKScene {
         case .standard: state.devSpawnOverride = nil
         case .normal: state.devSpawnOverride = .single(archetype: devSpawnArchetype, weapon: devSpawnWeapon)
         case .formation: state.devSpawnOverride = .formation(index: devSpawnFormationIndex)
+        case .elite: state.devSpawnOverride = .elite(archetype: devSpawnEliteArchetype)
         }
     }
 
@@ -3536,10 +4313,14 @@ class GameScene: SKScene {
         case "dev:infiniteSpeed":
             state.devInfiniteSpeed.toggle()
             refreshTileHighlights()
+        case "dev:infiniteRange":
+            state.devInfiniteRange.toggle()
+            refreshTileHighlights()
         case "dev:noCooldown":
             state.devNoCooldown.toggle()
             refreshTileHighlights()
         case "dev:freeSwap": state.devFreeSwap.toggle()
+        case "dev:ignoreShields": state.devIgnoreShields.toggle()
         case "dev:pactBoon":
             // Cycle the forced pact boon: random → each boon → random.
             let boons = RunModifier.boons
@@ -3548,13 +4329,29 @@ class GameScene: SKScene {
             } else {
                 devForcedPactBoon = boons.first
             }
+        case "dev:pactCurse":
+            // Cycle the forced pact curse: random → each curse → random.
+            let curses = RunModifier.curses
+            if let current = devForcedPactCurse, let i = curses.firstIndex(of: current) {
+                devForcedPactCurse = i + 1 < curses.count ? curses[i + 1] : nil
+            } else {
+                devForcedPactCurse = curses.first
+            }
         case "dev:levelBoon":
-            // Cycle the forced level-up boon: random → each buff → random.
+            // Cycle the first forced level-up option: random → each buff → random.
             let all = Buff.all
             if let current = state.devForcedBuff, let i = all.firstIndex(of: current) {
                 state.devForcedBuff = i + 1 < all.count ? all[i + 1] : nil
             } else {
                 state.devForcedBuff = all.first
+            }
+        case "dev:levelBoon2":
+            // Cycle the second forced level-up option: random → each buff → random.
+            let all = Buff.all
+            if let current = state.devForcedBuff2, let i = all.firstIndex(of: current) {
+                state.devForcedBuff2 = i + 1 < all.count ? all[i + 1] : nil
+            } else {
+                state.devForcedBuff2 = all.first
             }
         case "dev:damageMode":
             switch state.devDamageMode {
@@ -3569,8 +4366,13 @@ class GameScene: SKScene {
             switch devSpawnMode {
             case .standard: devSpawnMode = .normal
             case .normal: devSpawnMode = .formation
-            case .formation: devSpawnMode = .standard
+            case .formation: devSpawnMode = .elite
+            case .elite: devSpawnMode = .standard
             }
+            syncDevSpawnOverride()
+        case "dev:eliteType":
+            let idx = devEliteArchetypes.firstIndex(of: devSpawnEliteArchetype) ?? 0
+            devSpawnEliteArchetype = devEliteArchetypes[(idx + 1) % devEliteArchetypes.count]
             syncDevSpawnOverride()
         case "dev:spawnType":
             let idx = devSpawnArchetypes.firstIndex(where: { $0 == devSpawnArchetype }) ?? 0
@@ -3578,11 +4380,12 @@ class GameScene: SKScene {
             syncDevSpawnOverride()
         case "dev:spawnWeapon":
             // Cycle random → each real weapon (dev-only toys excluded from enemies).
+            let spawnPool = Weapon.all.sorted { $0.name < $1.name }
             if let current = devSpawnWeapon,
-               let i = Weapon.all.firstIndex(where: { $0.name == current.name }), i + 1 < Weapon.all.count {
-                devSpawnWeapon = Weapon.all[i + 1]
+               let i = spawnPool.firstIndex(where: { $0.name == current.name }), i + 1 < spawnPool.count {
+                devSpawnWeapon = spawnPool[i + 1]
             } else if devSpawnWeapon == nil {
-                devSpawnWeapon = Weapon.all.first
+                devSpawnWeapon = spawnPool.first
             } else {
                 devSpawnWeapon = nil
             }
@@ -3705,14 +4508,16 @@ class GameScene: SKScene {
         // An untouched run behind the title means we're heading into a fresh
         // one: roll a new pact and route through the loadout draft first.
         if state.turnNumber == 0 && buildPickerOverlay == nil {
-            activeModifiers = rolledPact()
-            showBuildPicker()
+            openFreshPactDraft()
         }
     }
 
     // MARK: - Input
 
     override func mouseMoved(with event: NSEvent) {
+        // Pact hover lives outside the board grid, so update it before the
+        // tile-hover early-out below.
+        updatePactTooltip(at: event.location(in: self))
         let newHover = gridPosition(at: event.location(in: self))
         guard newHover != hoveredTile else { return }
         hoveredTile = newHover
@@ -3731,14 +4536,14 @@ class GameScene: SKScene {
             dismissTitleScreen()
             return
         }
-        // During the showcase a click just advances to the next beat (so the
-        // player reads at their own pace); the boon picker takes over its beat.
-        if tutorialShowcasing && buffChoiceOverlay == nil {
-            if let advance = tutorialAdvance { tutorialAdvance = nil; advance() }
-            return
-        }
         let location = event.location(in: self)
         let clickedNames = nodes(at: location).compactMap(\.name)
+        // The advanced tutorial keeps the board playable: only its own NEXT/SKIP
+        // buttons are intercepted; every other click falls through to normal play.
+        if advancedTutorialActive {
+            if clickedNames.contains("advTutorial:skip") { endAdvancedTutorial(); return }
+            if clickedNames.contains("advTutorial:next"), let advance = lessonNext { advance(); return }
+        }
         if devPanel != nil {
             // The dev panel is modal: a row acts, empty panel space is inert,
             // and only a click outside the panel (or ` / esc) dismisses it.
@@ -3746,6 +4551,16 @@ class GameScene: SKScene {
                 handleDevAction(action)
             } else if !clickedNames.contains("dev:plate") {
                 toggleDevPanel()
+            }
+            return
+        }
+        if settingsOverlay != nil {
+            // Modal like the dev panel: rows act, the plate swallows stray clicks,
+            // and a click outside (or Esc / DONE) closes it.
+            if let action = clickedNames.first(where: { $0.hasPrefix("set:") && $0 != "set:plate" }) {
+                handleSettingsAction(action)
+            } else if !clickedNames.contains("set:plate") {
+                closeSettings()
             }
             return
         }
@@ -3761,25 +4576,43 @@ class GameScene: SKScene {
                 loadoutRangedName = cycledLoadoutName(loadoutRangedName, options: pool.filter(\.isRanged))
                 showBuildPicker()
             } else if clickedNames.contains("build:pactToggle") {
-                // No pact → roll one boon + one curse; active pact → break it.
-                activeModifiers = activeModifiers.isEmpty ? rolledPact() : []
+                // No pact → take the drafted bargain (rolling one the first time);
+                // active pact → break it. Toggling reuses the same pact so it can't
+                // be spun for a new one without spending a reroll.
+                if activeModifiers.isEmpty {
+                    if draftedPact.isEmpty { draftedPact = rolledPact() }
+                    activeModifiers = draftedPact
+                } else {
+                    activeModifiers = []
+                }
                 showBuildPicker()
             } else if clickedNames.contains("build:pactReroll") {
-                activeModifiers = rolledPact()
+                guard pactRerollsRemaining > 0 else { return }
+                pactRerollsRemaining -= 1
+                draftedPact = rolledPact()
+                activeModifiers = draftedPact
                 showBuildPicker()
             } else if clickedNames.contains("build:start") {
-                startRun()
+                attemptStartRun(at: event.timestamp)
             } else if clickedNames.contains("tutorialButton") {
                 // The tutorial button works straight from the draft: it just
                 // begins the run (whatever's picked, or random) and coaches.
                 startRun()
-                if tutorialStep == nil && !tutorialShowcasing { startTutorial() }
+                if tutorialStep == nil && !advancedTutorialActive { startTutorial() }
+            } else if clickedNames.contains("advancedTutorialButton") {
+                // Sandbox over the draft (don't commit a run); SKIP/FINISH returns
+                // here so the player still gets to pick their loadout and pact.
+                advancedReturnToBuildPicker = true
+                buildPickerOverlay?.removeFromParent()
+                buildPickerOverlay = nil
+                startAdvancedTutorial()
             } else if let tab = clickedNames.first(where: { $0.hasPrefix("navTab:") }) {
                 switch tab {
                 case "navTab:board": setHUDPage(.board)
                 case "navTab:milestones":
                     rebuildMilestonesPage()
                     setHUDPage(.milestones)
+                case "navTab:settings": showSettings()
                 default: showTitleScreen()
                 }
             } else {
@@ -3793,7 +4626,7 @@ class GameScene: SKScene {
             // dropdowns stay live so you can read up before committing.
             if let choice = clickedNames.first(where: { $0.hasPrefix("buffChoice:") }),
                let index = Int(choice.dropFirst("buffChoice:".count)) {
-                chooseBuff(index)
+                pickBuff(index)
             } else {
                 toggleLegendSection(named: clickedNames)
             }
@@ -3809,6 +4642,11 @@ class GameScene: SKScene {
         }
         if clickedNames.contains("tutorialButton") {
             startTutorial()
+            return
+        }
+        if clickedNames.contains("advancedTutorialButton") {
+            advancedReturnToBuildPicker = false
+            startAdvancedTutorial()
             return
         }
         if let tab = clickedNames.first(where: { $0.hasPrefix("navTab:") }) {
@@ -3843,6 +4681,7 @@ class GameScene: SKScene {
         } else {
             expandedLegendSections = [section]
         }
+        legendScroll = 0   // start a freshly-opened section at its top
         rebuildLegend()
         return true
     }
@@ -3873,10 +4712,10 @@ class GameScene: SKScene {
             dismissTitleScreen()
             return
         }
-        // During the showcase a keypress advances the current beat; the boon
-        // picker takes over its own beat.
-        if tutorialShowcasing && buffChoiceOverlay == nil {
-            if let advance = tutorialAdvance { tutorialAdvance = nil; advance() }
+        // An interactive lesson leaves keys live for play (Tab to swap, etc.);
+        // Esc bails out of it early.
+        if advancedTutorialActive && event.keyCode == 0x35 {
+            endAdvancedTutorial()
             return
         }
         if event.keyCode == 0x32 { // ` — the time-honored dev console key.
@@ -3889,28 +4728,60 @@ class GameScene: SKScene {
             }
             return
         }
+        if settingsOverlay != nil {
+            if let action = rebindingAction {
+                // Capturing a new key for a binding: Esc aborts, anything else binds.
+                if event.keyCode != 0x35 {
+                    var binds = keyBindings
+                    binds[action.rawValue] = Int(event.keyCode)
+                    keyBindings = binds
+                }
+                rebindingAction = nil
+                rebuildSettings()
+                return
+            }
+            if event.keyCode == 0x35 { closeSettings() }
+            return
+        }
         if buildPickerOverlay != nil {
             // Space or Return deals the run with the drafted loadout.
             if event.keyCode == 0x31 || event.keyCode == 0x24 {
-                startRun()
+                attemptStartRun(at: event.timestamp)
             }
             return
         }
         if buffChoiceOverlay != nil {
             // The boon chooser is modal: 1/2 pick, everything else waits.
             switch event.keyCode {
-            case 0x12: chooseBuff(0)
-            case 0x13: chooseBuff(1)
+            case 0x12: pickBuff(0)
+            case 0x13: pickBuff(1)
             default: break
             }
             return
         }
-        switch event.keyCode {
-        case 0x31, 0x24: // Space or Return: resolve the planned turn.
+        let code = event.keyCode
+        // Return always resolves and Esc always cancels — structural keys kept
+        // fixed so the turn and menus stay reachable no matter how binds change.
+        if code == 0x24 { // Return.
             resolveTurn()
-        case 0x30, 0x0C: // Tab or Q: swap to the holstered weapon.
+            return
+        }
+        if code == 0x35 { // Escape: cancel the drafted attack, throw, pickup, or ultimate.
+            guard !isResolving else { return }
+            state.clearPlannedAttack()
+            state.clearPlannedPickup()
+            state.clearPlannedUltimate()
+            updatePickupHint()
+            refreshTileHighlights()
+            updateHUD()
+            return
+        }
+        // The rest honor the player's keybinds (defaults: Space, Tab, E, F, R).
+        if code == boundCode(for: .resolve) {
+            resolveTurn()
+        } else if code == boundCode(for: .swap) {
             swapWeapons()
-        case 0x0E: // E: toggle picking up the weapon underfoot (costs the attack).
+        } else if code == boundCode(for: .pickup) {
             guard !isResolving, !state.isGameOver else { return }
             if state.plannedPickup {
                 state.clearPlannedPickup()
@@ -3920,7 +4791,7 @@ class GameScene: SKScene {
             updatePickupHint()
             refreshTileHighlights()
             updateHUD()
-        case 0x03: // F: draft the ultimate — smites every enemy (long cooldown).
+        } else if code == boundCode(for: .ultimate) {
             guard !isResolving, !state.isGameOver else { return }
             if state.plannedUltimate {
                 state.clearPlannedUltimate()
@@ -3931,24 +4802,16 @@ class GameScene: SKScene {
             updatePickupHint()
             refreshTileHighlights()
             updateHUD()
-        case 0x35: // Escape: cancel the drafted attack, throw, pickup, or ultimate.
-            guard !isResolving else { return }
-            state.clearPlannedAttack()
-            state.clearPlannedPickup()
-            state.clearPlannedUltimate()
-            updatePickupHint()
-            refreshTileHighlights()
-            updateHUD()
-        case 0x0F: // R: restart — instant once the run is over, double-tap mid-run.
-            if state.isGameOver
+        } else if code == boundCode(for: .restart) {
+            // Instant once the run is over (or when confirmation is off); otherwise
+            // double-tap mid-run to avoid a stray restart.
+            if state.isGameOver || !confirmRestart
                 || event.timestamp - lastRestartKeyTime < Self.restartDoubleTapWindow {
                 restartGame()
             } else {
                 lastRestartKeyTime = event.timestamp
                 showToast("press R again to restart")
             }
-        default:
-            break
         }
     }
 }

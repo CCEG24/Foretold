@@ -30,8 +30,17 @@ class ViewController: NSViewController {
         view.presentScene(scene)
 
         view.ignoresSiblingOrder = true
+        // The FPS / node-count overlays are owned by the scene now, toggled from
+        // its settings menu (see GameScene.applyDebugOverlays).
+    }
 
-        view.showsFPS = true
-        view.showsNodeCount = true
+    // SKView forwards mouse and key events to the scene but not the scroll wheel,
+    // so hand it down ourselves (the scene scrolls its side dropdowns with it).
+    override func scrollWheel(with event: NSEvent) {
+        if let scene = skView?.scene as? GameScene {
+            scene.scrollWheel(with: event)
+        } else {
+            super.scrollWheel(with: event)
+        }
     }
 }

@@ -3,8 +3,6 @@
 //  Foretold
 //
 
-import Foundation
-
 /// A hazard burning on one tile for a few turns; anything standing there when
 /// the turn resolves takes damage.
 struct LingeringEffect {

@@ -3,8 +3,6 @@
 //  Foretold
 //
 
-import Foundation
-
 /// Everything that happened during one resolve phase, so the scene can animate it.
 struct TurnResolution {
     struct EnemyMove {
@@ -18,6 +16,30 @@ struct TurnResolution {
     /// up in `playerExplosions`).
     struct Shove {
         let enemyID: Int
+        let from: GridPosition
+        let to: GridPosition
+    }
+
+    /// A barrel shoved (knockback) or reeled (grapple) to a new tile this turn,
+    /// so the scene slides it there like any other mover before it detonates or
+    /// settles.
+    struct BarrelMove {
+        let from: GridPosition
+        let to: GridPosition
+    }
+
+    /// A mover warped between the ends of a teleporter this turn (nil id = the
+    /// player), so the scene can pop it across rather than slide.
+    struct Teleport {
+        let enemyID: Int?
+        let from: GridPosition
+        let to: GridPosition
+    }
+
+    /// The grapple line the player fired this turn, for the scene to whip a hook
+    /// out from `from` to the tile it bit (`to`). The reel itself shows through
+    /// `shoves` (a dragged enemy) and `playerGrappleTo` (a self-pull).
+    struct GrappleHook {
         let from: GridPosition
         let to: GridPosition
     }
@@ -52,6 +74,10 @@ struct TurnResolution {
         /// The new enemy's id, or nil when the spawn was blocked by whoever was
         /// standing on the tile (who took 1 damage for it) or by scenery.
         let enemyID: Int?
+        /// The gatekeeper's own grand entrance, summoned at end-of-turn by the
+        /// very kills that crossed the score gate — so the scene materializes it
+        /// *after* those deaths animate, not with the head-of-turn arrivals.
+        var late = false
     }
 
     /// Where the player moved to this turn (their drafted tile) — the initial
@@ -71,6 +97,18 @@ struct TurnResolution {
     let playerExplosions: [Explosion]
     /// Enemies flung by a knockback weapon this turn, in the order they were shoved.
     let shoves: [Shove]
+    /// Barrels shoved or reeled to a new tile this turn.
+    let barrelMoves: [BarrelMove]
+    /// Movers that warped through a teleporter this turn.
+    let teleports: [Teleport]
+    /// The player's grapple hook fired this turn, or nil if none.
+    let grappleHook: GrappleHook?
+    /// Where a wall/barrel grapple yanked the player to, or nil if they didn't
+    /// pull themselves this turn.
+    let playerGrappleTo: GridPosition?
+    /// Hooks enemies threw at the player this turn (each `from` an enemy, `to`
+    /// the tile it grabbed the player on), for the scene to draw as they reel.
+    let enemyGrappleHooks: [GrappleHook]
     let enemyMoves: [EnemyMove]
     let enemyAttacks: [EnemyAttack]
     /// Enemies damaged during the enemies' own phase: friendly fire and explosions.

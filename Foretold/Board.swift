@@ -3,8 +3,6 @@
 //  Foretold
 //
 
-import Foundation
-
 /// A tile coordinate on the board. Origin (0, 0) is the bottom-left tile.
 struct GridPosition: Hashable {
     var x: Int
@@ -101,12 +99,64 @@ struct Obstacle {
         case wall, barrel
     }
 
+    /// Barrel flavors: `standard` (orange, full blast), `fire` (green — no blast
+    /// damage, leaves burning ground instead), `weak` (yellow, half blast — what
+    /// the Keg lobs).
+    enum BarrelKind {
+        case standard, fire, weak
+    }
+
     let id: Int
     let kind: Kind
-    let position: GridPosition
+    /// Walls are fixed, but barrels can be shoved (a knockback swing) or reeled
+    /// (a grapple) to a new tile, so this is mutable.
+    var position: GridPosition
     /// Barrels the boss lobbed in with its barrage — drawn red, and the tiles
     /// it prefers to set off with a later detonate intent.
     var volatile = false
+    /// The barrel's flavor (ignored for walls).
+    var barrelKind: BarrelKind = .standard
+    /// A wall that crumbles when struck or caught in a blast, instead of standing
+    /// forever (ignored for barrels).
+    var destructible = false
+}
+
+/// A floor trap that toggles each turn: while `active`, anyone ending the turn
+/// standing on it takes a bite. Non-blocking — you (and enemies) walk right over.
+struct SpikeTrap {
+    let position: GridPosition
+    /// True on the turns it will bite; flips every turn after the bite resolves.
+    var active: Bool
+}
+
+/// A linked pair of floor tiles: stepping onto either end warps the mover to the
+/// other (if that tile is free). Non-blocking.
+struct Teleporter {
+    let id: Int
+    let a: GridPosition
+    let b: GridPosition
+
+    /// The far end of the pair for a tile on it, or nil if `tile` isn't an end.
+    func exit(from tile: GridPosition) -> GridPosition? {
+        if tile == a { return b }
+        if tile == b { return a }
+        return nil
+    }
+}
+
+/// A patch of floor that changes how a mover crosses it — non-blocking, and
+/// (unlike spikes) harmless on its own. `ice` grants +1 move and, when a move
+/// ends on it, slides the mover on along their travel until the ice runs out or
+/// something stops them; `mud` costs a tile of movement while stood on. Applies
+/// to the player and enemies alike (symmetry), folded into enemy drafts so their
+/// telegraph still shows where they truly end up.
+struct TerrainPatch {
+    enum Kind {
+        case ice, mud
+    }
+
+    let position: GridPosition
+    let kind: Kind
 }
 
 /// A weapon lying on the ground. While standing on one the player may draft a
