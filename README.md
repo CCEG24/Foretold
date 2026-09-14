@@ -79,8 +79,6 @@ outplaying it.
 | F | Draft the ultimate once charged (costs the action) |
 | 1 / 2 | Pick a boon on level-up |
 | R ×2 | Restart and reroll (single R once defeated) |
-| B | Boom mode: next restart replaces walls with barrels |
-| ` | Dev panel (the oracle pretends not to see it) |
 
 Hover any enemy to see its weapon, health, reload status, and exactly which
 tiles its drafted attack will sweep — the boss also announces its next play.
