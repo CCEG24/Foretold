@@ -1,0 +1,3 @@
+# Build output (1GB+). dist/ is intentionally committed so Render can serve the
+# prebuilt WASM (Render can't run the Swift/WASM toolchain).
+.build/

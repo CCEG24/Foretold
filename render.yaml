@@ -12,9 +12,10 @@ services:
   - type: web
     name: foretold-web-spike
     runtime: static
-    # No buildCommand: dist/ is prebuilt and committed. If you later build in CI,
-    # point Render at the artifact instead.
-    staticPublishPath: ./web-spike/dist
+    # dist/ is prebuilt and committed (Render can't build the WASM toolchain).
+    # A no-op build command keeps Render happy without rebuilding anything.
+    buildCommand: "echo 'serving prebuilt web/dist'"
+    staticPublishPath: ./web/dist
     headers:
       - path: /*
         name: Cross-Origin-Opener-Policy

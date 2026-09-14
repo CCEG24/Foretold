@@ -80,8 +80,8 @@ class GameScene: SKScene {
     /// The run's pact: empty, or exactly one boon + one curse. Persisted across
     /// runs and applied when the next run is generated.
     private var activeModifiers: Set<RunModifier> {
-        get { Set(UserDefaults.standard.stringArray(forKey: "activeModifiers")?.compactMap(RunModifier.init(rawValue:)) ?? []) }
-        set { UserDefaults.standard.set(newValue.map(\.rawValue).sorted(), forKey: "activeModifiers") }
+        get { Set(Defaults.standard.stringArray(forKey: "activeModifiers")?.compactMap(RunModifier.init(rawValue:)) ?? []) }
+        set { Defaults.standard.set(newValue.map(\.rawValue).sorted(), forKey: "activeModifiers") }
     }
     /// The pact rolled for the current draft — remembered so toggling the pact
     /// off and on re-applies the same bargain rather than dodging the reroll cap.
@@ -111,24 +111,24 @@ class GameScene: SKScene {
     private var revealLiveHazards = true
     /// Best score across runs, persisted in UserDefaults.
     private var highScore: Int {
-        get { UserDefaults.standard.integer(forKey: "highScore") }
-        set { UserDefaults.standard.set(newValue, forKey: "highScore") }
+        get { Defaults.standard.integer(forKey: "highScore") }
+        set { Defaults.standard.set(newValue, forKey: "highScore") }
     }
     /// Elite trophies claimed across runs (by weapon name); once claimed they
     /// join every future run's weapon pool.
     private var claimedTrophyNames: Set<String> {
-        get { Set(UserDefaults.standard.stringArray(forKey: "claimedTrophies") ?? []) }
-        set { UserDefaults.standard.set(Array(newValue).sorted(), forKey: "claimedTrophies") }
+        get { Set(Defaults.standard.stringArray(forKey: "claimedTrophies") ?? []) }
+        set { Defaults.standard.set(Array(newValue).sorted(), forKey: "claimedTrophies") }
     }
     /// Milestone weapons earned across runs (by weapon name).
     private var unlockedWeaponNames: Set<String> {
-        get { Set(UserDefaults.standard.stringArray(forKey: "unlockedWeapons") ?? []) }
-        set { UserDefaults.standard.set(Array(newValue).sorted(), forKey: "unlockedWeapons") }
+        get { Set(Defaults.standard.stringArray(forKey: "unlockedWeapons") ?? []) }
+        set { Defaults.standard.set(Array(newValue).sorted(), forKey: "unlockedWeapons") }
     }
     /// Lifetime credited-kill tallies that gate the milestones.
     private var lifetimeTallies: [String: Int] {
-        get { (UserDefaults.standard.dictionary(forKey: "lifetimeTallies") as? [String: Int]) ?? [:] }
-        set { UserDefaults.standard.set(newValue, forKey: "lifetimeTallies") }
+        get { (Defaults.standard.dictionary(forKey: "lifetimeTallies") as? [String: Int]) ?? [:] }
+        set { Defaults.standard.set(newValue, forKey: "lifetimeTallies") }
     }
     /// Lifetime tallies as they stood when this run began; the run's own
     /// tallies are folded on top after every turn.
@@ -168,35 +168,35 @@ class GameScene: SKScene {
     /// Whether the wheel scrolls the side dropdowns "naturally" (content follows
     /// the fingers). Persisted so it survives launches.
     private var naturalScrolling: Bool {
-        get { UserDefaults.standard.bool(forKey: "naturalScrolling") }
-        set { UserDefaults.standard.set(newValue, forKey: "naturalScrolling") }
+        get { Defaults.standard.bool(forKey: "naturalScrolling") }
+        set { Defaults.standard.set(newValue, forKey: "naturalScrolling") }
     }
     /// Fast-forwards every turn animation (sets the scene's action speed high) so
     /// resolutions resolve near-instantly. Persisted.
     private var skipAnimations: Bool {
-        get { UserDefaults.standard.bool(forKey: "skipAnimations") }
-        set { UserDefaults.standard.set(newValue, forKey: "skipAnimations") }
+        get { Defaults.standard.bool(forKey: "skipAnimations") }
+        set { Defaults.standard.set(newValue, forKey: "skipAnimations") }
     }
     /// Whether a mid-run restart needs the double-tap confirmation (default on).
     /// Off = R restarts instantly at any time.
     private var confirmRestart: Bool {
-        get { UserDefaults.standard.object(forKey: "confirmRestart") as? Bool ?? true }
-        set { UserDefaults.standard.set(newValue, forKey: "confirmRestart") }
+        get { Defaults.standard.object(forKey: "confirmRestart") as? Bool ?? true }
+        set { Defaults.standard.set(newValue, forKey: "confirmRestart") }
     }
     /// Whether picking a boon takes two clicks/presses (select, then confirm).
     private var confirmBoonChoice: Bool {
-        get { UserDefaults.standard.bool(forKey: "confirmBoonChoice") }
-        set { UserDefaults.standard.set(newValue, forKey: "confirmBoonChoice") }
+        get { Defaults.standard.bool(forKey: "confirmBoonChoice") }
+        set { Defaults.standard.set(newValue, forKey: "confirmBoonChoice") }
     }
     /// Whether starting a run from the draft needs a confirming second press.
     private var confirmStartRun: Bool {
-        get { UserDefaults.standard.bool(forKey: "confirmStartRun") }
-        set { UserDefaults.standard.set(newValue, forKey: "confirmStartRun") }
+        get { Defaults.standard.bool(forKey: "confirmStartRun") }
+        set { Defaults.standard.set(newValue, forKey: "confirmStartRun") }
     }
     /// Whether the SKView's FPS / node-count overlays are shown (default on).
     private var showFPS: Bool {
-        get { UserDefaults.standard.object(forKey: "showFPS") as? Bool ?? true }
-        set { UserDefaults.standard.set(newValue, forKey: "showFPS") }
+        get { Defaults.standard.object(forKey: "showFPS") as? Bool ?? true }
+        set { Defaults.standard.set(newValue, forKey: "showFPS") }
     }
     /// Timestamp of the last "begin run" press awaiting its confirming repeat.
     private var lastStartConfirmTime: TimeInterval = 0
@@ -205,8 +205,8 @@ class GameScene: SKScene {
     /// Player keybind overrides, keyed by KeyAction.rawValue → keyCode. Missing
     /// entries fall back to the action's default.
     private var keyBindings: [String: Int] {
-        get { UserDefaults.standard.dictionary(forKey: "keyBindings") as? [String: Int] ?? [:] }
-        set { UserDefaults.standard.set(newValue, forKey: "keyBindings") }
+        get { Defaults.standard.dictionary(forKey: "keyBindings") as? [String: Int] ?? [:] }
+        set { Defaults.standard.set(newValue, forKey: "keyBindings") }
     }
     /// The keyCode currently bound to an action (override or default).
     private func boundCode(for action: KeyAction) -> UInt16 {
@@ -859,6 +859,10 @@ class GameScene: SKScene {
     /// Every weapon and how it's earned — the MILESTONES page.
     private func rebuildMilestonesPage() {
         milestonesPageNode.removeAllChildren()
+        // Everything goes into a container the wheel shifts up/down, so a long
+        // arsenal list can be scrolled past the bottom edge (see handleScroll).
+        let column = SKNode()
+        milestonesPageNode.addChild(column)
         let boardSide = min(size.width, size.height) * boardScale
         let columnLeft = (size.width + boardSide) / 2 + 16
         let columnTop = (size.height + boardSide) / 2
@@ -872,7 +876,7 @@ class GameScene: SKScene {
             label.horizontalAlignmentMode = .left
             label.verticalAlignmentMode = .top
             label.position = CGPoint(x: columnLeft, y: y)
-            milestonesPageNode.addChild(label)
+            column.addChild(label)
             y -= drop
         }
 
@@ -909,7 +913,7 @@ class GameScene: SKScene {
             count.verticalAlignmentMode = .center
             count.position = CGPoint(x: width + 8, y: 0)
             bar.addChild(count)
-            milestonesPageNode.addChild(bar)
+            column.addChild(bar)
             y -= 20
         }
 
@@ -941,6 +945,13 @@ class GameScene: SKScene {
                         font: "HelveticaNeue", size: 12, color: nameColor, drop: 21)
             }
         }
+
+        // Whatever spilled past the bottom edge becomes scrollable: shift the
+        // whole column up by the wheel offset, clamped to the overflow.
+        let bottomMargin: CGFloat = 16
+        milestonesMaxScroll = max(0, bottomMargin - y)
+        milestonesScroll = min(milestonesScroll, milestonesMaxScroll)
+        column.position = CGPoint(x: 0, y: milestonesScroll)
     }
 
     /// Switches the right column's visible page and repaints the nav bar.
@@ -994,6 +1005,10 @@ class GameScene: SKScene {
     /// weapon list) can be read past the bottom edge.
     private var legendScroll: CGFloat = 0
     private var legendMaxScroll: CGFloat = 0
+    /// Scroll wheel offset for the milestones page, so the full arsenal list can
+    /// be read past the bottom edge.
+    private var milestonesScroll: CGFloat = 0
+    private var milestonesMaxScroll: CGFloat = 0
 
     /// The left margin, two columns: weapon/enemy reference dropdowns at the
     /// far edge, how-to-play primer and keybinds beside them. Rebuilt whenever
@@ -1222,10 +1237,20 @@ class GameScene: SKScene {
     /// Shared scroll logic; `event` is the platform-neutral input snapshot,
     /// dispatched by the per-platform responder adapters at the end of the file.
     func handleScroll(_ event: GameInput) {
-        guard legendMaxScroll > 0 else { return }
         // Scrolling down reveals lower entries (content shifts up); natural
         // scrolling flips that so the content tracks the fingers.
         let delta = naturalScrolling ? -event.scrollDeltaY : event.scrollDeltaY
+        // Scroll the region under the pointer: the milestones page fills the right
+        // column, the legend the left. The board's right edge divides them.
+        let boardSide = min(size.width, size.height) * boardScale
+        let rightColumnLeft = (size.width + boardSide) / 2
+        if hudPage == .milestones && event.location.x >= rightColumnLeft {
+            guard milestonesMaxScroll > 0 else { return }
+            milestonesScroll = min(milestonesMaxScroll, max(0, milestonesScroll - delta))
+            rebuildMilestonesPage()
+            return
+        }
+        guard legendMaxScroll > 0 else { return }
         legendScroll = min(legendMaxScroll, max(0, legendScroll - delta))
         rebuildLegend()
     }
@@ -3442,6 +3467,7 @@ class GameScene: SKScene {
         // line can lose its nerve, rally, and lose it twice.
         let segments = text.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
 
+        #if canImport(AppKit)
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .center
         let grandAttributes: [NSAttributedString.Key: Any] = [
@@ -3513,6 +3539,33 @@ class GameScene: SKScene {
         actions.append(SKAction.fadeOut(withDuration: 0.5))
         actions.append(SKAction.removeFromParent())
         label.run(SKAction.sequence(actions))
+        #else
+        // Web: no attributed text — reveal in a single style, but keep the
+        // hesitation beats at each "|" so the oracle's timing gag survives.
+        // (Per-segment font/colour switching needs attributed text; dropped here.)
+        label.fontName = "Papyrus"
+        label.fontSize = 19
+        label.fontColor = SKColor(red: 0.93, green: 0.80, blue: 0.45, alpha: 1.0)
+        let plain = segments.joined()
+        let total = plain.count
+        var breakPoints: Set<Int> = []
+        var cumulative = 0
+        for segment in segments.dropLast() {
+            cumulative += segment.count
+            breakPoints.insert(cumulative)
+        }
+        var actions: [SKAction] = []
+        for index in 1...max(1, total) {
+            let shown = String(plain.prefix(index))
+            actions.append(SKAction.run { label.text = shown + " ✦" })
+            actions.append(SKAction.wait(forDuration: breakPoints.contains(index) ? 0.45 : 0.018))
+        }
+        actions.append(SKAction.run { label.text = plain })
+        actions.append(SKAction.wait(forDuration: 1.8))
+        actions.append(SKAction.fadeOut(withDuration: 0.5))
+        actions.append(SKAction.removeFromParent())
+        label.run(SKAction.sequence(actions))
+        #endif
     }
 
     /// Transient status message just below the board (restart confirmation,
@@ -3701,22 +3754,22 @@ class GameScene: SKScene {
     private var buildPickerOverlay: SKNode?
     /// Persisted slot picks; nil = random from the unlocked pool.
     private var loadoutMeleeName: String? {
-        get { UserDefaults.standard.string(forKey: "loadoutMelee") }
+        get { Defaults.standard.string(forKey: "loadoutMelee") }
         set {
             if let newValue {
-                UserDefaults.standard.set(newValue, forKey: "loadoutMelee")
+                Defaults.standard.set(newValue, forKey: "loadoutMelee")
             } else {
-                UserDefaults.standard.removeObject(forKey: "loadoutMelee")
+                Defaults.standard.removeObject(forKey: "loadoutMelee")
             }
         }
     }
     private var loadoutRangedName: String? {
-        get { UserDefaults.standard.string(forKey: "loadoutRanged") }
+        get { Defaults.standard.string(forKey: "loadoutRanged") }
         set {
             if let newValue {
-                UserDefaults.standard.set(newValue, forKey: "loadoutRanged")
+                Defaults.standard.set(newValue, forKey: "loadoutRanged")
             } else {
-                UserDefaults.standard.removeObject(forKey: "loadoutRanged")
+                Defaults.standard.removeObject(forKey: "loadoutRanged")
             }
         }
     }
@@ -3899,8 +3952,8 @@ class GameScene: SKScene {
 
     /// Whether this profile has been shown the interactive tutorial once.
     private var hasSeenTutorial: Bool {
-        get { UserDefaults.standard.bool(forKey: "hasSeenTutorial") }
-        set { UserDefaults.standard.set(newValue, forKey: "hasSeenTutorial") }
+        get { Defaults.standard.bool(forKey: "hasSeenTutorial") }
+        set { Defaults.standard.set(newValue, forKey: "hasSeenTutorial") }
     }
 
     // MARK: - Dev panel
@@ -4119,9 +4172,14 @@ class GameScene: SKScene {
 
     /// Shows or hides the SKView's FPS and node-count readouts per the pref.
     private func applyDebugOverlays() {
+        // OpenSpriteKit's SKView members are @MainActor; this dev-only overlay
+        // isn't worth threading isolation through the shared scene, so it's a
+        // no-op on web (browser DevTools cover FPS anyway).
+        #if canImport(AppKit)
         guard let skView = view else { return }
         skView.showsFPS = showFPS
         skView.showsNodeCount = showFPS
+        #endif
     }
 
     /// Starts the run, or on the first press (with confirmation on) asks again.
@@ -4421,7 +4479,7 @@ class GameScene: SKScene {
             rebuildMilestonesPage()
         case "dev:resetProfile":
             for key in ["claimedTrophies", "unlockedWeapons", "lifetimeTallies", "highScore", "hasSeenTutorial"] {
-                UserDefaults.standard.removeObject(forKey: key)
+                Defaults.standard.removeObject(forKey: key)
             }
             tallyBaseline = [:]
             rebuildLegend()
