@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Foretold — OpenSpriteKit WASM spike</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #16161c; }
+    #app { display: grid; place-items: center; height: 100%; }
+    #canvas { display: block; width: 800px; height: 600px; max-width: 100vw; touch-action: none; }
+    #status { position: fixed; bottom: 20px; left: 20px; color: #69db7c;
+              font: 14px/1.4 monospace; background: rgba(0,0,0,0.7);
+              padding: 10px 15px; border-radius: 5px; white-space: pre-wrap; max-width: 90vw; }
+    #status.err { color: #ff7b7b; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <!-- OpenSpriteKit's SKRenderer binds to this canvas by id (see main.swift). -->
+    <canvas id="canvas" width="800" height="600" tabindex="0"></canvas>
+  </div>
+  <div id="status">Loading wasm…</div>
+
+  <script type="module">
+    const status = document.getElementById('status');
+    const fail = (msg) => { status.textContent = String(msg); status.className = 'err'; console.error(msg); };
+
+    if (!('gpu' in navigator)) {
+      fail('WebGPU unavailable — use a current Chrome/Edge/Safari with WebGPU enabled.');
+    } else {
+      try {
+        // The PackageToJS harness wires javascript_kit + bjs imports but NOT WASI;
+        // it exposes addToCoreImports/instrumentInstance hooks for us to supply it.
+        const { instantiate } = await import('./instantiate.js');
+        const { WASI, OpenFile, File, ConsoleStdout } =
+          await import('./wasi-shim.js');   // vendored @bjorn3/browser_wasi_shim
+
+        const wasi = new WASI([], [], [
+          new OpenFile(new File([])),                              // stdin
+          ConsoleStdout.lineBuffered((m) => console.log('[swift]', m)),   // stdout
+          ConsoleStdout.lineBuffered((m) => console.warn('[swift]', m)),  // stderr
+        ]);
+
+        const { instance } = await instantiate({
+          module: fetch(new URL('HelloScene.wasm', import.meta.url)),
+          addToCoreImports(imports) {
+            imports['wasi_snapshot_preview1'] = wasi.wasiImport;
+          },
+          instrumentInstance(inst) {
+            wasi.initialize(inst);   // WASI reactor init (calls _initialize)
+            return inst;
+          },
+        });
+
+        // Our @_cdecl("setup") entry point — kicks off SKRenderer + the rAF loop.
+        instance.exports.setup();
+        status.textContent = 'setup() called — scene should be rendering.';
+      } catch (e) {
+        fail(e && e.stack ? e.stack : e);
+      }
+    }
+  </script>
+</body>
+</html>

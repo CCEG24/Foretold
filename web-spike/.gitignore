@@ -1,0 +1,7 @@
+.build/
+Deps/
+*.resolved
+
+# NOTE: dist/ is intentionally NOT ignored — Render can't build the wasm
+# (no Swift/WASM toolchain on its build image), so we commit the prebuilt
+# bundle and Render serves it statically. Rebuild with ./build.sh before deploy.

@@ -565,7 +565,7 @@ struct GameState {
         guard terrainKind(at: target) == .ice,
               let direction = Direction.aiming(from: playerPosition, toward: target, allowDiagonals: true)
         else { return target }
-        return iceSlide(landingOn: target, heading: direction, moverIsPlayer: true).destination
+        return iceSlide(landingOn: target, heading: direction, moverIsPlayer: true, extraBlocked: []).destination
     }
 
     /// Where a drafted attack or throw would originate right now — the post-slide
@@ -1331,7 +1331,7 @@ struct GameState {
     /// mover stays put. `moverIsPlayer` decides whether the player's tile blocks;
     /// `extraBlocked` lets an enemy slide respect the tiles its squad has already
     /// claimed, so the telegraph stays honest.
-    func iceSlide(landingOn start: GridPosition, heading direction: Direction, moverIsPlayer: Bool, extraBlocked: Set<GridPosition> = []) -> (destination: GridPosition, crossed: [GridPosition]) {
+    func iceSlide(landingOn start: GridPosition, heading direction: Direction, moverIsPlayer: Bool, extraBlocked: Set<GridPosition>) -> (destination: GridPosition, crossed: [GridPosition]) {
         guard terrainKind(at: start) == .ice else { return (start, []) }
         let step = direction.unitStep
         // A tile that halts the slide entirely (as opposed to merely ending the
@@ -1706,7 +1706,7 @@ struct GameState {
         var steppedTile = plannedTarget ?? playerPosition
         if let target = plannedTarget, terrainKind(at: target) == .ice,
            let direction = Direction.aiming(from: playerStart, toward: target, allowDiagonals: true) {
-            steppedTile = iceSlide(landingOn: target, heading: direction, moverIsPlayer: true).destination
+            steppedTile = iceSlide(landingOn: target, heading: direction, moverIsPlayer: true, extraBlocked: []).destination
         }
         tilesMoved += playerStart.distance(to: steppedTile)
         plannedTarget = nil
@@ -2099,7 +2099,12 @@ struct GameState {
                     barrelSpawns.append(target)
                 }
             } else if equippedWeapon.vortex {
-                // No blast — drag every foe in the diamond one tile inward.
+                // Crush everyone caught in the eye, then drag the survivors one
+                // tile inward (onto spikes, into barrels, into your next swing).
+                if attackDamage > 0 {
+                    let diamond = Set(blastTiles(around: target, radius: thrown.blastRadius, includeCenter: true))
+                    playerPhaseHits += damageEnemies(on: diamond, damage: attackDamage, credit: equippedWeapon.name)
+                }
                 let suck = performVortex(center: target, radius: thrown.blastRadius)
                 shoves += suck.shoves
                 playerExplosions += suck.explosions

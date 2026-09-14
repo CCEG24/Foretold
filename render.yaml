@@ -1,0 +1,33 @@
+# Render.com static-site config for the WASM spike.
+#
+# Realistic model: the exotic Swift 6.4-snapshot + SwiftWasm toolchain is NOT
+# available on Render's build image, so we do NOT build on Render. Build the
+# WASM locally (or in GitHub Actions) with build.sh, commit the produced dist/
+# (or publish it as a CI artifact), and let Render serve it statically.
+#
+# The COOP/COEP headers give the page cross-origin isolation, which SwiftWasm
+# needs for SharedArrayBuffer / threads. Without them you typically get a blank
+# page — the classic "works locally, blank on Render" trap.
+services:
+  - type: web
+    name: foretold-web-spike
+    runtime: static
+    # No buildCommand: dist/ is prebuilt and committed. If you later build in CI,
+    # point Render at the artifact instead.
+    staticPublishPath: ./web-spike/dist
+    headers:
+      - path: /*
+        name: Cross-Origin-Opener-Policy
+        value: same-origin
+      - path: /*
+        name: Cross-Origin-Embedder-Policy
+        value: require-corp
+      # Ensure wasm is served with the correct type (Render usually sets this by
+      # extension; pin it explicitly to be safe).
+      - path: /*.wasm
+        name: Content-Type
+        value: application/wasm
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

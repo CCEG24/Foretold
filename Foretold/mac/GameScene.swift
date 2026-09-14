@@ -3,7 +3,19 @@
 //  Foretold
 //
 
+// SpriteKit on Apple platforms; the OpenSpriteKit shim (WebGPU) on WASM/web.
+// The scene-graph API surface is identical, so the body below is shared.
+#if canImport(SpriteKit)
 import SpriteKit
+#else
+import OpenSpriteKit
+#endif
+// AppKit supplies NSEvent (input), NSFont/NSColor/NSAttributedString (text).
+// The web target replaces these with DOM-backed equivalents, so anything that
+// touches them is guarded on canImport(AppKit).
+#if canImport(AppKit)
+import AppKit
+#endif
 
 /// Renders the board and turns mouse/keyboard input into turn decisions.
 /// All game rules live in GameState; this class only draws and animates.
@@ -273,6 +285,7 @@ class GameScene: SKScene {
         setUpScene()
         showTitleScreen()
 
+        #if canImport(AppKit)
         // Keyboard events only reach the scene when the SKView is first responder.
         view.window?.makeFirstResponder(view)
 
@@ -284,6 +297,7 @@ class GameScene: SKScene {
             userInfo: nil
         )
         view.addTrackingArea(trackingArea)
+        #endif
     }
 
     /// Builds every node from the current state; also used to restart after game over.
@@ -1205,11 +1219,13 @@ class GameScene: SKScene {
         column.position = CGPoint(x: 0, y: legendScroll)
     }
 
-    override func scrollWheel(with event: NSEvent) {
+    /// Shared scroll logic; `event` is the platform-neutral input snapshot,
+    /// dispatched by the per-platform responder adapters at the end of the file.
+    func handleScroll(_ event: GameInput) {
         guard legendMaxScroll > 0 else { return }
         // Scrolling down reveals lower entries (content shifts up); natural
         // scrolling flips that so the content tracks the fingers.
-        let delta = naturalScrolling ? -event.scrollingDeltaY : event.scrollingDeltaY
+        let delta = naturalScrolling ? -event.scrollDeltaY : event.scrollDeltaY
         legendScroll = min(legendMaxScroll, max(0, legendScroll - delta))
         rebuildLegend()
     }
@@ -4514,11 +4530,11 @@ class GameScene: SKScene {
 
     // MARK: - Input
 
-    override func mouseMoved(with event: NSEvent) {
+    func handleMouseMoved(_ event: GameInput) {
         // Pact hover lives outside the board grid, so update it before the
         // tile-hover early-out below.
-        updatePactTooltip(at: event.location(in: self))
-        let newHover = gridPosition(at: event.location(in: self))
+        updatePactTooltip(at: event.location)
+        let newHover = gridPosition(at: event.location)
         guard newHover != hoveredTile else { return }
         hoveredTile = newHover
         if tutorialStep == .hover, let hovered = newHover, state.enemy(at: hovered) != nil {
@@ -4531,12 +4547,12 @@ class GameScene: SKScene {
         refreshTileHighlights()
     }
 
-    override func mouseDown(with event: NSEvent) {
+    func handleMouseDown(_ event: GameInput) {
         if titleOverlay != nil {
             dismissTitleScreen()
             return
         }
-        let location = event.location(in: self)
+        let location = event.location
         let clickedNames = nodes(at: location).compactMap(\.name)
         // The advanced tutorial keeps the board playable: only its own NEXT/SKIP
         // buttons are intercepted; every other click falls through to normal play.
@@ -4689,11 +4705,11 @@ class GameScene: SKScene {
     /// Right-click drafts the equipped weapon's attack: directional weapons face
     /// the clicked tile, thrown weapons land on it. Right-clicking the planned
     /// destination cancels whatever's drafted — directional swing or throw alike.
-    override func rightMouseDown(with event: NSEvent) {
+    func handleRightMouseDown(_ event: GameInput) {
         guard titleOverlay == nil, buildPickerOverlay == nil, devPanel == nil else { return }
         guard !tutorialShowcasing else { return }
         guard !isResolving, !state.isGameOver, buffChoiceOverlay == nil else { return }
-        guard let tile = gridPosition(at: event.location(in: self)) else { return }
+        guard let tile = gridPosition(at: event.location) else { return }
         let hasDraft = state.plannedAttackDirection != nil || state.plannedThrowTarget != nil
         if tile == state.attackOrigin && hasDraft {
             state.clearPlannedAttack()
@@ -4707,7 +4723,7 @@ class GameScene: SKScene {
         updateHUD()
     }
 
-    override func keyDown(with event: NSEvent) {
+    func handleKeyDown(_ event: GameInput) {
         if titleOverlay != nil {
             dismissTitleScreen()
             return
@@ -4814,4 +4830,33 @@ class GameScene: SKScene {
             }
         }
     }
+
+    // MARK: - Platform input adapters
+
+    // The macOS responder overrides translate an NSEvent into the neutral
+    // GameInput the shared handlers above consume. The web target will add a
+    // DOM adapter that builds GameInput from browser pointer/keyboard/wheel
+    // events instead — the handlers themselves never change.
+    #if canImport(AppKit)
+    override func scrollWheel(with event: NSEvent) {
+        handleScroll(GameInput(scrollDeltaY: event.scrollingDeltaY))
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        handleMouseMoved(GameInput(location: event.location(in: self)))
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        handleMouseDown(GameInput(location: event.location(in: self),
+                                  timestamp: event.timestamp))
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        handleRightMouseDown(GameInput(location: event.location(in: self)))
+    }
+
+    override func keyDown(with event: NSEvent) {
+        handleKeyDown(GameInput(keyCode: event.keyCode, timestamp: event.timestamp))
+    }
+    #endif
 }

@@ -5,6 +5,9 @@
 //  Created by chenyige on 01/09/2026.
 //
 
+// macOS host view controller; compiled only where AppKit exists. The web
+// target presents the scene through its own WASM/SKView bootstrap instead.
+#if canImport(AppKit)
 import Cocoa
 import SpriteKit
 import GameplayKit
@@ -44,3 +47,4 @@ class ViewController: NSViewController {
         }
     }
 }
+#endif

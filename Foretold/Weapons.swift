@@ -348,9 +348,9 @@ extension Weapon {
     /// instead of dealing damage. Seed the board with powder, then set it off — a
     /// knockback swing, a stray shot, or a foe flung into one does the real work.
     static let keg = Weapon(name: "Keg", moveRange: 2, damage: 0, cooldown: 1, enemyHealth: 2, isRanged: true, placesBarrel: true, thrown: Thrown(range: 4, blastRadius: 0, flightTurns: 0))
-    /// Deals no damage: lob it at a cluster and every foe in the diamond is
-    /// dragged one tile toward the eye — onto live spikes, into a barrel, into a
-    /// tight knot for your next swing, or off the tile they'd telegraphed.
+    /// Lob it at a cluster: everyone caught in the diamond takes a light hit and
+    /// is dragged one tile toward the eye — onto live spikes, into a barrel, into
+    /// a tight knot for your next swing, or off the tile they'd telegraphed.
     static let vortex = Weapon(name: "Vortex", moveRange: 2, damage: 1, cooldown: 1, enemyHealth: 2, isRanged: true, vortex: true, thrown: Thrown(range: 5, blastRadius: 2, flightTurns: 0))
     /// A dev-only toy: kept out of `all`, loot, and milestones, so it can only
     /// be handed out through the dev panel's weapon cycler.
