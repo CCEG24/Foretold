@@ -10,7 +10,7 @@
 # page — the classic "works locally, blank on Render" trap.
 services:
   - type: web
-    name: foretold-web-spike
+    name: foretold
     runtime: static
     # dist/ is prebuilt and committed (Render can't build the WASM toolchain).
     # A no-op build command keeps Render happy without rebuilding anything.
