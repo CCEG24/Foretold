@@ -1441,7 +1441,7 @@ class GameScene: SKScene {
         state.tutorialSpawnGatekeeper()
         resyncBoardToState()
         buildLessonOverlay(
-            text: "GATEKEEPERS · a JUGGERNAUT or BOSS locks the level until it falls. Bosses draft telegraphed volleys, cannon novas, summons, and barrel barrages — read them before you commit."
+            text: "GATEKEEPERS · every level is locked until its gatekeeper falls. A JUGGERNAUT wades in and summons waves; a SUMMONER hangs back and floods the board with fodder; a BOMBARDIER calls in bomber swarms and rains barrels; every third gate is a BOSS that volleys, cannon-novas, summons, and barrages. Read the telegraph before you commit."
         ) { [weak self] in self?.showcaseLevelUp() }
     }
 
@@ -1462,7 +1462,7 @@ class GameScene: SKScene {
     private func finishTutorialShowcase() {
         beginnerShowcaseActive = false
         buildLessonOverlay(
-            text: "THAT'S THE GIST · move 2+ tiles without acting to dodge a hit; the rest is in the dropdowns on the left. Want the ADVANCED tactics — barrels, grapple, blink? NEXT to learn them, EXIT to play."
+            text: "THAT'S THE GIST · move 2+ tiles without acting to dodge a hit; the rest is in the dropdowns on the left. Want the ADVANCED tactics — barrels, ice & mud, grapple, blink? NEXT to learn them, EXIT to play."
         ) { [weak self] in
             self?.advancedReturnToBuildPicker = false   // chained into a live run
             self?.startAdvancedTutorial()
@@ -1485,10 +1485,10 @@ class GameScene: SKScene {
         AdvancedLesson(demo: .spikes, text: "SPIKES · lit tiles bite whoever ends the turn on them, then toggle. Attack the enemy — the Ram flings it across the live spikes, and it takes a bite on the way. Mind your own footing."),
         AdvancedLesson(demo: .teleporters, text: "TELEPORTERS · step onto the portal to warp to its linked twin across the board. Enemies path through them to reach you, and a bolt fired through one flies out the far side."),
         AdvancedLesson(demo: .ice, text: "ICE · standing on ice gives +1 move, and a move that ends on ice slides you on down the strip until it runs out or something stops you. The gold marker shows where you'll really land — draft a step onto the ice and slide into the foe."),
-        AdvancedLesson(demo: .mud, text: "MUD · while you're stood in mud your move range drops by 1, so it bogs you down. Watch your footing — ending a turn in mud next to a threat leaves you a step short of escaping it."),
+        AdvancedLesson(demo: .mud, text: "MUD · slogging into a mud tile eats an extra step, so it bogs down anyone crossing it — you and enemies alike. Route around it, or use it to slow a foe closing on you."),
         AdvancedLesson(demo: .walls, text: "WALLS · brown walls crumble — smash one with a swing or blow it apart with a blast to open a path. Grey walls are solid. (The Barricades pact packs the whole board with crumbling walls to dig through.)"),
-        AdvancedLesson(demo: .grapple, text: "GRAPPLE · right-click a direction to fire it: aim RIGHT at the enemy to reel it in, UP at the wall to haul yourself over, or LEFT at the barrel to yank it into your lap for a soft pop."),
-        AdvancedLesson(demo: .slipstep, text: "SLIPSTEP · blinks you 7 tiles but barely scratches. Blink next to the enemy, then Tab to the Sword (free) and strike the same turn. Next turn, swap back and blink clean out."),
+        AdvancedLesson(demo: .grapple, text: "GRAPPLE · right-click a direction to fire it: aim RIGHT at the enemy to reel it in, UP at the wall to haul yourself over, or LEFT at the barrel to yank it into your lap for a 2 damage hit."),
+        AdvancedLesson(demo: .slipstep, text: "SLIPSTEP · sends you 7 tiles but barely scratches them. Go next to the enemy, then Tab to the Sword (free) and strike the same turn. Next turn, swap back and get out."),
     ]
 
     private func startAdvancedTutorial() {
@@ -2123,7 +2123,7 @@ class GameScene: SKScene {
                     )
                 case .mud:
                     addHoverLabel(
-                        "mud · −1 move while stood in it",
+                        "mud · costs an extra move to slog into",
                         at: hovered,
                         color: SKColor(red: 0.72, green: 0.58, blue: 0.40, alpha: 1.0)
                     )
@@ -3454,20 +3454,26 @@ class GameScene: SKScene {
     /// hesitation beat) and the rest arrives in deflated plain type.
     private func showTransmission(_ text: String) {
         let boardSide = min(size.width, size.height) * boardScale
-        let label = SKLabelNode(text: "")
-        label.verticalAlignmentMode = .center
-        // Long pronouncements wrap instead of overhanging the board.
-        label.numberOfLines = 0
-        label.preferredMaxLayoutWidth = boardSide - 24
-        label.position = CGPoint(x: size.width / 2, y: size.height / 2 + boardSide * 0.28)
-        label.zPosition = 60
-        addChild(label)
+        let position = CGPoint(x: size.width / 2, y: size.height / 2 + boardSide * 0.28)
+        let maxWidth = boardSide - 24
 
         // Every "|" toggles the voice: grand, deflated, grand again… so one
         // line can lose its nerve, rally, and lose it twice.
         let segments = text.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+        let total = segments.reduce(0) { $0 + $1.count }
+        var breakPoints: Set<Int> = []
+        var cumulative = 0
+        for segment in segments.dropLast() {
+            cumulative += segment.count
+            breakPoints.insert(cumulative)
+        }
 
         #if canImport(AppKit)
+        // SKLabelNode renders one font per node, so the deflated voice's flat
+        // type never shows through attributedText — it takes the grand run's
+        // Papyrus for the whole line. Draw the attributed string with CoreText
+        // into a texture instead (which honours per-segment fonts, colours, and
+        // wrapping) and swap it onto a sprite each typewriter tick.
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .center
         let grandAttributes: [NSAttributedString.Key: Any] = [
@@ -3494,7 +3500,6 @@ class GameScene: SKScene {
             }
             return max(0, segments.count - 1)
         }
-
         func rendered(upTo count: Int, cursor: Bool) -> NSAttributedString {
             let result = NSMutableAttributedString()
             var remaining = count
@@ -3519,43 +3524,69 @@ class GameScene: SKScene {
             }
             return result
         }
-
-        let total = segments.reduce(0) { $0 + $1.count }
-        var breakPoints: Set<Int> = []
-        var cumulative = 0
-        for segment in segments.dropLast() {
-            cumulative += segment.count
-            breakPoints.insert(cumulative)
+        // Rasterise an attributed string into a 2× texture (crisp on Retina) and
+        // its point size, wrapping within the board's width.
+        func texture(for attributed: NSAttributedString) -> (SKTexture, CGSize)? {
+            let bounds = attributed.boundingRect(
+                with: CGSize(width: maxWidth, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading]
+            )
+            let boxSize = CGSize(width: ceil(bounds.width) + 6, height: ceil(bounds.height) + 6)
+            guard boxSize.width > 1, boxSize.height > 1 else { return nil }
+            let scale: CGFloat = 2
+            guard let rep = NSBitmapImageRep(
+                bitmapDataPlanes: nil,
+                pixelsWide: Int(boxSize.width * scale), pixelsHigh: Int(boxSize.height * scale),
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+            ) else { return nil }
+            rep.size = boxSize
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+            attributed.draw(with: CGRect(origin: .zero, size: boxSize),
+                            options: [.usesLineFragmentOrigin, .usesFontLeading])
+            NSGraphicsContext.restoreGraphicsState()
+            let image = NSImage(size: boxSize)
+            image.addRepresentation(rep)
+            return (SKTexture(image: image), boxSize)
         }
 
+        let sprite = SKSpriteNode(color: .clear, size: CGSize(width: 1, height: 1))
+        sprite.position = position
+        sprite.zPosition = 60
+        addChild(sprite)
+        func show(_ count: Int, cursor: Bool) {
+            guard let (tex, sz) = texture(for: rendered(upTo: count, cursor: cursor)) else { return }
+            sprite.texture = tex
+            sprite.size = sz
+        }
         var actions: [SKAction] = []
         for index in 1...max(1, total) {
-            actions.append(SKAction.run { label.attributedText = rendered(upTo: index, cursor: true) })
+            actions.append(SKAction.run { show(index, cursor: true) })
             // The oracle falters at every break before soldiering on.
             actions.append(SKAction.wait(forDuration: breakPoints.contains(index) ? 0.45 : 0.018))
         }
-        actions.append(SKAction.run { label.attributedText = rendered(upTo: total, cursor: false) })
+        actions.append(SKAction.run { show(total, cursor: false) })
         actions.append(SKAction.wait(forDuration: 1.8))
         actions.append(SKAction.fadeOut(withDuration: 0.5))
         actions.append(SKAction.removeFromParent())
-        label.run(SKAction.sequence(actions))
+        sprite.run(SKAction.sequence(actions))
         #else
-        // Web: no attributed text — reveal in a single style, but keep the
-        // hesitation beats at each "|" so the oracle's timing gag survives.
-        // (Per-segment font/colour switching needs attributed text; dropped here.)
+        // Web: OpenSpriteKit has no attributed text / CoreText, so reveal in a
+        // single style, keeping the hesitation beats at each "|".
+        let label = SKLabelNode(text: "")
+        label.verticalAlignmentMode = .center
+        label.numberOfLines = 0
+        label.preferredMaxLayoutWidth = maxWidth
+        label.position = position
+        label.zPosition = 60
         label.fontName = "Papyrus"
         label.fontSize = 19
         label.fontColor = SKColor(red: 0.93, green: 0.80, blue: 0.45, alpha: 1.0)
+        addChild(label)
         let plain = segments.joined()
-        let total = plain.count
-        var breakPoints: Set<Int> = []
-        var cumulative = 0
-        for segment in segments.dropLast() {
-            cumulative += segment.count
-            breakPoints.insert(cumulative)
-        }
         var actions: [SKAction] = []
-        for index in 1...max(1, total) {
+        for index in 1...max(1, plain.count) {
             let shown = String(plain.prefix(index))
             actions.append(SKAction.run { label.text = shown + " ✦" })
             actions.append(SKAction.wait(forDuration: breakPoints.contains(index) ? 0.45 : 0.018))

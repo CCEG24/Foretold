@@ -1306,15 +1306,17 @@ struct GameState {
         terrain.first { $0.position == position }?.kind
     }
 
-    /// The move-range change the floor on `tile` grants (ice, +1) or costs
-    /// (mud, −1). Shared by the player's `moveRange` and enemies' `movementBudget`
-    /// so both feel the floor the same way.
+    /// The start-of-turn move-range bonus the floor a mover stands on grants —
+    /// only ice (+1). Mud isn't a standing penalty; it's paid per step *entering*
+    /// it (see `stepCost(onto:)`), so slogging through it eats extra movement.
+    /// Shared by the player's `moveRange` and enemies' `movementBudget`.
     func terrainMoveDelta(at tile: GridPosition) -> Int {
-        switch terrainKind(at: tile) {
-        case .ice: return 1
-        case .mud: return -1
-        case nil: return 0
-        }
+        terrainKind(at: tile) == .ice ? 1 : 0
+    }
+
+    /// Movement points to step onto `tile`: mud costs 2, everything else 1.
+    func stepCost(onto tile: GridPosition) -> Int {
+        terrainKind(at: tile) == .mud ? 2 : 1
     }
 
     /// An enemy's move range with the floor it stands on folded in (never below
@@ -1526,23 +1528,35 @@ struct GameState {
             .flatMap { blastTiles(around: $0.position, radius: Self.bomberBlastRadius, includeCenter: true) }
     }
 
-    /// Tiles the player may pick this turn: every on-board tile within moveRange
-    /// orthogonal steps (a diamond, no diagonals), including the current tile
-    /// (planning to stay) but excluding tiles occupied by enemies or obstacles.
+    /// Tiles the player may pick this turn: every on-board tile reachable within
+    /// the move budget, where each orthogonal step costs 1 — or 2 to enter mud, so
+    /// slogging through mud eats an extra tile. A move still glides over walls
+    /// (transit is free, as it always has been); only mud adds cost. The current
+    /// tile (planning to stay) is excluded, as are tiles occupied by enemies or
+    /// obstacles (enemies vacating their tile don't block — you land as they leave).
     func legalMoveTargets() -> Set<GridPosition> {
-        // Enemies drafted to move off their tile don't block it — you can slip
-        // into the space they're vacating (they'll have stepped away by the
-        // time you land, and are shoved aside if their own move gets blocked).
+        let budget = moveRange
+        guard budget > 0 else { return [] }
         let occupied = Set(enemies.filter { !$0.isVacating }.map(\.position)).union(obstacles.map(\.position))
-        var targets: Set<GridPosition> = []
-        for dx in -moveRange...moveRange {
-            let remaining = moveRange - abs(dx)
-            for dy in -remaining...remaining {
-                let candidate = GridPosition(x: playerPosition.x + dx, y: playerPosition.y + dy)
-                if contains(candidate) && !occupied.contains(candidate) {
-                    targets.insert(candidate)
-                }
+        // Dijkstra: cheapest cost from the player to every tile (grid is small).
+        var cost: [GridPosition: Int] = [playerPosition: 0]
+        var settled: Set<GridPosition> = []
+        while let current = cost.lazy.filter({ !settled.contains($0.key) }).min(by: { $0.value < $1.value })?.key {
+            let here = cost[current]!
+            if here >= budget { break }   // any neighbour would exceed the budget
+            settled.insert(current)
+            for step in [GridPosition(x: current.x + 1, y: current.y),
+                         GridPosition(x: current.x - 1, y: current.y),
+                         GridPosition(x: current.x, y: current.y + 1),
+                         GridPosition(x: current.x, y: current.y - 1)] {
+                guard contains(step) else { continue }
+                let next = here + stepCost(onto: step)
+                if next < cost[step, default: .max] { cost[step] = next }
             }
+        }
+        var targets: Set<GridPosition> = []
+        for (tile, c) in cost where c > 0 && c <= budget && !occupied.contains(tile) {
+            targets.insert(tile)
         }
         return targets
     }
@@ -3810,10 +3824,13 @@ struct GameState {
                     var path: [GridPosition] = []
                     // March at the squad's pace, not the member's own — a swift in
                     // the ranks keeps station instead of surging to its slot early.
-                    let stride = formationSpeed[fid] ?? enemy.moveRange
-                    for _ in 0..<stride {
+                    var stride = formationSpeed[fid] ?? enemy.moveRange
+                    while stride > 0 {
                         let next = stepToward(goal, from: target, avoiding: avoid)
                         if next == target { break }
+                        let cost = stepCost(onto: next)
+                        if cost > stride { break }   // mud eats the last step
+                        stride -= cost
                         target = next
                         path.append(next)
                         if target == goal { break }
@@ -3854,11 +3871,15 @@ struct GameState {
                     // Close enough already: arm in place. Otherwise close in.
                     if enemy.position.distance(to: playerPosition) > Self.bomberArmDistance {
                         let goal = portalAwareGoal(attackGoal(for: enemy, avoiding: avoid), from: enemy.position)
-                        for _ in 0..<movementBudget(for: enemy) {
+                        var budget = movementBudget(for: enemy)
+                        while budget > 0 {
                             let next = stepToward(goal, from: target, avoiding: avoid)
                             if next == target {
                                 break
                             }
+                            let cost = stepCost(onto: next)
+                            if cost > budget { break }   // mud eats the last step
+                            budget -= cost
                             target = next
                             path.append(next)
                             if target.distance(to: playerPosition) <= Self.bomberArmDistance {
@@ -3929,11 +3950,15 @@ struct GameState {
                 if let goal {
                     var lastFiringTile: GridPosition?
                     var firingPath: [GridPosition] = []
-                    for _ in 0..<movementBudget(for: enemy) {
+                    var budget = movementBudget(for: enemy)
+                    while budget > 0 {
                         let next = stepToward(goal, from: target, avoiding: avoid)
                         if next == target {
                             break
                         }
+                        let cost = stepCost(onto: next)
+                        if cost > budget { break }   // mud eats the last step
+                        budget -= cost
                         target = next
                         path.append(next)
                         if canHitPlayer(enemy, from: target) {
@@ -4020,7 +4045,8 @@ struct GameState {
         var target = enemy.position
         var path: [GridPosition] = []
         let goal = portalAwareGoal(attackGoal(for: enemy, avoiding: blocked), from: enemy.position)
-        for _ in 0..<movementBudget(for: enemy) {
+        var budget = movementBudget(for: enemy)
+        while budget > 0 {
             var next = stepToward(goal, from: target, avoiding: blocked)
             if next == target && danger.contains(target) {
                 next = stepToward(goal, from: target, avoiding: blocked.subtracting(danger))
@@ -4028,6 +4054,9 @@ struct GameState {
             if next == target {
                 break
             }
+            let cost = stepCost(onto: next)
+            if cost > budget { break }   // mud eats the last step
+            budget -= cost
             target = next
             path.append(next)
             if canHitPlayer(enemy, from: target) && !danger.contains(target) {
