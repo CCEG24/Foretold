@@ -1,8 +1,8 @@
 //
 //  GameState.swift
 //  Foretold
-//  The Final Draft?
-//  Name ^
+//
+//  Name idea - The Final Draft
 
 /// Difficulty knobs for one level — the Tetris-style ramp.
 struct LevelConfig {
