@@ -39,6 +39,16 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Install system libraries the Swift toolchain needs
+        run: |
+          set -eux
+          sudo apt-get update
+          # libcurl4-openssl-dev is the one swiftly flags; the rest are the
+          # standard Swift-on-Linux runtime deps, added pre-emptively.
+          sudo apt-get install -y \
+            libcurl4-openssl-dev libxml2-dev libedit2 libpython3-dev \
+            libncurses-dev libz3-dev binutils
+
       - name: Install swiftly + Swift snapshot toolchain
         run: |
           set -euxo pipefail
