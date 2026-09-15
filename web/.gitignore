@@ -1,3 +1,6 @@
-# Build output (1GB+). dist/ is intentionally committed so Render can serve the
-# prebuilt WASM (Render can't run the Swift/WASM toolchain).
+# Local build output. NOT committed from dev machines — CI is the sole producer
+# of web/dist (its build step force-adds it via `git add -f web/dist`). This stops
+# macOS-built and Linux-built wasm from churning 85MB diffs against each other.
+# Local `build.sh` still writes these for local testing with serve.py.
 .build/
+dist/
