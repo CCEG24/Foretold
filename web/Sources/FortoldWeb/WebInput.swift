@@ -53,7 +53,10 @@ func installInput(scene: GameScene, canvas: JSObject, width: Double, height: Dou
     }
     let wheel = JSClosure { args in
         guard let e = args[0].object else { return .undefined }
-        scene.handleScroll(GameInput(scrollDeltaY: CGFloat(e.deltaY.number ?? 0)))
+        // Include the pointer location so handleScroll can route to the region
+        // under the cursor (milestones page vs left legend).
+        scene.handleScroll(GameInput(location: scenePoint(e),
+                                     scrollDeltaY: CGFloat(e.deltaY.number ?? 0)))
         return .undefined
     }
     let key = JSClosure { args in

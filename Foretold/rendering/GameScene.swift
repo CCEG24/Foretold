@@ -675,13 +675,21 @@ class GameScene: SKScene {
                 size: CGSize(width: tileSize - 2, height: tileSize - 2)
             )
             if obstacle.destructible {
-                // A pale seam hints it can be broken.
+                // A pale seam hints it can be broken. Nest the wall + crack as
+                // siblings of a plain container (both centered at its origin)
+                // rather than making the crack a child of the sprite: a sprite's
+                // child is positioned from the sprite's corner, not its center
+                // (fine on SpriteKit, off-center on OpenSpriteKit).
+                let container = SKNode()
+                container.addChild(wall)
                 let crack = SKSpriteNode(color: SKColor(white: 0.75, alpha: 0.35),
                                          size: CGSize(width: 2, height: tileSize - 8))
                 crack.zRotation = .pi / 8
-                wall.addChild(crack)
+                container.addChild(crack)
+                node = container
+            } else {
+                node = wall
             }
-            node = wall
         case .barrel:
             let barrel = SKShapeNode(circleOfRadius: tileSize * 0.30)
             // Colour tells the flavor apart: red = boss-primed, green = fire (no

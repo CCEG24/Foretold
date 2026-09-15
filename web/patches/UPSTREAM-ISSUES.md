@@ -109,3 +109,46 @@ bottom/baseline→y0-ish, center→0.5, top→y1) whenever alignment changes.
 > Related: the width heuristic behind auto-sizing (`estimatedTextSize`,
 > `0.6·fontSize`/char) under-measures bold/caps and causes truncation ("FORETOLD"
 > → "foret…"). A real Canvas2D measurement (see issue #1) removes the guesswork.
+
+---
+
+## 6. [OpenSpriteKit / OpenCoreAnimation] No HiDPI / `contentsScale` support — blurry on retina
+
+**Repo:** OpenSpriteKit (`SKRenderer.resize`) → OpenCoreAnimation (`CAWebGPURenderer.resize` / projection)
+
+`resize(width:height:)` sets both `canvas.width/height` (the backing buffer) **and**
+the orthographic projection (`renderTarget.viewportSize`) to the same values. There
+is no notion of `devicePixelRatio` / `contentsScale`: to fill the scene you must
+resize to the scene's logical size, so on a 2× display the browser upscales a 1×
+buffer → everything is soft. Resizing to `logical×dpr` instead just maps the scene
+into a corner (projection extent grew but scene coords didn't).
+
+**Repro:** any scene on a retina/HiDPI display renders blurry; there's no API to
+render at device resolution.
+
+**Expected:** an SKView/SKRenderer `contentsScale` (or auto `devicePixelRatio`)
+that renders the backing at `logical×scale` while keeping scene coordinates in
+logical points, and rasterizes text/CATextLayer at that scale.
+
+---
+
+## 7. [OpenSpriteKit] Children of sized nodes (SKSpriteNode/SKShapeNode) are offset by anchorPoint × parentSize
+
+**Repo:** OpenSpriteKit · **File:** `Sources/OpenSpriteKit/SKSpriteNode.swift` (`updateLayerBounds`)
+
+A node's child at position `(0,0)` should render at the parent's position (its
+anchor point). But `SKSpriteNode` sets `layer.bounds = CGRect(origin: .zero, size:
+size)` with `anchorPoint = (0.5,0.5)`, so the child sublayer's coordinate origin is
+the parent's **bounds corner**, not its anchor — every child is shifted by
+`anchorPoint × parentSize` (e.g. half a sprite down-left). Plain `SKNode` containers
+are fine (zero bounds); only sized nodes (sprites, and shapes with bounds) are
+affected.
+
+**Repro:** add a small `SKSpriteNode` as a child of a larger one at `.zero` → it
+renders at the parent's corner, not its center. Same for a label child of an
+`SKShapeNode` button, and for `nodes(at:)` hit regions of shape buttons (clicks land
+offset).
+
+**Expected:** child coordinates relative to the parent's anchor point (SpriteKit
+semantics) — i.e. the parent's content/sublayer coordinate origin should account for
+`anchorPoint × bounds.size`.
