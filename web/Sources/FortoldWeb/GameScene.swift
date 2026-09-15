@@ -1,1 +1,1 @@
-../../../Foretold/mac/GameScene.swift
+../../../Foretold/rendering/GameScene.swift

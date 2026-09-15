@@ -1,0 +1,17 @@
+diff --git a/Sources/OpenCoreAnimation/CALayer.swift b/Sources/OpenCoreAnimation/CALayer.swift
+index e1d55a9..d9b24bd 100644
+--- a/Sources/OpenCoreAnimation/CALayer.swift
++++ b/Sources/OpenCoreAnimation/CALayer.swift
+@@ -3937,7 +3937,11 @@ open class CALayer: CAMediaTiming, Hashable {
+     }
+ 
+     /// A Boolean indicating whether the layer is allowed to composite itself as a group separate from its parent.
+-    open var allowsGroupOpacity: Bool = true {
++    // NOTE(foretold fork): defaulted to false — the offscreen group-opacity
++    // compositing path renders black in this WebGPU build, so any opacity < 1
++    // (every fade animation) blanked the frame. Simple per-layer alpha is fine
++    // for our 2D game and avoids that path entirely.
++    open var allowsGroupOpacity: Bool = false {
+         didSet {
+             guard oldValue != allowsGroupOpacity else { return }
+             markDirty(.appearance)

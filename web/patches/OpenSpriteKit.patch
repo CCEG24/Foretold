@@ -1,0 +1,109 @@
+diff --git a/Sources/OpenSpriteKit/SKLabelNode.swift b/Sources/OpenSpriteKit/SKLabelNode.swift
+index dda47e3..b38a167 100644
+--- a/Sources/OpenSpriteKit/SKLabelNode.swift
++++ b/Sources/OpenSpriteKit/SKLabelNode.swift
+@@ -92,25 +92,57 @@ open class SKLabelNode: SKNode {
+     /// This method only sets bounds width when preferredMaxLayoutWidth is specified
+     /// (for multi-line text wrapping).
+     private func updateLayerBounds() {
++        // NOTE: The renderer (CAWebGPURenderer.renderText) is documented to
++        // auto-measure zero-bounds text, but in practice it bails when
++        // bounds.size is zero — so nothing draws. Give the layer a concrete,
++        // non-zero size from the estimate; a small horizontal pad avoids
++        // right-edge clipping when the 0.6·fontSize heuristic under-measures.
++        let estimate = estimatedTextSize()
++        guard estimate.width > 0, estimate.height > 0 else {
++            layer.bounds = .zero
++            return
++        }
+         if preferredMaxLayoutWidth > 0 {
+-            // Set width for text wrapping - height will be calculated by renderer
+-            layer.bounds = CGRect(x: 0, y: 0, width: preferredMaxLayoutWidth, height: 0)
++            layer.bounds = CGRect(x: 0, y: 0, width: preferredMaxLayoutWidth, height: estimate.height)
+         } else {
+-            // Let renderer auto-measure the text size
+-            layer.bounds = .zero
++            layer.bounds = CGRect(x: 0, y: 0, width: estimate.width + fontSize * 0.5, height: estimate.height)
+         }
+     }
+ 
+     // MARK: - Alignment Properties
+ 
+     /// The vertical position of the text within the node.
+-    open var verticalAlignmentMode: SKLabelVerticalAlignmentMode = .baseline
++    open var verticalAlignmentMode: SKLabelVerticalAlignmentMode = .baseline {
++        didSet { updateAnchorForAlignment() }
++    }
+ 
+     /// The horizontal position of the text within the node.
+     open var horizontalAlignmentMode: SKLabelHorizontalAlignmentMode = .center {
+         didSet {
+             updateTextLayerAlignment()
++            updateAnchorForAlignment()
++        }
++    }
++
++    /// Maps the label's alignment modes onto the backing layer's anchorPoint so
++    /// text positions like SpriteKit. The base SKNode leaves anchorPoint at
++    /// (0.5, 0.5), which centers every label on its position — wrong for left/
++    /// right/top/bottom-aligned labels (e.g. left-aligned text ran off-screen).
++    private func updateAnchorForAlignment() {
++        let ax: CGFloat
++        switch horizontalAlignmentMode {
++        case .left: ax = 0.0
++        case .center: ax = 0.5
++        case .right: ax = 1.0
++        }
++        let ay: CGFloat
++        switch verticalAlignmentMode {
++        case .top: ay = 1.0
++        case .center: ay = 0.5
++        case .bottom: ay = 0.0
++        case .baseline: ay = 0.17   // baseline sits ~0.2·fontSize above the bottom
+         }
++        layer.anchorPoint = CGPoint(x: ax, y: ay)
+     }
+ 
+     /// Updates the text layer alignment based on horizontal alignment mode.
+@@ -181,8 +213,12 @@ open class SKLabelNode: SKNode {
+             return .zero
+         }
+ 
+-        // Approximate character width as 0.6 * fontSize for typical fonts
+-        let characterWidthFactor: CGFloat = 0.6
++        // Approximate character width. 0.6 under-measures bold/caps (e.g.
++        // "FORETOLD"), so the renderer truncated to "foret…"; 0.75 leaves margin.
++        // Extra width is harmless — left/right anchoring keeps alignment correct,
++        // and centered text stays centered. (A real Canvas2D measure upstream
++        // would remove the guesswork entirely.)
++        let characterWidthFactor: CGFloat = 0.75
+         let lineHeight = fontSize * 1.2
+ 
+         if preferredMaxLayoutWidth > 0 && (lineBreakMode == .byWordWrapping || lineBreakMode == .byCharWrapping) {
+@@ -339,6 +375,7 @@ open class SKLabelNode: SKNode {
+         #endif
+         updateTextLayerAlignment()
+         updateTextLayerTruncation()
++        updateAnchorForAlignment()
+     }
+ 
+     // MARK: - Copying
+diff --git a/Sources/OpenSpriteKit/SKNode.swift b/Sources/OpenSpriteKit/SKNode.swift
+index c4aa270..de5aadd 100644
+--- a/Sources/OpenSpriteKit/SKNode.swift
++++ b/Sources/OpenSpriteKit/SKNode.swift
+@@ -1211,8 +1211,12 @@ open class SKNode {
+             depthCounter += 1
+             let nodeZ = accZ + node.zPosition
+ 
+-            // Add to results only if hittable (visible AND interactive AND at point)
+-            if node.isUserInteractionEnabled && node._contentBounds.contains(point) {
++            // SpriteKit's nodes(at:) returns ALL visible nodes whose bounds contain
++            // the point — isUserInteractionEnabled gates event *delivery*, not this
++            // query. (Foretold does name-based hit-testing via nodes(at:).name and
++            // never sets isUserInteractionEnabled, so filtering on it broke every
++            // menu/button click.)
++            if node._contentBounds.contains(point) {
+                 results.append((node, nodeZ, currentDepth))
+             }
+ 

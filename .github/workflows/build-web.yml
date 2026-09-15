@@ -4,37 +4,84 @@ on:
   push:
     branches:
       - main
+    paths:
+      # Only rebuild when something that affects the WASM changes — NOT when the
+      # job itself commits dist/ (avoids an infinite build loop).
+      - "Foretold/**/*.swift"
+      - "web/Sources/**"
+      - "web/Web/**"
+      - "web/Package.swift"
+      - "web/build.sh"
+      - "web-spike/fetch-deps.sh"
+      - "web/patches/**"
+      - ".github/workflows/build-web.yml"
+
+concurrency:
+  group: build-web
+  cancel-in-progress: true
 
 permissions:
   contents: write
 
+env:
+  # Keep these in lockstep with web/build.sh + fetch-deps.sh.
+  SWIFT_SNAPSHOT: main-snapshot-2026-09-10
+  WASM_SDK_URL: https://github.com/swiftwasm/swift/releases/download/swift-wasm-DEVELOPMENT-SNAPSHOT-2026-09-10-a/swift-wasm-DEVELOPMENT-SNAPSHOT-2026-09-10-a-wasm32-unknown-wasip1.artifactbundle.zip
+  WASM_SDK_CHECKSUM: 6435e779198dddac1df53db694b2dc8139e41607ccf160fa797d565a3586b72e
+  SWIFT_WASM_SDK: DEVELOPMENT-SNAPSHOT-2026-09-10-a-wasm32-unknown-wasip1
+
 jobs:
   build-web:
     runs-on: ubuntu-latest
-
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Set up git identity
+      - name: Install swiftly + Swift snapshot toolchain
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          set -euxo pipefail
+          curl -fsSL -O "https://download.swift.org/swiftly/linux/swiftly-$(uname -m).tar.gz"
+          tar zxf "swiftly-$(uname -m).tar.gz"
+          ./swiftly init --quiet-shell-followup --assume-yes --skip-install
+          . "$HOME/.local/share/swiftly/env.sh"
+          swiftly install --assume-yes "$SWIFT_SNAPSHOT"
+          swiftly use "$SWIFT_SNAPSHOT"
+          # Expose the selected toolchain's swift shim to later steps.
+          echo "$HOME/.local/share/swiftly/bin" >> "$GITHUB_PATH"
 
-      - name: Build frontend
+      - name: Verify Swift + install wasm SDK
+        run: |
+          set -euxo pipefail
+          swift --version
+          swift sdk install "$WASM_SDK_URL" --checksum "$WASM_SDK_CHECKSUM"
+          swift sdk list
+
+      - name: Fetch + pin + patch OpenSpriteKit deps
+        working-directory: web-spike
+        run: |
+          set -euxo pipefail
+          chmod +x fetch-deps.sh
+          ./fetch-deps.sh
+
+      - name: Build web (WASM + JS bundle → web/dist)
         working-directory: web
         run: |
+          set -euxo pipefail
           chmod +x build.sh
           ./build.sh
+          ls -lh dist
 
-      - name: Commit built files if changed
+      - name: Commit built dist if changed
         run: |
-          git add -A
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add web/dist
           if git diff --cached --quiet; then
-            echo "No changes to commit."
+            echo "No dist changes to commit."
             exit 0
           fi
-          git commit -m "Build frontend assets"
+          git commit -m "ci: rebuild web/dist [skip ci]"
           git push
