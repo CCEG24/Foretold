@@ -40,6 +40,29 @@ swift package \
   --use-cdn \
   --output dist
 
+# Assert the WASI-reactor contract. Package.swift passes `-mexec-model=reactor`
+# plus three `--export=` linker flags via .unsafeFlags; index.html calls setup()
+# on the instance. If a toolchain or build-system change quietly drops those
+# flags the build still SUCCEEDS and the page just renders blank — the classic
+# silent failure. Export names live as plain UTF-8 in the wasm export section,
+# so grep is enough to catch it at build time instead of in the browser.
+wasm="$(ls dist/*.wasm 2>/dev/null | head -1 || true)"
+if [ -z "$wasm" ]; then
+  echo "!! no .wasm in dist/ — PackageToJS produced no module" >&2
+  exit 1
+fi
+missing=""
+for sym in setup getCanvasWidth getCanvasHeight; do
+  grep -qa "$sym" "$wasm" || missing="$missing $sym"
+done
+if [ -n "$missing" ]; then
+  echo "!! reactor exports missing from $wasm:$missing" >&2
+  echo "   The linker flags in Package.swift did not take effect. If this started" >&2
+  echo "   after a toolchain bump, try: swift package --build-system native ... js" >&2
+  exit 1
+fi
+echo "   exports: setup, getCanvasWidth, getCanvasHeight ✓"
+
 # PackageToJS emits the JS module but no html/WASI wiring — supply ours.
 cp Web/index.html dist/index.html
 cp Web/wasi-shim.js dist/wasi-shim.js
