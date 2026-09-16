@@ -56,7 +56,7 @@
       }
       for (const k of ['log', 'warn', 'error']) {
         const orig = console[k].bind(console);
-        console[k] = (...a) => { append(k, a); orig(...a); };
+        console[k] = (...a) => { append(k, a); orig(...a); }
       }
       window.addEventListener('error', e => append('error', ['window.onerror:', e.message]));
     })();
@@ -64,33 +64,76 @@
 
   <script type="module">
     const status = document.getElementById('status');
-    const fail = (m) => { status.textContent = String(m); status.className = 'err'; console.error(m); };
+    const setStatus = (text, cls = '') => {
+      status.hidden = false;
+      status.className = cls;
+      status.textContent = text;
+    };
+    const fail = (m) => { setStatus(String(m), 'err'); console.error(m); };
+    const msg = (e) => (e && e.message ? e.message : String(e));
 
+    // ── 1. WebGPU capability probe ──────────────────────────────────────────
+    // `'gpu' in navigator` only proves the API *surface* exists: some Chrome
+    // builds/OSes expose navigator.gpu while requestAdapter() still can't
+    // yield a usable backend — which is exactly the "status says setup() but
+    // the board stays blank" case. Probe the real path (adapter AND device)
+    // first, so an incompatible browser gets a clear answer instead of
+    // downloading 88 MB of WebAssembly and then silently failing.
+    setStatus('Checking WebGPU…');
+    let gpuOk = false;
     if (!('gpu' in navigator)) {
-      fail('WebGPU unavailable — use a current Chrome/Edge/Safari with WebGPU enabled.');
+      fail('This browser has no WebGPU.\n\nForetold renders with WebGPU — open it in a recent desktop Chrome or Edge (131 or newer) with WebGPU enabled, or a Safari build with WebGPU. Nothing to install — just a newer/compatible browser.');
     } else {
       try {
-        const { instantiate, MODULE_PATH } = await import('./instantiate.js');
-        const { WASI, OpenFile, File, ConsoleStdout } = await import('./wasi-shim.js');
-
-        const wasi = new WASI([], [], [
-          new OpenFile(new File([])),
-          ConsoleStdout.lineBuffered((m) => console.log('[swift]', m)),
-          ConsoleStdout.lineBuffered((m) => console.warn('[swift]', m)),
-        ]);
-
-        const { instance } = await instantiate({
-          module: fetch(new URL(MODULE_PATH, import.meta.url)),
-          addToCoreImports(imports) { imports['wasi_snapshot_preview1'] = wasi.wasiImport; },
-          instrumentInstance(inst) { wasi.initialize(inst); return inst; },
-        });
-
-        instance.exports.setup();
-        status.textContent = 'setup() called — board should render.';
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) {
+          fail('WebGPU is present, but this browser couldn\'t allocate a GPU device — its WebGPU backend is disabled or blocked here (unsupported GPU/driver, a policy setting, or a Chrome build without the backend).\n\nTry updating Chrome, check chrome://gpu for blocked GPU features, or use a different WebGPU-capable browser.');
+        } else {
+          const probe = await adapter.requestDevice(); // throws if no device can be created
+          probe.destroy();
+          gpuOk = true;
+        }
       } catch (e) {
-        fail(e && e.stack ? e.stack : e);
+        fail('WebGPU is present, but creating a GPU device failed: ' + msg(e) +
+             '\n\nTry updating Chrome, check chrome://gpu, or use a different WebGPU-capable browser.');
       }
     }
+    if (!gpuOk) throw new Error('WebGPU unavailable in this browser — not downloading the game.');
+
+    // ── 2. Load + boot the WASM game ────────────────────────────────────────
+    const { instantiate, MODULE_PATH } = await import('./instantiate.js');
+    const { WASI, OpenFile, File, ConsoleStdout } = await import('./wasi-shim.js');
+
+    const wasi = new WASI([], [], [
+      new OpenFile(new File([])),
+      ConsoleStdout.lineBuffered((m) => console.log('[swift]', m)),
+      ConsoleStdout.lineBuffered((m) => console.warn('[swift]', m)),
+    ]);
+
+    let instance;
+    try {
+      setStatus('Downloading game (≈88 MB)…');
+      const wasmResponse = await fetch(new URL(MODULE_PATH, import.meta.url));
+      if (!wasmResponse.ok) throw new Error('game download failed (HTTP ' + wasmResponse.status + ')');
+
+      setStatus('Compiling WebAssembly…');
+      ({ instance } = await instantiate({
+        module: wasmResponse,
+        addToCoreImports(imports) { imports['wasi_snapshot_preview1'] = wasi.wasiImport; },
+        instrumentInstance(inst) { wasi.initialize(inst); return inst; },
+      }));
+    } catch (e) {
+      fail('Failed to load the WebAssembly game: ' + msg(e));
+      throw e;
+    }
+
+    instance.exports.setup();
+
+    // The Swift bootstrap takes over this box next ("Requesting WebGPU
+    // device…" → "WebGPU renderer ready…" → hidden once the board renders).
+    // If this line is still on screen for a while, the game didn't come up —
+    // reload with ?log in the URL to see the console output on-page.
+    setStatus('Booting game — the board should appear shortly.');
   </script>
 </body>
 </html>

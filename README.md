@@ -14,7 +14,9 @@ outplaying it.
 
 Nothing to install — it just loads. Needs a WebGPU-capable browser (a current
 Chrome/Edge/Safari; Chrome recommended). The whole game runs client-side as
-WebAssembly.
+WebAssembly. If the page can't get a working WebGPU device it says exactly
+that in the status box instead of going blank — append `?log` to the URL to
+see the full console output on-page.
 
 There's nothing to read here to start: the game has a built-in interactive
 tutorial and hover tooltips for everything, so this README sticks to the
