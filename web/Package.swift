@@ -14,7 +14,11 @@ let package = Package(
     platforms: [.macOS(.v15)],
     dependencies: [
         .package(path: "../web-spike/Deps/OpenSpriteKit"),
-        .package(url: "https://github.com/swiftwasm/JavaScriptKit", from: "0.50.2"),
+        // Pinned to the minor we resolved against (Package.resolved: 0.56.1).
+        // An open `from:` range lets any 0.x in, so a JavaScriptKit release could
+        // change the CI build with no commit here — and 0.56 is where the faster
+        // Swift 6.4 bridging landed, so the pairing matters.
+        .package(url: "https://github.com/swiftwasm/JavaScriptKit", .upToNextMinor(from: "0.56.1")),
     ],
     targets: [
         .executableTarget(
