@@ -4,21 +4,28 @@
 # a static ./dist for local serving / Render.
 #
 # Prereqs (see README):
-#   1. Toolchain: install & select a Swift 6.4 dev snapshot via swiftly, e.g.
-#        swiftly install main-snapshot-2026-09-10 && swiftly use main-snapshot-2026-09-10
+#   1. Toolchain: install & select Swift 6.4 via swiftly, e.g.
+#        swiftly install 6.4 && swiftly use 6.4
 #      (swiftly puts the right `swift` on PATH — no TOOLCHAINS/xcrun needed).
-#   2. wasm SDK (must match the snapshot DATE):
-#        swift sdk install https://github.com/swiftwasm/swift/releases/download/\
-#          swift-wasm-DEVELOPMENT-SNAPSHOT-2026-09-10-a/\
-#          swift-wasm-DEVELOPMENT-SNAPSHOT-2026-09-10-a-wasm32-unknown-wasip1.artifactbundle.zip
-#        swift sdk list   # copy the exact name it prints into SWIFT_WASM_SDK below
+#   2. wasm SDK — first-party, from swift.org:
+#        swift sdk install https://download.swift.org/swift-6.4.0-release/wasm-sdk/\
+#          swift-6.4.0-RELEASE/swift-6.4.0-RELEASE_wasm.artifactbundle.tar.gz \
+#          --checksum f07b7be3c586d92d7a07051fc6d303b87ebea67eadc40640ba59d5a8b79aa86d
 #   3. ./fetch-deps.sh    (checks out OpenSpriteKit + siblings into Deps/)
 #
-# The SDK name changes per snapshot; override via env if `swift sdk list` differs.
+# Override SWIFT_WASM_SDK via env to force a specific id.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-: "${SWIFT_WASM_SDK:=DEVELOPMENT-SNAPSHOT-2026-09-10-a-wasm32-unknown-wasip1}"
+# The bundle installs two SDKs (full + Embedded Swift subset), both matching the
+# wasm32-unknown-wasip1 triple — pick the full one rather than letting SwiftPM guess.
+if [ -z "${SWIFT_WASM_SDK:-}" ]; then
+  SWIFT_WASM_SDK="$(swift sdk list 2>/dev/null | grep -i wasm | grep -vi embedded | head -1 | tr -d '[:space:]' || true)"
+fi
+if [ -z "${SWIFT_WASM_SDK:-}" ]; then
+  echo "!! No wasm Swift SDK found — see prereq 2 above." >&2
+  exit 1
+fi
 
 echo "== HelloScene → WASM =="
 echo "   swift:  $(swift --version 2>/dev/null | head -1)"
