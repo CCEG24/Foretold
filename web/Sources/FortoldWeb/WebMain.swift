@@ -19,6 +19,29 @@ private enum CanvasConfig {
 private var animationCallback: JSClosure?
 private var skRenderer: SKRenderer?
 private var gameScene: GameScene?
+private var didAnnounceFirstFrame = false
+
+/// Report the real outcome to the page.
+///
+/// `setup()` returns the instant it spawns its Task, so JS cannot tell whether
+/// rendering actually began — every interesting failure (no WebGPU adapter, no
+/// canvas) happens later, on a Task the caller's try/catch can't observe. The
+/// page installs `foretoldReady`/`foretoldFailed` for us to call instead, so a
+/// blank canvas reports a cause rather than "setup() called".
+private func report(failure message: String) {
+    _ = JSObject.global.console.error("FortoldWeb: \(message)")
+    if let fn = JSObject.global.foretoldFailed.function {
+        _ = fn(message)
+    }
+}
+
+private func reportFirstFrame() {
+    guard !didAnnounceFirstFrame else { return }
+    didAnnounceFirstFrame = true
+    if let fn = JSObject.global.foretoldReady.function {
+        _ = fn()
+    }
+}
 
 @_cdecl("getCanvasWidth")
 func getCanvasWidth() -> Int32 { Int32(CanvasConfig.width) }
@@ -36,7 +59,7 @@ func setup() {
 private func start() async {
     let document = JSObject.global.document
     guard let canvas = document.getElementById("canvas").object else {
-        _ = JSObject.global.console.error("FortoldWeb: canvas #canvas not found")
+        report(failure: "canvas #canvas not found")
         return
     }
 
@@ -44,7 +67,7 @@ private func start() async {
     do {
         try await renderer.initialize()
     } catch {
-        _ = JSObject.global.console.error("FortoldWeb: SKRenderer.initialize failed: \(String(describing: error))")
+        report(failure: "SKRenderer.initialize failed: \(String(describing: error))")
         return
     }
     renderer.resize(width: CanvasConfig.width, height: CanvasConfig.height)
@@ -70,6 +93,7 @@ private func start() async {
         let now = JSObject.global.performance.now().number ?? 0
         skRenderer?.update(atTime: (now - startTime) / 1000.0)
         skRenderer?.render()
+        reportFirstFrame()
         return .undefined
     }
     animationCallback = callback
