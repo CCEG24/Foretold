@@ -1,7 +1,7 @@
 # Render.com static-site config for the WASM spike.
 #
-# Realistic model: the exotic Swift 6.4-snapshot + SwiftWasm toolchain is NOT
-# available on Render's build image, so we do NOT build on Render. Build the
+# Realistic model: the Swift 6.4 + wasm-SDK toolchain is NOT available on
+# Render's build image, so we do NOT build on Render. Build the
 # WASM locally (or in GitHub Actions) with build.sh, commit the produced dist/
 # (or publish it as a CI artifact), and let Render serve it statically.
 #

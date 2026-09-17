@@ -4,7 +4,7 @@ A throwaway spike whose **only** job is to prove the toolchain chain works end t
 end before porting Foretold's real `GameScene`:
 
 ```
-Swift 6.4 snapshot + SwiftWasm SDK → OpenSpriteKit → WebGPU → Render static site
+Swift 6.4 + wasm SDK → OpenSpriteKit → WebGPU → Render static site
 ```
 
 Success = a rotating cyan square + a label rendered on a Render-hosted page.
@@ -30,18 +30,19 @@ Iterate locally; the only requirement is a static server that sets the COOP/COEP
 cross-origin-isolation headers.
 
 ```bash
-# 0. Toolchain — OpenSpriteKit needs Swift 6.4 (dev snapshot). Use swiftly:
+# 0. Toolchain — OpenSpriteKit needs Swift 6.4. Use swiftly:
 curl -O https://download.swift.org/swiftly/darwin/swiftly.pkg && \
   installer -pkg swiftly.pkg -target CurrentUserHomeDirectory && \
   ~/.swiftly/bin/swiftly init --quiet-shell-followup && \
   . "${SWIFTLY_HOME_DIR:-$HOME/.swiftly}/env.sh" && hash -r
-swiftly install main-snapshot-2026-09-10   # 6.4-dev; bump to a current date if pruned
-swiftly use     main-snapshot-2026-09-10
+swiftly install 6.4
+swiftly use     6.4
 
-# 1. wasm SDK — MUST match the snapshot date above:
+# 1. wasm SDK — first-party from swift.org (6.4 ships one; no swiftwasm fork needed):
 swift sdk install \
-  https://github.com/swiftwasm/swift/releases/download/swift-wasm-DEVELOPMENT-SNAPSHOT-2026-09-10-a/swift-wasm-DEVELOPMENT-SNAPSHOT-2026-09-10-a-wasm32-unknown-wasip1.artifactbundle.zip
-swift sdk list   # copy the name into SWIFT_WASM_SDK if it differs from the default
+  https://download.swift.org/swift-6.4.0-release/wasm-sdk/swift-6.4.0-RELEASE/swift-6.4.0-RELEASE_wasm.artifactbundle.tar.gz \
+  --checksum f07b7be3c586d92d7a07051fc6d303b87ebea67eadc40640ba59d5a8b79aa86d
+swift sdk list   # installs TWO sdks (full + Embedded Swift); build.sh picks the full one
 
 # 2. Build + serve:
 cd web-spike
@@ -83,12 +84,13 @@ not a formality:
    `try await initialize()` + `resize()`, `scene.didMove(to: SKView())`, and a
    `requestAnimationFrame` loop calling `update(atTime:)` + `render()`. Still
    verify at build — API signatures could drift.
-4. **Toolchain: needs Swift 6.4 (dev snapshot).** OpenSpriteKit's `Package.swift`
-   is `swift-tools-version:6.4.0`, so Xcode's released Swift (6.3.x) refuses to
-   even read it. Install a 6.4 snapshot via **swiftly** (`main-snapshot-<date>`)
-   and a **date-matched** swiftwasm SDK. Snapshots get pruned over time — if
-   `2026-09-10` is gone, pick a current one and use the same date for both the
-   toolchain and the wasm SDK.
+4. **Toolchain: needs Swift 6.4 — RESOLVED.** OpenSpriteKit's `Package.swift` is
+   `swift-tools-version:6.4.0`, which for a while meant a `main-snapshot-<date>`
+   toolchain plus a date-matched swiftwasm SDK, because 6.4 hadn't shipped. Swift
+   6.4 is now released and ships a first-party wasm SDK from swift.org, so both
+   halves of that workaround are gone: pin `swiftly install 6.4` and the release
+   SDK above. No more snapshot pruning breaking CI, and the same compiler builds
+   the mac target (Xcode 27 = Swift 6.4) and the web target.
 5. **No build on Render.** Render's build image won't have this toolchain, so build
    locally / in CI and let Render serve a prebuilt `dist/`.
 6. **Text rendering.** OpenSpriteKit flags typographic-shaping gaps in software
