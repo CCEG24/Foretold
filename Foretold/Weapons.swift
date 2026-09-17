@@ -351,7 +351,7 @@ extension Weapon {
     /// Lob it at a cluster: everyone caught in the diamond takes a light hit and
     /// is dragged one tile toward the eye — onto live spikes, into a barrel, into
     /// a tight knot for your next swing, or off the tile they'd telegraphed.
-    static let vortex = Weapon(name: "Vortex", moveRange: 2, damage: 1, cooldown: 1, enemyHealth: 2, isRanged: true, vortex: true, thrown: Thrown(range: 5, blastRadius: 2, flightTurns: 0))
+    static let vortex = Weapon(name: "Vortex", moveRange: 2, damage: 1, cooldown: 2, enemyHealth: 2, isRanged: true, vortex: true, thrown: Thrown(range: 5, blastRadius: 2, flightTurns: 0))
     /// A dev-only toy: kept out of `all`, loot, and milestones, so it can only
     /// be handed out through the dev panel's weapon cycler.
     static let hi = Weapon(name: "Wrath of God", moveRange: 30, damage: 20, enemyHealth: 1, attackPattern: .hi)

@@ -120,14 +120,14 @@ extension Buff {
     static let whetstone = Buff(name: "+1 dmg", levelDuration: 1, bonusDamage: 1)
     static let hardenedArmour = Buff(name: "+1 max armour", levelDuration: 1, instantArmorRepair: 1, bonusArmor: 1)
     // Rule/effect boons — change how the run plays, not the numbers.
-    static let quickHands = Buff(name: "Quick Hands · free swaps", levelDuration: 3, stackable: false, freeSwap: true)
-    static let rampage = Buff(name: "Rampage · a kill shaves your reload", levelDuration: 3, stackable: false, killRefundsCooldown: true)
-    static let sureFeet = Buff(name: "Sure Feet · dodge on a 1-tile move", levelDuration: 3, stackable: false, dodgeAtOne: true)
-    static let aftershock = Buff(name: "Aftershock · a dodge repairs 1 armour", levelDuration: 3, stackable: false, dodgeRepairsArmor: true)
-    static let executioner = Buff(name: "Executioner · kills charge the omen ×2", levelDuration: 3, stackable: false, killChargesExtra: true)
+    static let quickHands = Buff(name: "Quick Hands · free swaps", levelDuration: 2, stackable: false, freeSwap: true)
+    static let rampage = Buff(name: "Rampage · a kill shaves your reload", levelDuration: 2, stackable: false, killRefundsCooldown: true)
+    static let sureFeet = Buff(name: "Sure Feet · dodge on a 1-tile move", levelDuration: 2, stackable: false, dodgeAtOne: true)
+    static let aftershock = Buff(name: "Aftershock · a dodge repairs 1 armour", levelDuration: 2, stackable: false, dodgeRepairsArmor: true)
+    static let executioner = Buff(name: "Executioner · kills charge the omen ×2", levelDuration: 2, stackable: false, killChargesExtra: true)
     static let deadeye = Buff(name: "Deadeye · your shots pierce", levelDuration: 3, stackable: false, piercingShots: true)
-    static let bloodthirst = Buff(name: "Bloodthirst · every 3rd kill heals 1 HP", levelDuration: 3, stackable: false, killHeals: true)
-    static let thorns = Buff(name: "Thorns · melee attackers take 1", levelDuration: 3, stackable: false, retaliation: true)
+    static let bloodthirst = Buff(name: "Bloodthirst · every 3rd kill heals 1 HP", levelDuration: 1, stackable: false, killHeals: true)
+    static let thorns = Buff(name: "Thorns · melee attackers take 1", levelDuration: 2, stackable: false, retaliation: true)
     static let siegecraft = Buff(name: "Siegecraft · your blows shatter any wall", levelDuration: 3, stackable: false, siege: true)
     /// The pool level-ups draw from.
     static let all: [Buff] = [
