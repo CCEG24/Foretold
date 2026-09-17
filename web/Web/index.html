@@ -64,15 +64,40 @@
 
   <script type="module">
     const status = document.getElementById('status');
-    const fail = (m) => { status.textContent = String(m); status.className = 'err'; console.error(m); };
-    const note = (m) => { status.textContent = String(m); status.className = ''; console.log(m); };
+
+    // Same switch as the console-mirror panel above: `?log` in the URL. One flag
+    // for all debug surfaces, so there's only one thing to remember when you're
+    // typing a URL by hand on someone else's machine.
+    const DEBUG = /[?&]log\b/.test(location.search);
+
+    // What a normal player sees. Anything more specific is diagnostics.
+    const GENERIC_FAILURE = "Foretold couldn't start on this machine.";
+    const NO_WEBGPU = 'Foretold needs WebGPU — try a recent Chrome or Edge.';
+
+    // Progress chatter is debug-only — in production the status line stays
+    // hidden and the canvas is the whole page.
+    const note = (m) => { console.log(m); if (DEBUG) { status.textContent = String(m); status.className = ''; } };
+    const hideStatus = () => { if (!DEBUG) status.style.display = 'none'; };
+
+    // Failures always surface — a silently blank page is the one outcome worth
+    // avoiding. Production gets the short human line; `detail` (internals, flag
+    // lists, stack traces) is for `?log` only, but always goes to the console so
+    // it's recoverable from a bug report.
+    const fail = (short, detail) => {
+      console.error(short + (detail ? '\n' + detail : ''));
+      status.style.display = '';
+      status.className = 'err';
+      status.textContent = DEBUG && detail
+        ? short + '\n\n' + detail
+        : short + '\n(add ?log to the URL for diagnostics)';
+    };
 
     // WebMain.swift calls these once it knows the real outcome. setup() returns
     // as soon as it spawns its Task, so the page must NOT treat that as success —
     // adapter/canvas failures surface later, off the call stack we can catch.
     let settled = false;
-    window.foretoldReady = () => { settled = true; note('rendering'); };
-    window.foretoldFailed = (m) => { settled = true; fail('Renderer failed: ' + m); };
+    window.foretoldReady = () => { settled = true; note('rendering'); hideStatus(); };
+    window.foretoldFailed = (m) => { settled = true; fail(GENERIC_FAILURE, 'Renderer failed: ' + m); };
 
     const FLAG_HELP = [
       'Open chrome://gpu and read the WebGPU line for the blocklist reason, then try:',
@@ -88,14 +113,15 @@
     // blocklisted driver, or an RDP/VM session with no real GPU.
     async function probeAdapter() {
       if (!('gpu' in navigator)) {
-        return { ok: false, why: 'navigator.gpu is missing — this browser exposes no WebGPU at all.\n' + FLAG_HELP };
+        return { ok: false, short: NO_WEBGPU,
+                 detail: 'navigator.gpu is missing — this browser exposes no WebGPU at all.\n' + FLAG_HELP };
       }
       let adapter = null, threw = null;
       try { adapter = await navigator.gpu.requestAdapter(); } catch (e) { threw = e; }
       if (adapter) return { ok: true, adapter };
 
-      // Does a software adapter exist? If so the flags above are worth setting;
-      // if not, nothing on this machine can render and that's worth saying plainly.
+      // Does a software adapter exist? If so the flags are worth setting; if not,
+      // nothing on this machine can render and that's worth saying plainly.
       let fallback = null;
       try { fallback = await navigator.gpu.requestAdapter({ forceFallbackAdapter: true }); } catch {}
       const head = threw
@@ -104,12 +130,12 @@
       const mid = fallback
         ? 'A software (fallback) adapter IS available, so the flags below should get it rendering.'
         : 'No adapter at all, not even software.';
-      return { ok: false, why: head + '\n' + mid + '\n' + FLAG_HELP };
+      return { ok: false, short: NO_WEBGPU, detail: head + '\n' + mid + '\n' + FLAG_HELP };
     }
 
     const probe = await probeAdapter();
     if (!probe.ok) {
-      fail(probe.why);
+      fail(probe.short, probe.detail);
     } else {
       let desc = '';
       try {
@@ -144,12 +170,13 @@
         note('setup() called — waiting for first frame…');
         setTimeout(() => {
           if (!settled) {
-            fail('setup() returned but no frame rendered within 10s and the renderer '
-               + 'reported nothing. Reload with ?log to see Swift stdout/stderr.');
+            fail(GENERIC_FAILURE,
+                 'setup() returned but no frame rendered within 10s and the renderer '
+               + 'reported nothing — neither foretoldReady nor foretoldFailed fired.');
           }
         }, 10000);
       } catch (e) {
-        fail(e && e.stack ? e.stack : e);
+        fail(GENERIC_FAILURE, e && e.stack ? e.stack : String(e));
       }
     }
   </script>
