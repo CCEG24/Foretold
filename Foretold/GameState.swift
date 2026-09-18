@@ -4130,8 +4130,16 @@ struct GameState {
         }
 
         // Walled in (Barricades or just cornered): an enemy that can't advance
-        // and isn't attacking smashes the crumbling wall between it and the
+        // and isn't attacking breaks the crumbling wall between it and the
         // player, opening a path to move through next turn.
+        //
+        // If its weapon can reach the wall it swings for real, so the whole
+        // pattern lands: an arc takes out the walls to either side and a
+        // surrounding swing (hammer, greataxe) clears everything boxing it in
+        // at once, rather than picking off one tile a turn. A thrust still only
+        // gets the wall in front — `sweep` stops a line pattern dead on a wall
+        // whether it pierces or not. Weapons that can't reach it at all (see
+        // `wallSmashDirection`) fall back to the old one-tile dig.
         for index in enemies.indices {
             enemies[index].plannedDigTile = nil
             let enemy = enemies[index]
@@ -4146,12 +4154,43 @@ struct GameState {
                 ? [GridPosition(x: from.x + dx, y: from.y), GridPosition(x: from.x, y: from.y + dy)]
                 : [GridPosition(x: from.x, y: from.y + dy), GridPosition(x: from.x + dx, y: from.y)]
             for candidate in candidates where candidate != from && contains(candidate) {
-                if let wall = obstacle(at: candidate), wall.kind == .wall, wall.destructible {
+                guard let wall = obstacle(at: candidate), wall.kind == .wall, wall.destructible
+                else { continue }
+                if let swing = wallSmashDirection(for: enemy, at: candidate) {
+                    enemies[index].plannedDirection = swing
+                } else {
                     enemies[index].plannedDigTile = candidate
-                    break
                 }
+                break
             }
         }
+    }
+
+    /// The facing an enemy swings on to smash the crumbling wall at `tile`, or
+    /// nil when its weapon can't do the job and it should fall back to the
+    /// one-tile dig.
+    ///
+    /// The test that decides it is simply whether the weapon's own pattern
+    /// covers the wall. A thrust does, and so does a swing that wraps the
+    /// attacker (the hammer's surround, the greataxe's circle) — those break it
+    /// whichever way they face. A scythe's ring only bites at range 2, and an
+    /// arc sweeps *around* the tile straight ahead, so neither can touch a wall
+    /// it's standing against; letting the shape answer for itself sorts them
+    /// out without hardcoding a list of weapons.
+    ///
+    /// Ruled out up front: a weapon still reloading, which has no swing to give
+    /// this turn; a pure thrower with no pattern at all; and a bursting shot
+    /// (cannon, explosive crossbow), whose blast at one tile's range would land
+    /// squarely on the attacker.
+    private func wallSmashDirection(for enemy: Enemy, at tile: GridPosition) -> Direction? {
+        guard enemy.cooldownRemaining == 0,
+              enemy.weapon.impactBlastRadius == 0,
+              let pattern = enemy.weapon.attackPattern,
+              let facing = Direction.aiming(from: enemy.position, toward: tile,
+                                            allowDiagonals: pattern.supportsDiagonals),
+              pattern.tiles(from: enemy.position, facing: facing).contains(tile)
+        else { return nil }
+        return facing
     }
 
     /// Total impact damage the airborne lobs would deal to a body ending on
