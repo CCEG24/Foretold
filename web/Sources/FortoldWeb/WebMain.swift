@@ -35,6 +35,19 @@ private func report(failure message: String) {
     }
 }
 
+/// Names the step about to run, for the page's watchdog.
+///
+/// `report(failure:)` only covers failures Swift can observe. A JavaScript
+/// exception crossing the wasm boundary (a browser rejecting a WebGPU
+/// configuration, say) unwinds the instance instead, so nothing gets reported
+/// and the page can only say "neither callback fired". Naming each step before
+/// it runs lets the watchdog point at the one that never finished.
+private func stage(_ name: String) {
+    if let fn = JSObject.global.foretoldStage.function {
+        _ = fn(name)
+    }
+}
+
 private func reportFirstFrame() {
     guard !didAnnounceFirstFrame else { return }
     didAnnounceFirstFrame = true
@@ -57,12 +70,14 @@ func setup() {
 
 @MainActor
 private func start() async {
+    stage("canvas")
     let document = JSObject.global.document
     guard let canvas = document.getElementById("canvas").object else {
         report(failure: "canvas #canvas not found")
         return
     }
 
+    stage("renderer-init")
     let renderer = SKRenderer(canvas: canvas)
     do {
         try await renderer.initialize()
@@ -72,6 +87,7 @@ private func start() async {
     }
     renderer.resize(width: CanvasConfig.width, height: CanvasConfig.height)
 
+    stage("scene")
     let scene = GameScene(size: CGSize(width: CanvasConfig.width, height: CanvasConfig.height))
     scene.scaleMode = .aspectFit
     renderer.scene = scene
@@ -82,9 +98,11 @@ private func start() async {
     gameScene = scene
 
     // Route browser pointer/keyboard/wheel events into GameScene's shared handlers.
+    stage("input")
     installInput(scene: scene, canvas: canvas,
                  width: Double(CanvasConfig.width), height: Double(CanvasConfig.height))
 
+    stage("first-frame")
     let startTime = JSObject.global.performance.now().number ?? 0
     let callback = JSClosure { _ in
         if let cb = animationCallback {

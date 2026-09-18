@@ -4,7 +4,8 @@ Bugs found porting a real SpriteKit game (Foretold) to WASM via OpenSpriteKit.
 Each is currently worked around by a local patch in `web/patches/` applied by
 `web-spike/fetch-deps.sh`. Filing these upstream (github.com/1amageek) is the path
 off the vendored fork. Repro context: Swift `main-snapshot-2026-09-10`, wasm SDK
-`…-2026-09-10-a-wasm32-unknown-wasip1`, Chrome/WebGPU.
+`…-2026-09-10-a-wasm32-unknown-wasip1`, Chrome/WebGPU — except issue #9, which
+only reproduces in Firefox.
 
 ---
 
@@ -196,3 +197,49 @@ weights, compound names matched before their substrings; `Italic`/`Oblique` → 
 original name kept as a secondary family for engines that do resolve PostScript
 names; generic family last). The same helper is reused for measurement so layout
 and rasterization agree.
+
+---
+
+## 9. [OpenCoreAnimation + swift-webgpu] The hardcoded `rgba16float` canvas kills the whole wasm instance in Firefox
+
+**Repo:** OpenCoreAnimation · **File:** `Sources/OpenCoreAnimation/CAWebGPURenderer.swift`
+(`initialize`, `configureCanvas`) — and swift-webgpu `Sources/SwiftWebGPU/GPUCanvasContext.swift`
+
+`initialize()` hardcodes the canvas format:
+
+```swift
+// Float16 storage is required to preserve values above SDR white until
+// browser presentation.
+preferredFormat = .rgba16float
+```
+
+`rgba16float` is a legal canvas format per spec, but Firefox hasn't implemented it
+and `configure()` raises a **TypeError** for it
+(<https://bugzilla.mozilla.org/show_bug.cgi?id=1834395>). swift-webgpu's
+`configure(_:)` calls through JavaScriptKit's *non-throwing* path
+(`jsObject.configure!(…)`), so that exception isn't an error the caller can see —
+it unwinds the WebAssembly instance. The `Task` running `initialize()` dies
+mid-flight, every `await` after it is abandoned, and the host page gets no
+callback at all: not success, not failure, just silence. Any app that reports its
+boot outcome from Swift therefore looks *hung* rather than broken, which is the
+expensive part — the actual cause never reaches a log.
+
+**Repro:** load any OpenSpriteKit scene in Firefox 141+ on Windows (WebGPU on,
+adapter acquired). `SKRenderer.initialize()` never returns and never throws.
+
+**Expected:** `configureCanvas()` already returns `Bool`, which promises the caller
+a recoverable failure — it can't deliver one while the underlying call is
+non-throwing. A format the browser doesn't implement should be a `false`, not an
+instance teardown.
+
+**Fix (implemented locally):** swift-webgpu gains `configureThrowing(_:)`
+(`try jsObject.throwing.configure!(…)`), `configureCanvas()` catches and returns
+`false`, and `initialize()` retries once with `gpu.preferredCanvasFormat` before
+giving up. Every pipeline targets `preferredFormat` and the readback path already
+handles both 8- and 16-bit widths, so the fallback is a complete configuration —
+just standard-dynamic-range only. Worth considering upstream whether float16
+should be requested at all when nothing in the tree asks for extended range.
+
+> Related: Firefox reports no `toneMapping` from `getConfiguration()`, which the
+> existing `supportsExtendedDynamicRangeOutput` probe already reads correctly as
+> "no EDR" — that part degrades cleanly.

@@ -1,0 +1,23 @@
+diff --git a/Sources/SwiftWebGPU/GPUCanvasContext.swift b/Sources/SwiftWebGPU/GPUCanvasContext.swift
+index e4452a5..be77dbe 100644
+--- a/Sources/SwiftWebGPU/GPUCanvasContext.swift
++++ b/Sources/SwiftWebGPU/GPUCanvasContext.swift
+@@ -39,6 +39,18 @@ public final class GPUCanvasContext {
+         _ = jsObject.configure!(configuration.toJSObject())
+     }
+ 
++    /// Configures the canvas context, rethrowing a rejection from the browser.
++    ///
++    /// `configure(_:)` calls through JavaScriptKit's non-throwing path, so the
++    /// `TypeError` an implementation raises for a configuration it doesn't
++    /// support — an `rgba16float` canvas is still unimplemented in Firefox
++    /// (bugzilla 1834395) — unwinds the WebAssembly instance instead of
++    /// returning. A caller that can fall back to a narrower configuration has
++    /// to be able to catch that.
++    public func configureThrowing(_ configuration: GPUCanvasConfiguration) throws {
++        _ = try jsObject.throwing.configure!(configuration.toJSObject())
++    }
++
+     /// Unconfigures the canvas context.
+     public func unconfigure() {
+         _ = jsObject.unconfigure!()

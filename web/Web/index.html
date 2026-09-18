@@ -99,6 +99,28 @@
     window.foretoldReady = () => { settled = true; note('rendering'); hideStatus(); };
     window.foretoldFailed = (m) => { settled = true; fail(GENERIC_FAILURE, 'Renderer failed: ' + m); };
 
+    // Breadcrumbs from start(), so a boot that dies without reporting still says
+    // where. A JavaScript exception thrown into WASM (a browser rejecting a
+    // WebGPU configuration, say) unwinds the instance rather than returning an
+    // error, which is how "neither callback fired" happens.
+    const stages = [];
+    window.foretoldStage = (s) => { stages.push(String(s)); note('stage: ' + s); };
+    const trail = () => stages.length
+      ? 'Stages started: ' + stages.join(' → ') + ' (last one never finished)'
+      : 'No stage was reached — setup() died before its first step.';
+
+    // An uncaught exception or rejection IS the diagnosis in that case, and it
+    // arrives on the event loop where nothing is watching for it. Only the first
+    // one matters: a torn-down instance tends to throw again on every frame.
+    const reportUncaught = (what, err) => {
+      if (settled) return;
+      settled = true;
+      const detail = err && err.stack ? err.stack : String(err);
+      fail(GENERIC_FAILURE, what + ' ' + detail + '\n\n' + trail() + '\n' + navigator.userAgent);
+    };
+    window.addEventListener('error', (e) => reportUncaught('Uncaught error:', e.error ?? e.message));
+    window.addEventListener('unhandledrejection', (e) => reportUncaught('Unhandled rejection:', e.reason));
+
     const FLAG_HELP = [
       'Open chrome://gpu and read the WebGPU line for the blocklist reason, then try:',
       '  chrome://flags/#enable-unsafe-webgpu       (Unsafe WebGPU Support)',
@@ -172,7 +194,8 @@
           if (!settled) {
             fail(GENERIC_FAILURE,
                  'setup() returned but no frame rendered within 10s and the renderer '
-               + 'reported nothing — neither foretoldReady nor foretoldFailed fired.');
+               + 'reported nothing — neither foretoldReady nor foretoldFailed fired.\n\n'
+               + trail() + '\n' + navigator.userAgent);
           }
         }, 10000);
       } catch (e) {

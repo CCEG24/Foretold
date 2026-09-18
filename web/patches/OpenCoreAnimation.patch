@@ -16,10 +16,57 @@ index e1d55a9..d9b24bd 100644
              guard oldValue != allowsGroupOpacity else { return }
              markDirty(.appearance)
 diff --git a/Sources/OpenCoreAnimation/CAWebGPURenderer.swift b/Sources/OpenCoreAnimation/CAWebGPURenderer.swift
-index 17840e5..eca3d67 100644
+index 17840e5..81cd9da 100644
 --- a/Sources/OpenCoreAnimation/CAWebGPURenderer.swift
 +++ b/Sources/OpenCoreAnimation/CAWebGPURenderer.swift
-@@ -14092,10 +14092,10 @@ private final class CommittedAnimationEvaluationFailure {
+@@ -2338,8 +2338,17 @@ private final class CommittedAnimationEvaluationFailure {
+         }
+         context = GPUCanvasContext(jsObject: ctxObject)
+ 
+-        guard configureCanvas(toneMappingMode: .standard) else {
+-            throw CARendererError.canvasNotConfigured
++        if !configureCanvas(toneMappingMode: .standard) {
++            // A float16 canvas is optional in practice: Firefox rejects one
++            // outright (bugzilla 1834395). Fall back to whatever format the
++            // browser prefers — every pipeline below targets `preferredFormat`
++            // and the readback path already handles both widths, so this is a
++            // complete configuration rather than a degraded one, just limited
++            // to standard dynamic range.
++            preferredFormat = gpu.preferredCanvasFormat
++            guard configureCanvas(toneMappingMode: .standard) else {
++                throw CARendererError.canvasNotConfigured
++            }
+         }
+ 
+         // Create shader module
+@@ -4239,12 +4248,20 @@ private final class CommittedAnimationEvaluationFailure {
+     /// successful in that case.
+     private func configureCanvas(toneMappingMode: GPUCanvasToneMappingMode) -> Bool {
+         guard let device, let context else { return false }
+-        context.configure(GPUCanvasConfiguration(
+-            device: device,
+-            format: preferredFormat,
+-            usage: [.renderAttachment, .copySrc],
+-            toneMapping: GPUCanvasToneMapping(mode: toneMappingMode)
+-        ))
++        do {
++            try context.configureThrowing(GPUCanvasConfiguration(
++                device: device,
++                format: preferredFormat,
++                usage: [.renderAttachment, .copySrc],
++                toneMapping: GPUCanvasToneMapping(mode: toneMappingMode)
++            ))
++        } catch {
++            // A format the browser hasn't implemented arrives as a TypeError,
++            // and an uncaught JavaScript exception tears down the WebAssembly
++            // instance. Reporting it as "not configured" lets the caller retry
++            // with something narrower.
++            return false
++        }
+ 
+         let reportedMode = context.getConfiguration()?.toneMapping?.mode
+         supportsExtendedDynamicRangeOutput = reportedMode != nil
+@@ -14092,10 +14109,10 @@ private final class CommittedAnimationEvaluationFailure {
                  Double(configuration.contentsScale)
              )
  
