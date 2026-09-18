@@ -309,7 +309,6 @@ struct GameState {
     static let ultimateDamage = 5
     /// Kills needed to charge the ultimate. Its own smite kills don't count
     /// toward the next charge.
-    static let ultimateChargeKills = 10
     /// Points for surviving a turn.
     static let survivalScore = 1
     /// Waves stop delivering fresh barrels while this many are on the board.
@@ -523,6 +522,16 @@ struct GameState {
     /// Kills banked toward the ultimate; it fires once this reaches
     /// ultimateChargeKills.
     private(set) var ultimateKillCharge = 0
+    /// The omen carried this run, chosen at the draft. Drives both the effect
+    /// the ultimate fires and how many kills charge it.
+    var omen: Omen = .smite
+    /// Turns left on Quickening's free-reload window (0 = weapons reload as normal).
+    private(set) var freeReloadTurns = 0
+
+    /// Kills needed to charge this run's omen — the omen's own cost, not a
+    /// global. Reads as an instance value so call sites can't accidentally
+    /// price one omen at another's rate.
+    var ultimateChargeKills: Int { omen.chargeKills }
     /// Lobbed shots currently in the air, impact zones telegraphed.
     private(set) var projectiles: [Projectile] = []
     /// Arrows and cannonballs currently traveling their lines.
@@ -591,7 +600,7 @@ struct GameState {
     /// Turns before the given carried weapon can attack again; 0 means ready.
     /// Dev no-cooldown reports every weapon as ready so it can be fired each turn.
     func attackCooldownRemaining(of weapon: Weapon) -> Int {
-        devNoCooldown ? 0 : (weaponCooldowns[weapon.name] ?? 0)
+        (devNoCooldown || freeReloadTurns > 0) ? 0 : (weaponCooldowns[weapon.name] ?? 0)
     }
 
     /// A player weapon's reload with this run's conditions applied (Quickdraw
@@ -1743,7 +1752,7 @@ struct GameState {
     @discardableResult
     mutating func planUltimate() -> Bool {
         guard !isGameOver, pendingBuffChoices.isEmpty, !weaponSwapCostsAttack,
-              ultimateKillCharge >= Self.ultimateChargeKills else { return false }
+              ultimateKillCharge >= ultimateChargeKills else { return false }
         plannedUltimate = true
         plannedAttackDirection = nil
         plannedThrowTarget = nil
@@ -2139,14 +2148,42 @@ struct GameState {
             && (plannedUltimate || plannedBash || plannedAttackDirection != nil || plannedThrowTarget != nil)
         if playerStunTurns > 0 { playerStunTurns -= 1 }
 
-        // The ultimate smites every enemy on the board at once, wherever they
-        // ended up after moving.
+        // The omen goes off, whichever one this run carries. `ultimateTiles` is
+        // what it touched, so the scene knows where to throw the shockwave —
+        // bodies for Smite and Stillness, barrels for Detonation, the player
+        // for Quickening, which lands on nobody but them.
         var ultimateTiles: [GridPosition] = []
-        let ultimateFired = plannedUltimate && !actionStunned
-        if ultimateFired {
-            ultimateTiles = enemies.map(\.position)
+        var omenFired: Omen?
+        if plannedUltimate && !actionStunned {
+            omenFired = omen
             ultimateKillCharge = 0
-            playerPhaseHits += damageEnemies(on: Set(ultimateTiles), damage: Self.ultimateDamage, chargesUltimate: false)
+            switch omen {
+            case .smite:
+                ultimateTiles = enemies.map(\.position)
+                playerPhaseHits += damageEnemies(on: Set(ultimateTiles), damage: Self.ultimateDamage, chargesUltimate: false)
+            case .detonation:
+                // Every barrel at once. detonateBarrels already chains and
+                // credits, and it can catch the player — standing in your own
+                // blast is the cost of pressing it at the wrong moment.
+                let barrels = Set(obstacles.filter { $0.kind == .barrel }.map(\.position))
+                ultimateTiles = Array(barrels)
+                let blast = detonateBarrels(struckTiles: barrels)
+                playerExplosions += blast.explosions
+                playerPhaseHits += blast.hits
+            case .stillness:
+                // No damage at all: every enemy simply loses its turns. The
+                // daze shows through planning, so the freeze is readable.
+                ultimateTiles = enemies.map(\.position)
+                for index in enemies.indices {
+                    enemies[index].stunTurns = max(enemies[index].stunTurns, omen.duration)
+                }
+            case .quickening:
+                // +1 because this turn's tick has already run by the time the
+                // window opens, so a bare `duration` would buy a turn less than
+                // it promises.
+                ultimateTiles = [playerPosition]
+                freeReloadTurns = omen.duration + 1
+            }
         }
         plannedUltimate = false
         let bashing = plannedBash && !actionStunned
@@ -2306,7 +2343,7 @@ struct GameState {
 
         // Moving far without attacking (or grabbing a weapon) earns one dodge:
         // the first enemy hit this turn misses.
-        var dodgeCharges = (!didAttack && pickedUp == nil && !ultimateFired && !weaponSwapCostsAttack
+        var dodgeCharges = (!didAttack && pickedUp == nil && omenFired == nil && !weaponSwapCostsAttack
             && playerStart.distance(to: playerPosition) >= effectiveDodgeDistance) ? 1 : 0
 
         var enemyAttacks: [TurnResolution.EnemyAttack] = []
@@ -2721,6 +2758,10 @@ struct GameState {
         for name in weaponCooldowns.keys {
             weaponCooldowns[name] = max(0, (weaponCooldowns[name] ?? 0) - 1)
         }
+        // Quickening burns down alongside the reloads it's suppressing. The
+        // real cooldowns keep ticking underneath, so weapons aren't left hot
+        // the moment the window shuts.
+        if freeReloadTurns > 0 { freeReloadTurns -= 1 }
         // The jab doesn't restart the reload — the real weapon keeps counting.
         if didAttack && !bashing {
             // Rampage: a kill this turn shaves a turn off the reload.
@@ -2789,6 +2830,7 @@ struct GameState {
             playerShoveTo: playerShoveTo,
             attackTiles: attackTiles,
             ultimateTiles: ultimateTiles,
+            omenFired: omenFired,
             enemyHits: playerPhaseHits,
             playerExplosions: playerExplosions,
             shoves: shoves,
@@ -2866,7 +2908,7 @@ struct GameState {
                     // always costs the whole ten-kill climb. Executioner doubles
                     // the charge each kill grants.
                     let gain = buffs.contains(where: \.killChargesExtra) ? 2 : 1
-                    ultimateKillCharge = min(ultimateKillCharge + gain, Self.ultimateChargeKills)
+                    ultimateKillCharge = min(ultimateKillCharge + gain, ultimateChargeKills)
                     // Lifelink / Bloodthirst: every third kill mends a point.
                     if rules.killHeals || buffs.contains(where: \.killHeals) {
                         lifelinkKills += 1
@@ -3824,7 +3866,7 @@ struct GameState {
     }
 
     mutating func devSetUltimateCharge(_ value: Int) {
-        ultimateKillCharge = max(0, min(Self.ultimateChargeKills, value))
+        ultimateKillCharge = max(0, min(ultimateChargeKills, value))
     }
 
     mutating func devHealFully() {

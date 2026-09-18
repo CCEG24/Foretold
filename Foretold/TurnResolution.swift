@@ -90,8 +90,11 @@ struct TurnResolution {
     /// Tiles the player's attack covered — a directional sweep or a throw's
     /// blast; empty when no attack was drafted.
     let attackTiles: [GridPosition]
-    /// Enemy tiles smitten by the ultimate this turn.
+    /// Tiles the omen touched this turn — bodies for Smite and Stillness,
+    /// barrels for Detonation, the player's own tile for Quickening.
     let ultimateTiles: [GridPosition]
+    /// Which omen went off, or nil if none did.
+    let omenFired: Omen?
     /// Enemies damaged during the player's phase (weapon and explosions).
     let enemyHits: [EnemyHit]
     let playerExplosions: [Explosion]

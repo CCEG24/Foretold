@@ -137,6 +137,66 @@ extension Buff {
     ]
 }
 
+// MARK: - Omens
+
+/// The ultimate the player carries for the run, chosen at the draft. Each is a
+/// different verb rather than a different number — damage, board state, tempo,
+/// freedom — so the pick shapes how a run is played rather than how hard it
+/// hits. The charge cost rides along with the omen: a cheap omen is one you
+/// lean on, an expensive one is a run-defining moment.
+///
+/// `smite` is the starter and keeps the original board-wide behaviour, so an
+/// existing run plays exactly as it did before omens were selectable.
+enum Omen: String, CaseIterable {
+    /// The sky falls on every enemy, wherever they stand.
+    case smite
+    /// Every barrel on the board goes off at once, chaining as usual.
+    case detonation
+    /// Every enemy is frozen solid — no move, no attack — for two turns.
+    case stillness
+    /// Both carried weapons ignore their reload for two turns.
+    case quickening
+
+    var title: String {
+        switch self {
+        case .smite: return "Smite"
+        case .detonation: return "Detonation"
+        case .stillness: return "Stillness"
+        case .quickening: return "Quickening"
+        }
+    }
+
+    var blurb: String {
+        switch self {
+        case .smite: return "the sky falls on every enemy at once"
+        case .detonation: return "every barrel on the board goes off"
+        case .stillness: return "every enemy freezes for two turns"
+        case .quickening: return "your weapons ignore their reload for two turns"
+        }
+    }
+
+    /// Kills needed to charge it.
+    var chargeKills: Int {
+        switch self {
+        case .smite, .stillness: return 10
+        case .detonation, .quickening: return 5
+        }
+    }
+
+    /// Turns the effect lingers for, where that applies.
+    var duration: Int {
+        switch self {
+        case .stillness, .quickening: return 2
+        case .smite, .detonation: return 0
+        }
+    }
+
+    /// The order the draft cycles them in: the blunt, legible one first, the
+    /// ones that need you to read the board last. Unlocks are expected to
+    /// follow the same order.
+    static let ordered: [Omen] = [.smite, .quickening, .detonation, .stillness]
+}
+
 /// A buff the player currently holds, with its remaining lifetime.
 struct HeldBuff {
     let buff: Buff

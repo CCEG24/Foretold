@@ -273,6 +273,31 @@ class GameScene: SKScene {
         "as foretold in the elder scrolls.| not those ones. legally distinct ones.",
         "so it is written.| in pencil, but still. |so it lands.",
     ]
+    /// The same oracle, reaching for each omen in turn. Smite gets the original
+    /// sky-falls patter; the others needed their own, since "doom shall rain
+    /// from above" reads oddly when nothing is falling and the enemies have
+    /// merely stopped moving.
+    private static func omenChatter(for omen: Omen) -> [String] {
+        switch omen {
+        case .smite: return ultimateChatter
+        case .detonation: return [
+            "i foresee a great unbinding!| the barrels. i mean the barrels. all of them at once.",
+            "the powder hears me.| we have an arrangement. |mostly it just wants to go off.",
+            "thus spake the void: 'stand back'.| unusually practical of it, i thought.",
+        ]
+        case .stillness: return [
+            "time itself shall...| pause. briefly. |like a held breath, but for enemies.",
+            "behold, the great hush!| nobody moves. nobody swings. it's quite peaceful actually.",
+            "i have stopped the hour.| don't ask how. |don't ask for how long either.",
+        ]
+        case .quickening: return [
+            "the hour quickens!| your hands, specifically. the rest of you is unchanged.",
+            "swing freely, chosen one.| the waiting is suspended. |the consequences are not.",
+            "i have consulted the bones.| the bones said 'again'. and then 'again'.",
+        ]
+        }
+    }
+
     /// Prophecies for the level's gatekeeper stomping in, same oracle.
     private static let eliteChatter = [
         "dark portents gather! something huge this way...| comes? cometh? it's coming.",
@@ -1701,8 +1726,8 @@ class GameScene: SKScene {
         back.position = CGPoint(x: width / 2, y: 0)
         ultimateBarNode.addChild(back)
 
-        let ready = state.ultimateKillCharge >= GameState.ultimateChargeKills
-        let fraction = min(1, CGFloat(state.ultimateKillCharge) / CGFloat(GameState.ultimateChargeKills))
+        let ready = state.ultimateKillCharge >= state.ultimateChargeKills
+        let fraction = min(1, CGFloat(state.ultimateKillCharge) / CGFloat(state.ultimateChargeKills))
         if fraction > 0 {
             let fillWidth = max(height, width * fraction) - 4
             let fill = SKShapeNode(rectOf: CGSize(width: fillWidth, height: height - 4), cornerRadius: 3)
@@ -1721,7 +1746,7 @@ class GameScene: SKScene {
         }
 
         // The counter shares the caption row, right-aligned over the bar's end.
-        let hint = SKLabelNode(text: ready ? "F ✦       READY" : "\(state.ultimateKillCharge)/\(GameState.ultimateChargeKills)")
+        let hint = SKLabelNode(text: ready ? "F ✦       READY" : "\(state.ultimateKillCharge)/\(state.ultimateChargeKills)")
         hint.fontName = "HelveticaNeue-Bold"
         hint.fontSize = 11
         hint.fontColor = ready
@@ -1810,7 +1835,7 @@ class GameScene: SKScene {
             let bashDmg = Int((Double(GameState.bashDamage) * state.rules.damageDealtMult).rounded())
             itemsLabel.text = "bash drafted — a \(bashDmg) dmg jab while the \(state.equippedWeapon.name) reloads"
         } else if state.plannedUltimate {
-            itemsLabel.text = "omen drafted — the sky falls on every enemy"
+            itemsLabel.text = "omen drafted — \(state.omen.blurb)"
         } else if let pickup = state.plannedPickupWeapon {
             itemsLabel.text = "picking up \(pickup.name) — no attack or dodge this turn"
         } else if let underfoot = state.weaponDrop(at: state.playerPosition) {
@@ -2431,10 +2456,10 @@ class GameScene: SKScene {
             uniqueKeysWithValues: state.lingeringEffects.map { ($0.position, $0.damagePerTurn) }
         )
         revealLiveHazards = false
-        let ultWasReady = state.ultimateKillCharge >= GameState.ultimateChargeKills
+        let ultWasReady = state.ultimateKillCharge >= state.ultimateChargeKills
         let resolution = state.resolveTurn()
         pendingUltimateReadyToast = !ultWasReady
-            && state.ultimateKillCharge >= GameState.ultimateChargeKills
+            && state.ultimateKillCharge >= state.ultimateChargeKills
         if let picked = resolution.pickedUpWeapon {
             // Claiming an elite trophy unlocks it for every future run.
             if Weapon.eliteTrophies.contains(where: { $0.name == picked.name })
@@ -2784,7 +2809,7 @@ class GameScene: SKScene {
     private func playPlayerAttack(_ resolution: TurnResolution) {
         // Every bolt and lob has visibly flown by now: fresh trails may show.
         revealLiveHazards = true
-        if !resolution.ultimateTiles.isEmpty {
+        if resolution.omenFired != nil {
             playUltimate(resolution)
             return
         }
@@ -2862,7 +2887,7 @@ class GameScene: SKScene {
         /// A beat for the transmission to type out before the sky falls.
         let leadIn: TimeInterval = 1.1
 
-        showTransmission(Self.ultimateChatter.randomElement()!)
+        showTransmission(Self.omenChatter(for: resolution.omenFired ?? .smite).randomElement()!)
 
         let ring = SKShapeNode(circleOfRadius: tileSize * 0.4)
         ring.strokeColor = .white
@@ -3830,7 +3855,7 @@ class GameScene: SKScene {
         let pool = currentWeaponPool()
         let modifiers = modifiersOverride ?? activeModifiers
         let powderKeg = modifiers.contains(.powderKeg)
-        return GameState(
+        var run = GameState(
             weapon: devNextEquipped
                 ?? pickedLoadoutWeapon(loadoutMeleeName, from: pool.filter(\.isMelee)),
             holsteredWeapon: devNextHolstered
@@ -3842,6 +3867,8 @@ class GameScene: SKScene {
             weaponPool: currentWeaponPool(),
             modifiers: modifiers
         )
+        run.omen = selectedOmen
+        return run
     }
 
     // MARK: - Build picker
@@ -3870,6 +3897,27 @@ class GameScene: SKScene {
                 Defaults.standard.removeObject(forKey: "loadoutRanged")
             }
         }
+    }
+
+    /// The omen carried into the next run. Persisted like the weapon slots, and
+    /// honoured only while it's actually unlocked.
+    private var selectedOmen: Omen {
+        get {
+            guard let raw = Defaults.standard.string(forKey: "loadoutOmen"),
+                  let pick = Omen(rawValue: raw), unlockedOmens.contains(pick) else { return .smite }
+            return pick
+        }
+        set { Defaults.standard.set(newValue.rawValue, forKey: "loadoutOmen") }
+    }
+
+    /// Omens available to pick. Smite is the starter and is always there; the
+    /// rest are meant to come in behind milestones, cheapest to read first
+    /// (see `Omen.ordered`). Until those walls exist, everything is unlocked —
+    /// the chooser is the part being built here, not the gating.
+    private var unlockedOmens: [Omen] {
+        let earned = Set(Defaults.standard.stringArray(forKey: "unlockedOmens")?
+            .compactMap(Omen.init(rawValue:)) ?? Omen.allCases.map { $0 })
+        return Omen.ordered.filter { $0 == .smite || earned.contains($0) }
     }
 
     /// A persisted pick is honored only while it's actually unlocked.
@@ -3942,6 +3990,30 @@ class GameScene: SKScene {
             overlay.addChild(stats)
         }
 
+        // Omen: the third slot of the loadout. Only offered once there's more
+        // than one to choose between — a menu with a single entry is a promise,
+        // not a choice, so before that the run just carries Smite.
+        let omens = unlockedOmens
+        if omens.count > 1 {
+            let pick = selectedOmen
+            let omenRow = SKLabelNode(text: "omen: \(pick.title) ▸")
+            omenRow.fontName = "HelveticaNeue-Bold"
+            omenRow.fontSize = 18
+            omenRow.fontColor = SKColor(white: 0.9, alpha: 1.0)
+            omenRow.verticalAlignmentMode = .center
+            omenRow.position = CGPoint(x: centerX, y: centerY)
+            omenRow.name = "build:omen"
+            overlay.addChild(omenRow)
+
+            let omenStats = SKLabelNode(text: "\(pick.blurb) · \(pick.chargeKills) kills")
+            omenStats.fontName = "HelveticaNeue"
+            omenStats.fontSize = 12
+            omenStats.fontColor = SKColor(white: 0.55, alpha: 1.0)
+            omenStats.verticalAlignmentMode = .center
+            omenStats.position = CGPoint(x: centerX, y: centerY - 21)
+            overlay.addChild(omenStats)
+        }
+
         // Pact: opt into one random boon + one random curse. They offset each
         // other, so there's no score fiddling — just a sharper, riskier run.
         let pactHeader = SKLabelNode(text: "PACT")
@@ -3950,7 +4022,7 @@ class GameScene: SKScene {
         pactHeader.fontColor = SKColor(white: 0.55, alpha: 1.0)
         pactHeader.horizontalAlignmentMode = .left
         pactHeader.verticalAlignmentMode = .center
-        pactHeader.position = CGPoint(x: centerX - 150, y: centerY - 6)
+        pactHeader.position = CGPoint(x: centerX - 150, y: centerY - 54)
         overlay.addChild(pactHeader)
 
         let active = activeModifiers
@@ -3970,7 +4042,7 @@ class GameScene: SKScene {
         pactControl.fontColor = SKColor(white: (hasPact && !canReroll) ? 0.35 : 0.6, alpha: 1.0)
         pactControl.horizontalAlignmentMode = .right
         pactControl.verticalAlignmentMode = .center
-        pactControl.position = CGPoint(x: centerX + 150, y: centerY - 6)
+        pactControl.position = CGPoint(x: centerX + 150, y: centerY - 54)
         pactControl.name = hasPact ? (canReroll ? "build:pactReroll" : nil) : "build:pactToggle"
         overlay.addChild(pactControl)
 
@@ -3979,7 +4051,7 @@ class GameScene: SKScene {
                 (active.first(where: \.isBoon), "BOON", gold),
                 (active.first(where: { !$0.isBoon }), "CURSE", curseColor),
             ]
-            var lineY = centerY - 34
+            var lineY = centerY - 82
             for (modifier, glyph, color) in entries {
                 guard let modifier else { continue }
                 let label = SKLabelNode(text: "\(glyph) · \(modifier.title) — \(modifier.blurb)")
@@ -4005,7 +4077,7 @@ class GameScene: SKScene {
             hint.fontSize = 13
             hint.fontColor = SKColor(white: 0.55, alpha: 1.0)
             hint.verticalAlignmentMode = .center
-            hint.position = CGPoint(x: centerX, y: centerY - 40)
+            hint.position = CGPoint(x: centerX, y: centerY - 88)
             hint.name = "build:pactToggle"
             overlay.addChild(hint)
         }
@@ -4014,7 +4086,7 @@ class GameScene: SKScene {
         begin.fillColor = SKColor(red: 0.20, green: 0.55, blue: 0.35, alpha: 1.0)
         begin.strokeColor = .white
         begin.lineWidth = 1.5
-        begin.position = CGPoint(x: centerX, y: centerY - 142)
+        begin.position = CGPoint(x: centerX, y: centerY - 178)
         begin.name = "build:start"
         let beginLabel = SKLabelNode(text: "BEGIN")
         beginLabel.fontName = "HelveticaNeue-Bold"
@@ -4029,7 +4101,7 @@ class GameScene: SKScene {
         spaceHint.fontName = "HelveticaNeue"
         spaceHint.fontSize = 12
         spaceHint.fontColor = SKColor(white: 0.55, alpha: 1.0)
-        spaceHint.position = CGPoint(x: centerX, y: centerY - 176)
+        spaceHint.position = CGPoint(x: centerX, y: centerY - 208)
         overlay.addChild(spaceHint)
 
         addChild(overlay)
@@ -4472,7 +4544,7 @@ class GameScene: SKScene {
         case "dev:holstered": devNextHolstered = cycleDevWeapon(devNextHolstered)
         case "dev:hp": devNextMaxHealth = devNextMaxHealth >= 20 ? 1 : devNextMaxHealth + 1
         case "dev:armor": devNextMaxArmor = devNextMaxArmor >= 8 ? 0 : devNextMaxArmor + 1
-        case "dev:ultFill": state.devSetUltimateCharge(GameState.ultimateChargeKills)
+        case "dev:ultFill": state.devSetUltimateCharge(state.ultimateChargeKills)
         case "dev:ultZero": state.devSetUltimateCharge(0)
         case "dev:heal": state.devHealFully()
         case "dev:score": state.devAddScore(100)
@@ -4747,6 +4819,11 @@ class GameScene: SKScene {
             } else if clickedNames.contains("build:ranged") {
                 loadoutRangedName = cycledLoadoutName(loadoutRangedName, options: pool.filter(\.isRanged))
                 showBuildPicker()
+            } else if clickedNames.contains("build:omen") {
+                let omens = unlockedOmens
+                let next = omens.firstIndex(of: selectedOmen).map { omens[($0 + 1) % omens.count] }
+                selectedOmen = next ?? .smite
+                showBuildPicker()
             } else if clickedNames.contains("build:pactToggle") {
                 // No pact → take the drafted bargain (rolling one the first time);
                 // active pact → break it. Toggling reuses the same pact so it can't
@@ -4968,7 +5045,7 @@ class GameScene: SKScene {
             if state.plannedUltimate {
                 state.clearPlannedUltimate()
             } else if !state.planUltimate() {
-                let needed = GameState.ultimateChargeKills - state.ultimateKillCharge
+                let needed = state.ultimateChargeKills - state.ultimateKillCharge
                 showToast("the omen needs \(needed) more soul\(needed == 1 ? "" : "s")")
             }
             updatePickupHint()
