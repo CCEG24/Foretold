@@ -2379,8 +2379,24 @@ class GameScene: SKScene {
     // MARK: - Turn flow
 
     /// Stores the chosen tile and points an arrow at it; nothing moves until GO.
+    ///
+    /// Clicking the tile you're standing on — or the one you've already drafted
+    /// — takes the move back, mirroring how right-clicking the attack origin
+    /// clears a drafted swing. Standing still used to be expressible as a
+    /// zero-distance move, but `legalMoveTargets` stopped offering the player's
+    /// own tile when it became a Dijkstra walk for mud, which left no way at all
+    /// to undo a move.
     private func planMove(to target: GridPosition) {
-        guard !isResolving, state.planMove(to: target) else { return }
+        guard !isResolving else { return }
+        if state.plannedTarget != nil,
+           target == state.playerPosition || target == state.plannedTarget || target == state.plannedLanding {
+            state.clearPlannedMove()
+            updatePlanArrow()
+            refreshTileHighlights()
+            updateHUD()
+            return
+        }
+        guard state.planMove(to: target) else { return }
         advanceTutorial(after: .move)
         updatePlanArrow()
         refreshTileHighlights()
@@ -2927,7 +2943,7 @@ class GameScene: SKScene {
         guard !resolution.enemyAttacks.isEmpty || playerWasDamaged
             || !resolution.friendlyFireHits.isEmpty || !resolution.enemyExplosions.isEmpty
             || !resolution.enemyGrappleHooks.isEmpty || !resolution.enemyShoves.isEmpty
-            || !resolution.enemyBarrelMoves.isEmpty else {
+            || !resolution.enemyBarrelMoves.isEmpty || !resolution.enemyBarrelSpawns.isEmpty else {
             playHazards(resolution)
             return
         }
@@ -2947,6 +2963,18 @@ class GameScene: SKScene {
         // lands — barrels first, so one rammed into scenery bursts on arrival.
         animateBarrelMoves(resolution.enemyBarrelMoves)
         animateShoves(resolution.enemyShoves)
+        // A keg an enemy lobbed pops in where it landed, same flourish as a
+        // telegraphed delivery but here in the enemy phase, as the throw lands.
+        for tile in resolution.enemyBarrelSpawns {
+            guard let barrel = state.obstacle(at: tile) else { continue }
+            let node = addObstacleNode(for: barrel)
+            node.setScale(0.1)
+            node.alpha = 0
+            node.run(SKAction.group([
+                SKAction.scale(to: 1.0, duration: 0.20),
+                SKAction.fadeIn(withDuration: 0.20),
+            ]))
+        }
         animateEnemyHits(resolution.friendlyFireHits)
         animateExplosions(resolution.enemyExplosions)
 

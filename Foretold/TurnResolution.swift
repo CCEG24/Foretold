@@ -115,6 +115,10 @@ struct TurnResolution {
     let enemyShoves: [Shove]
     /// Barrels dragged during that same phase — `barrelMoves`' enemy-side twin.
     let enemyBarrelMoves: [BarrelMove]
+    /// Kegs an enemy lobbed this turn. Unlike `barrelSpawns`, which is a
+    /// telegraphed delivery landing at the head of the turn, these drop as the
+    /// throw resolves, so the scene pops them in during the enemy phase.
+    let enemyBarrelSpawns: [GridPosition]
     let enemyMoves: [EnemyMove]
     let enemyAttacks: [EnemyAttack]
     /// Enemies damaged during the enemies' own phase: friendly fire and explosions.

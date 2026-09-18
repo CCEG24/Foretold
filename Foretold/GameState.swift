@@ -1709,6 +1709,17 @@ struct GameState {
         return true
     }
 
+    /// Takes back the drafted move, so the turn resolves from where the player
+    /// already stands. A throw that was aimed from the abandoned destination and
+    /// is now out of reach is dropped, exactly as drafting a new move does.
+    mutating func clearPlannedMove() {
+        guard !isGameOver, pendingBuffChoices.isEmpty else { return }
+        plannedTarget = nil
+        if let throwTarget = plannedThrowTarget, !throwTargets().contains(throwTarget) {
+            plannedThrowTarget = nil
+        }
+    }
+
     /// Drafts picking up the weapon underfoot; it spends this turn's attack and
     /// dodge, though the drafted move still happens. Fails when not standing on
     /// a drop.
@@ -2304,6 +2315,7 @@ struct GameState {
         var enemyGrappleHooks: [TurnResolution.GrappleHook] = []
         var enemyShoves: [TurnResolution.Shove] = []
         var enemyBarrelMoves: [TurnResolution.BarrelMove] = []
+        var enemyBarrelSpawns: [GridPosition] = []
 
         // Armed bombers burn their fuses first — and blow.
         for bomberID in enemies.compactMap({ $0.archetype == .bomber && $0.fuse != nil ? $0.id : nil }) {
@@ -2480,6 +2492,20 @@ struct GameState {
                     ))
                     nextProjectileID += 1
                     // tiles stays empty: nothing swept this turn.
+                } else if attacker.weapon.placesBarrel {
+                    // Lob a keg: it deals nothing, it leaves a live barrel on the
+                    // target tile — the same yellow weak-powder one the player's
+                    // Keg drops, and a hazard that now cuts both ways. Blocked
+                    // tiles just swallow the throw. `tiles` stays empty: there's
+                    // no blast to sweep this turn.
+                    let blocked = obstacle(at: target) != nil
+                        || enemies.contains { $0.position == target }
+                        || target == playerPosition
+                    if !blocked {
+                        obstacles.append(Obstacle(id: nextObstacleID, kind: .barrel, position: target, barrelKind: .weak))
+                        nextObstacleID += 1
+                        enemyBarrelSpawns.append(target)
+                    }
                 } else {
                     tiles = blastTiles(around: target, radius: thrown.blastRadius, includeCenter: true)
                     throwerIncluded = true
@@ -2773,6 +2799,7 @@ struct GameState {
             enemyGrappleHooks: enemyGrappleHooks,
             enemyShoves: enemyShoves,
             enemyBarrelMoves: enemyBarrelMoves,
+            enemyBarrelSpawns: enemyBarrelSpawns,
             enemyMoves: moves,
             enemyAttacks: enemyAttacks,
             friendlyFireHits: friendlyFireHits,
@@ -3977,7 +4004,7 @@ struct GameState {
                     // bombers never jab.
                     if ready && enemy.archetype != .bomber && canHitPlayer(enemy, from: target) {
                         if enemy.weapon.thrown != nil {
-                            enemies[index].plannedThrowTarget = playerPosition
+                            enemies[index].plannedThrowTarget = throwTarget(for: enemy, from: target)
                         } else {
                             enemies[index].plannedDirection = aimDirection(for: enemy, from: target)
                         }
@@ -4120,7 +4147,7 @@ struct GameState {
                 draftBossIntent(at: index, from: target)
             } else if ready && canHitPlayer(enemy, from: target) {
                 if enemy.weapon.thrown != nil {
-                    enemies[index].plannedThrowTarget = playerPosition
+                    enemies[index].plannedThrowTarget = throwTarget(for: enemy, from: target)
                 } else {
                     enemies[index].plannedDirection = aimDirection(for: enemy, from: target)
                 }
@@ -4150,9 +4177,20 @@ struct GameState {
             let from = enemy.position
             let dx = (playerPosition.x - from.x).signum()
             let dy = (playerPosition.y - from.y).signum()
-            let candidates = abs(playerPosition.x - from.x) >= abs(playerPosition.y - from.y)
+            var candidates = abs(playerPosition.x - from.x) >= abs(playerPosition.y - from.y)
                 ? [GridPosition(x: from.x + dx, y: from.y), GridPosition(x: from.x, y: from.y + dy)]
                 : [GridPosition(x: from.x, y: from.y + dy), GridPosition(x: from.x + dx, y: from.y)]
+            // Opening a lane straight at the player is the ideal, but when both
+            // of those are solid grey wall or a comrade's back, any other
+            // orthogonal neighbour still beats standing in the box forever —
+            // the way out is just longer round. (Diagonals are pointless here:
+            // movement is orthogonal, so a corner tile opens no lane.)
+            candidates += [
+                GridPosition(x: from.x + 1, y: from.y),
+                GridPosition(x: from.x - 1, y: from.y),
+                GridPosition(x: from.x, y: from.y + 1),
+                GridPosition(x: from.x, y: from.y - 1),
+            ]
             for candidate in candidates where candidate != from && contains(candidate) {
                 guard let wall = obstacle(at: candidate), wall.kind == .wall, wall.destructible
                 else { continue }
@@ -4164,6 +4202,24 @@ struct GameState {
                 break
             }
         }
+    }
+
+    /// The tile a thrower lobs at, from `tile`. Anything that bursts aims
+    /// straight at the player — but a keg can't, because a barrel needs empty
+    /// ground to land on and the player is standing on theirs. Aiming it at
+    /// them like every other thrower meant an enemy keg threw and placed
+    /// nothing, every single turn. It drops the powder on clear ground as near
+    /// to the player as its reach allows instead, so the barrel is somewhere
+    /// worth setting off later.
+    ///
+    /// Nil when a keg has nowhere legal to put one, which leaves the enemy free
+    /// to do something else this turn rather than waste it on a dud throw.
+    private func throwTarget(for enemy: Enemy, from tile: GridPosition) -> GridPosition? {
+        guard enemy.weapon.placesBarrel else { return playerPosition }
+        guard let thrown = enemy.weapon.thrown else { return nil }
+        return barrageTiles()
+            .filter { $0.distance(to: tile) <= thrown.range }
+            .min { $0.distance(to: playerPosition) < $1.distance(to: playerPosition) }
     }
 
     /// The facing an enemy swings on to smash the crumbling wall at `tile`, or
@@ -4278,7 +4334,7 @@ struct GameState {
                         enemies[index].plannedIntent = .barrage
                     } else if primaryReady && canHitPlayer(boss, from: tile) {
                         if boss.weapon.thrown != nil {
-                            enemies[index].plannedThrowTarget = playerPosition
+                            enemies[index].plannedThrowTarget = throwTarget(for: boss, from: tile)
                         } else if let aim = primaryAim {
                             enemies[index].plannedIntent = .volley
                             enemies[index].plannedDirection = aim
