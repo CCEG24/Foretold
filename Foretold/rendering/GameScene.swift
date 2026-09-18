@@ -1726,6 +1726,29 @@ class GameScene: SKScene {
         back.position = CGPoint(x: width / 2, y: 0)
         ultimateBarNode.addChild(back)
 
+        // Banked charges replace the fill entirely: there's nothing to charge
+        // toward until they're spent, so a creeping bar would be a lie.
+        if state.omenCharges > 0 {
+            let pips = SKLabelNode(text: String(repeating: "◆", count: state.omenCharges))
+            pips.fontName = "HelveticaNeue-Bold"
+            pips.fontSize = 13
+            pips.fontColor = SKColor(red: 1.0, green: 0.72, blue: 0.35, alpha: 1.0)
+            pips.horizontalAlignmentMode = .left
+            pips.verticalAlignmentMode = .center
+            pips.position = CGPoint(x: 6, y: 0)
+            ultimateBarNode.addChild(pips)
+
+            let charged = SKLabelNode(text: "right-click a barrel")
+            charged.fontName = "HelveticaNeue-Bold"
+            charged.fontSize = 11
+            charged.fontColor = SKColor(red: 1.0, green: 0.8, blue: 0.5, alpha: 1.0)
+            charged.horizontalAlignmentMode = .right
+            charged.verticalAlignmentMode = .bottom
+            charged.position = CGPoint(x: width, y: 12)
+            ultimateBarNode.addChild(charged)
+            return
+        }
+
         let ready = state.ultimateKillCharge >= state.ultimateChargeKills
         let fraction = min(1, CGFloat(state.ultimateKillCharge) / CGFloat(state.ultimateChargeKills))
         if fraction > 0 {
@@ -1836,6 +1859,8 @@ class GameScene: SKScene {
             itemsLabel.text = "bash drafted — a \(bashDmg) dmg jab while the \(state.equippedWeapon.name) reloads"
         } else if state.plannedUltimate {
             itemsLabel.text = "omen drafted — \(state.omen.blurb)"
+        } else if state.plannedDetonateTarget != nil {
+            itemsLabel.text = "charge drafted — that barrel goes off"
         } else if let pickup = state.plannedPickupWeapon {
             itemsLabel.text = "picking up \(pickup.name) — no attack or dodge this turn"
         } else if let underfoot = state.weaponDrop(at: state.playerPosition) {
@@ -4943,9 +4968,24 @@ class GameScene: SKScene {
         guard !tutorialShowcasing else { return }
         guard !isResolving, !state.isGameOver, buffChoiceOverlay == nil else { return }
         guard let tile = gridPosition(at: event.location) else { return }
+        // With Detonation charges in hand, right-clicking a barrel spends one on
+        // it instead of swinging at it — clicking the aimed barrel again takes
+        // it back, the same toggle the attack draft uses.
+        if state.omenCharges > 0, state.obstacle(at: tile)?.kind == .barrel {
+            if state.plannedDetonateTarget == tile {
+                state.clearPlannedDetonation()
+            } else {
+                state.planDetonation(at: tile)
+            }
+            refreshTileHighlights()
+            updateHUD()
+            return
+        }
         let hasDraft = state.plannedAttackDirection != nil || state.plannedThrowTarget != nil
+            || state.plannedDetonateTarget != nil
         if tile == state.attackOrigin && hasDraft {
             state.clearPlannedAttack()
+            state.clearPlannedDetonation()
         } else {
             state.planAttack(toward: tile)
             if state.plannedAttackDirection != nil || state.plannedThrowTarget != nil {

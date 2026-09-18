@@ -525,6 +525,11 @@ struct GameState {
     /// The omen carried this run, chosen at the draft. Drives both the effect
     /// the ultimate fires and how many kills charge it.
     var omen: Omen = .smite
+    /// Detonation charges in hand. Each is spent by drafting a barrel to set
+    /// off, so the omen can wait for a board worth using it on.
+    private(set) var omenCharges = 0
+    /// The barrel a charge is aimed at this turn, if one is drafted.
+    private(set) var plannedDetonateTarget: GridPosition?
     /// Turns left on Quickening's free-reload window (0 = weapons reload as normal).
     private(set) var freeReloadTurns = 0
 
@@ -1127,6 +1132,8 @@ struct GameState {
     /// on nobody. (Every omen used to preview as "all enemies", which was a lie
     /// for three of the four.)
     var plannedOmenTiles: [GridPosition] {
+        // A charge already aimed at a barrel previews that barrel's chain.
+        if let target = plannedDetonateTarget { return barrelChainBlast(from: target) }
         guard plannedUltimate else { return [] }
         switch omen {
         case .smite, .stillness:
@@ -1719,6 +1726,7 @@ struct GameState {
         plannedBash = false
         plannedPickup = false
         plannedUltimate = false
+        plannedDetonateTarget = nil
         if let target = plannedTarget, !legalMoveTargets().contains(target) {
             plannedTarget = nil
         }
@@ -1772,7 +1780,8 @@ struct GameState {
     @discardableResult
     mutating func planUltimate() -> Bool {
         guard !isGameOver, pendingBuffChoices.isEmpty, !weaponSwapCostsAttack,
-              ultimateKillCharge >= ultimateChargeKills else { return false }
+              ultimateKillCharge >= ultimateChargeKills,
+              omenCharges == 0 else { return false }
         plannedUltimate = true
         plannedAttackDirection = nil
         plannedThrowTarget = nil
@@ -1782,6 +1791,27 @@ struct GameState {
 
     mutating func clearPlannedUltimate() {
         plannedUltimate = false
+    }
+
+    /// Spends one banked Detonation charge on the barrel at `tile`, setting it
+    /// off when the turn resolves. It takes the turn's action like any attack —
+    /// popping a barrel is an attack in all but name, and the charge was
+    /// already paid for in kills.
+    @discardableResult
+    mutating func planDetonation(at tile: GridPosition) -> Bool {
+        guard !isGameOver, pendingBuffChoices.isEmpty, omenCharges > 0,
+              obstacle(at: tile)?.kind == .barrel else { return false }
+        plannedDetonateTarget = tile
+        plannedAttackDirection = nil
+        plannedThrowTarget = nil
+        plannedBash = false
+        plannedPickup = false
+        plannedUltimate = false
+        return true
+    }
+
+    mutating func clearPlannedDetonation() {
+        plannedDetonateTarget = nil
     }
 
     /// Drafts the equipped weapon's attack toward/at the given tile: directional
@@ -2165,7 +2195,8 @@ struct GameState {
         // wears off. Movement is never taken away, so foresight is preserved.
         let actionStunned = playerStunTurns > 0
         let playerActionStunned = actionStunned
-            && (plannedUltimate || plannedBash || plannedAttackDirection != nil || plannedThrowTarget != nil)
+            && (plannedUltimate || plannedBash || plannedAttackDirection != nil
+                || plannedThrowTarget != nil || plannedDetonateTarget != nil)
         if playerStunTurns > 0 { playerStunTurns -= 1 }
 
         // The omen goes off, whichever one this run carries. `ultimateTiles` is
@@ -2182,14 +2213,11 @@ struct GameState {
                 ultimateTiles = enemies.map(\.position)
                 playerPhaseHits += damageEnemies(on: Set(ultimateTiles), damage: Self.ultimateDamage, chargesUltimate: false)
             case .detonation:
-                // Every barrel at once. detonateBarrels already chains and
-                // credits, and it can catch the player — standing in your own
-                // blast is the cost of pressing it at the wrong moment.
-                let barrels = Set(obstacles.filter { $0.kind == .barrel }.map(\.position))
-                ultimateTiles = Array(barrels)
-                let blast = detonateBarrels(struckTiles: barrels)
-                playerExplosions += blast.explosions
-                playerPhaseHits += blast.hits
+                // Nothing goes off yet: the omen hands you charges to spend on
+                // barrels of your choosing, later, so a thin board doesn't
+                // swallow it. The flourish plays on the player.
+                ultimateTiles = [playerPosition]
+                omenCharges = omen.charges
             case .stillness:
                 // No damage at all: every enemy simply loses its turns. The
                 // daze shows through planning, so the freeze is readable.
@@ -2206,6 +2234,18 @@ struct GameState {
             }
         }
         plannedUltimate = false
+        // A banked Detonation charge goes off before the swing branches, since
+        // it replaces the swing entirely. A stun voids it — and gives the
+        // charge back, because it was never spent.
+        if let target = plannedDetonateTarget, !actionStunned, omenCharges > 0 {
+            omenCharges -= 1
+            didAttack = true
+            let blast = detonateBarrels(struckTiles: [target])
+            playerExplosions += blast.explosions
+            playerPhaseHits += blast.hits
+        }
+        plannedDetonateTarget = nil
+
         let bashing = plannedBash && !actionStunned
         if actionStunned {
             // The drafted action fizzles; the planned flags are cleared below.

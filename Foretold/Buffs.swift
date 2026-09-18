@@ -150,7 +150,7 @@ extension Buff {
 enum Omen: String, CaseIterable {
     /// The sky falls on every enemy, wherever they stand.
     case smite
-    /// Every barrel on the board goes off at once, chaining as usual.
+    /// Banks charges; each sets off one barrel of your choosing, on your turn.
     case detonation
     /// Every enemy is frozen solid — no move, no attack — for two turns.
     case stillness
@@ -169,7 +169,7 @@ enum Omen: String, CaseIterable {
     var blurb: String {
         switch self {
         case .smite: return "the sky falls on every enemy at once"
-        case .detonation: return "every barrel on the board goes off"
+        case .detonation: return "3 charges — set off a barrel of your choosing"
         case .stillness: return "every enemy freezes for two turns"
         case .quickening: return "your weapons ignore their reload for two turns"
         }
@@ -180,6 +180,18 @@ enum Omen: String, CaseIterable {
         switch self {
         case .smite, .stillness: return 10
         case .detonation, .quickening: return 5
+        }
+    }
+
+    /// Charges banked when it fires, for omens that pay out over several turns
+    /// rather than all at once. Detonating the whole board in one go fell off a
+    /// cliff late on, when too few barrels spawn to be worth 5 kills; banked
+    /// charges let the omen wait for targets instead of wasting itself on an
+    /// empty board.
+    var charges: Int {
+        switch self {
+        case .detonation: return 3
+        case .smite, .stillness, .quickening: return 0
         }
     }
 
