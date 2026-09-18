@@ -92,6 +92,12 @@ class GameScene: SKScene {
     /// Dev: forces the boon / curse halves of the next rolled pact (nil = random).
     private var devForcedPactBoon: RunModifier?
     private var devForcedPactCurse: RunModifier?
+    // The dev panel cycles these one click at a time, so authored order makes a
+    // named boon a hunt through the whole list. Sort by label for the panel
+    // only — the live pools stay as authored, since gameplay draws from them.
+    private var devPactBoons: [RunModifier] { RunModifier.boons.sorted { $0.title < $1.title } }
+    private var devPactCurses: [RunModifier] { RunModifier.curses.sorted { $0.title < $1.title } }
+    private var devLevelBoons: [Buff] { Buff.all.sorted { $0.name < $1.name } }
     /// A fresh pact: one boon paired with one curse. Either half can be pinned
     /// via the dev panel.
     private func rolledPact() -> Set<RunModifier> {
@@ -4489,7 +4495,7 @@ class GameScene: SKScene {
         case "dev:ignoreShields": state.devIgnoreShields.toggle()
         case "dev:pactBoon":
             // Cycle the forced pact boon: random → each boon → random.
-            let boons = RunModifier.boons
+            let boons = devPactBoons
             if let current = devForcedPactBoon, let i = boons.firstIndex(of: current) {
                 devForcedPactBoon = i + 1 < boons.count ? boons[i + 1] : nil
             } else {
@@ -4497,7 +4503,7 @@ class GameScene: SKScene {
             }
         case "dev:pactCurse":
             // Cycle the forced pact curse: random → each curse → random.
-            let curses = RunModifier.curses
+            let curses = devPactCurses
             if let current = devForcedPactCurse, let i = curses.firstIndex(of: current) {
                 devForcedPactCurse = i + 1 < curses.count ? curses[i + 1] : nil
             } else {
@@ -4505,7 +4511,7 @@ class GameScene: SKScene {
             }
         case "dev:levelBoon":
             // Cycle the first forced level-up option: random → each buff → random.
-            let all = Buff.all
+            let all = devLevelBoons
             if let current = state.devForcedBuff, let i = all.firstIndex(of: current) {
                 state.devForcedBuff = i + 1 < all.count ? all[i + 1] : nil
             } else {
@@ -4513,7 +4519,7 @@ class GameScene: SKScene {
             }
         case "dev:levelBoon2":
             // Cycle the second forced level-up option: random → each buff → random.
-            let all = Buff.all
+            let all = devLevelBoons
             if let current = state.devForcedBuff2, let i = all.firstIndex(of: current) {
                 state.devForcedBuff2 = i + 1 < all.count ? all[i + 1] : nil
             } else {
