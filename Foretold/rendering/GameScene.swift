@@ -1890,8 +1890,8 @@ class GameScene: SKScene {
         let planning = !isResolving && !state.isGameOver
         let legalTargets = planning ? state.legalMoveTargets() : []
         var attackTiles = planning ? Set(state.plannedAttackTiles) : []
-        if planning && state.plannedUltimate {
-            attackTiles.formUnion(state.enemies.map(\.position))
+        if planning {
+            attackTiles.formUnion(state.plannedOmenTiles)
         }
         // Thrown weapons show their landing range while planning so right-click
         // targeting is readable.

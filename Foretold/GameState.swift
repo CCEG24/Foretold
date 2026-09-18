@@ -1122,6 +1122,26 @@ struct GameState {
     /// The on-board tiles the drafted attack hits right away: the directional
     /// sweep, the throw's blast, or — for bolt weapons — just the first flight
     /// window. Empty when nothing is drafted.
+    /// Tiles the drafted omen would cover, for the planning preview. Empty when
+    /// no omen is drafted — and legitimately empty for Quickening, which lands
+    /// on nobody. (Every omen used to preview as "all enemies", which was a lie
+    /// for three of the four.)
+    var plannedOmenTiles: [GridPosition] {
+        guard plannedUltimate else { return [] }
+        switch omen {
+        case .smite, .stillness:
+            // Both reach every enemy, wherever they are.
+            return enemies.map(\.position)
+        case .detonation:
+            // Each barrel's blast, chains included — the same shape the boss's
+            // detonate intent telegraphs.
+            let barrels = obstacles.filter { $0.kind == .barrel }.map(\.position)
+            return Array(Set(barrels.flatMap { barrelChainBlast(from: $0) }))
+        case .quickening:
+            return []
+        }
+    }
+
     var plannedAttackTiles: [GridPosition] {
         if let target = plannedThrowTarget, let thrown = equippedWeapon.thrown {
             return blastTiles(around: target, radius: thrown.blastRadius, includeCenter: true)
