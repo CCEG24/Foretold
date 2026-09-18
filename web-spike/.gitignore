@@ -2,6 +2,14 @@
 Deps/
 *.resolved
 
-# NOTE: dist/ is intentionally NOT ignored — Render can't build the wasm
-# (no Swift/WASM toolchain on its build image), so we commit the prebuilt
-# bundle and Render serves it statically. Rebuild with ./build.sh before deploy.
+# The swiftly installer is a download, not a source artifact — README.md curls
+# it. A copy got committed by running that curl inside the repo; don't again.
+swiftly.pkg
+
+# The spike's wasm is an 82 MB build output nothing depends on. Render serves
+# ../web/dist (render.yaml: staticPublishPath), NOT this directory — the spike
+# was only ever the proof of concept, so the note that used to live here about
+# committing dist/ for Render applies to web/.gitignore, not this one. The
+# html/JS glue stays tracked so the bundle is still readable; rebuild the wasm
+# with ./build.sh if you want to run the spike locally.
+dist/*.wasm
