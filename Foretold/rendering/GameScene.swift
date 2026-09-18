@@ -1936,8 +1936,23 @@ class GameScene: SKScene {
         // covers it, red when an enemy will smash it open this turn.
         let crumbleBase = SKColor(red: 0.42, green: 0.34, blue: 0.24, alpha: 1.0)
         let attackTint = SKColor(red: 0.85, green: 0.40, blue: 0.15, alpha: 1.0)
-        let digTint = SKColor(red: 0.60, green: 0.28, blue: 0.20, alpha: 1.0)
-        let digTiles = planning ? Set(state.enemies.compactMap(\.plannedDigTile)) : []
+        let breachTint = SKColor(red: 0.60, green: 0.28, blue: 0.20, alpha: 1.0)
+        // Every crumbling wall that won't survive the enemies' phase: the tile a
+        // boxed-in enemy digs out by hand, plus everything its drafted attack
+        // sweeps — a swing at a wall breaks the whole pattern's worth, and a
+        // swing aimed at the player takes out any crumbling wall in the way.
+        // Only tiles from an enemy that is actually attacking count; an idle
+        // bomber's threatTiles previews its blast radius, which would otherwise
+        // paint walls it has no plan to touch.
+        var breachTiles: Set<GridPosition> = []
+        if planning {
+            for enemy in state.enemies {
+                if let dig = enemy.plannedDigTile { breachTiles.insert(dig) }
+                guard enemy.plannedDirection != nil || enemy.plannedThrowTarget != nil
+                    || enemy.plannedIntent != nil else { continue }
+                breachTiles.formUnion(state.threatTiles(of: enemy))
+            }
+        }
         for (position, node) in obstacleNodes {
             // A crumbling wall is a container (fill + crack seam), so reach in for
             // the named fill sprite; a plain wall is the sprite itself.
@@ -1945,8 +1960,8 @@ class GameScene: SKScene {
             guard let wall = sprite, state.obstacle(at: position)?.destructible == true else { continue }
             if attackTiles.contains(position) {
                 wall.color = attackTint
-            } else if digTiles.contains(position) {
-                wall.color = digTint
+            } else if breachTiles.contains(position) {
+                wall.color = breachTint
             } else {
                 wall.color = crumbleBase
             }
