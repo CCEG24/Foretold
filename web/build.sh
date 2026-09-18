@@ -63,6 +63,40 @@ if [ -n "$missing" ]; then
 fi
 echo "   exports: setup, getCanvasWidth, getCanvasHeight ✓"
 
+# Assert the shipped module carries no DWARF.
+#
+# PackageToJS *says* "Stripping DWARF debug info..." — but it strips into a
+# `.no-dwarf` intermediate and then feeds that to wasm-opt. When wasm-opt is
+# missing it only warns, and the final artifact falls back to the UNSTRIPPED
+# module, DWARF and all. That shipped an 88 MB wasm for months: the browser
+# downloads, parses and holds every byte (Chrome was reloading the tab "for
+# using significant memory"), and because dist/ is committed, each rebuild
+# pushed another ~85 MB blob into git history.
+#
+# Package.swift now passes `-Xlinker --strip-debug` for release builds, which
+# strips at link time and so can't be undone by that fallback. This check is
+# here because the failure mode is silent — the build succeeds and the page
+# still works, just enormous. DWARF section names are plain UTF-8 in the wasm's
+# custom-section headers, so grep is enough.
+#
+# Not asserted: the `name` section is deliberately KEPT (it's what gives Swift
+# frames readable names in browser stack traces, which the in-progress renderer
+# work needs). Swapping `--strip-debug` for `--strip-all` drops it for ~9 MB
+# more. Installing binaryen so wasm-opt actually runs is the bigger remaining
+# win — PackageToJS warns above when it's absent.
+dwarf=""
+for section in .debug_info .debug_line .debug_str .debug_abbrev; do
+  grep -qa "$section" "$wasm" && dwarf="$dwarf $section"
+done
+if [ -n "$dwarf" ]; then
+  echo "!! $wasm still contains DWARF:$dwarf" >&2
+  echo "   The release-only '-Xlinker --strip-debug' in Package.swift did not" >&2
+  echo "   take effect, so this artifact is ~25% larger than it needs to be." >&2
+  exit 1
+fi
+bytes="$(wc -c < "$wasm" | tr -d '[:space:]')"
+echo "   no DWARF ✓  ($((bytes / 1048576)) MiB)"
+
 # PackageToJS emits the JS module but no html/WASI wiring — supply ours.
 cp Web/index.html dist/index.html
 cp Web/wasi-shim.js dist/wasi-shim.js

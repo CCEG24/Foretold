@@ -42,7 +42,19 @@ let package = Package(
                     "-Xlinker", "--export=setup",
                     "-Xlinker", "--export=getCanvasWidth",
                     "-Xlinker", "--export=getCanvasHeight",
-                ])
+                ]),
+                // Drop DWARF from the shipped module. Statically linking the
+                // Swift stdlib, Foundation, OpenSpriteKit and swift-webgpu drags
+                // in their debug info too, which dominated the artifact: the
+                // browser downloads, parses and holds all of it, and Chrome was
+                // reloading the tab "for using significant memory". It also
+                // lands in git on every CI rebuild (dist is committed), so the
+                // repo grew ~85 MB a build.
+                //
+                // Release only — a local debug build keeps its symbols. Exports
+                // live in the wasm export section, not a debug section, so the
+                // reactor contract build.sh asserts survives stripping.
+                .unsafeFlags(["-Xlinker", "--strip-debug"], .when(configuration: .release)),
             ]
         ),
     ]
