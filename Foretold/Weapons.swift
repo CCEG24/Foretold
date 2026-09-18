@@ -237,9 +237,12 @@ struct Weapon: Equatable {
     /// A lobbed weapon (player only) that drops a live barrel on the target tile
     /// instead of bursting — no damage, the payoff is detonating it later.
     let placesBarrel: Bool
-    /// A lobbed weapon (player only) that deals no damage: it drags every enemy
-    /// in its blast one tile toward the eye, clustering them onto hazards, into
-    /// a barrel, or into your reach. Range/radius come from `thrown`.
+    /// A lobbed weapon that drags every body in its blast one tile toward the
+    /// eye. In the player's hands that clusters enemies onto hazards, into a
+    /// barrel, or into reach. Cuts both ways, like knockback: an enemy lobs its
+    /// eye onto the player's tile, so walking out of the telegraphed diamond
+    /// gets you hauled back in (and its comrades dragged onto you).
+    /// Range/radius come from `thrown`.
     let vortex: Bool
 
     var isMelee: Bool { !isRanged }

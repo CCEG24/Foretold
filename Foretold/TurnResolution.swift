@@ -109,6 +109,12 @@ struct TurnResolution {
     /// Hooks enemies threw at the player this turn (each `from` an enemy, `to`
     /// the tile it grabbed the player on), for the scene to draw as they reel.
     let enemyGrappleHooks: [GrappleHook]
+    /// Enemies dragged during the enemies' own phase (the eye of an enemy's
+    /// Vortex hauling its comrades in). Animated with the enemy attacks rather
+    /// than with `shoves`, which belongs to the player's phase.
+    let enemyShoves: [Shove]
+    /// Barrels dragged during that same phase — `barrelMoves`' enemy-side twin.
+    let enemyBarrelMoves: [BarrelMove]
     let enemyMoves: [EnemyMove]
     let enemyAttacks: [EnemyAttack]
     /// Enemies damaged during the enemies' own phase: friendly fire and explosions.

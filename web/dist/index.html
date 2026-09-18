@@ -64,11 +64,89 @@
 
   <script type="module">
     const status = document.getElementById('status');
-    const fail = (m) => { status.textContent = String(m); status.className = 'err'; console.error(m); };
 
-    if (!('gpu' in navigator)) {
-      fail('WebGPU unavailable — use a current Chrome/Edge/Safari with WebGPU enabled.');
+    // Same switch as the console-mirror panel above: `?log` in the URL. One flag
+    // for all debug surfaces, so there's only one thing to remember when you're
+    // typing a URL by hand on someone else's machine.
+    const DEBUG = /[?&]log\b/.test(location.search);
+
+    // What a normal player sees. Anything more specific is diagnostics.
+    const GENERIC_FAILURE = "Foretold couldn't start on this machine.";
+    const NO_WEBGPU = 'Foretold needs WebGPU — try a recent Chrome or Edge.';
+
+    // Progress chatter is debug-only — in production the status line stays
+    // hidden and the canvas is the whole page.
+    const note = (m) => { console.log(m); if (DEBUG) { status.textContent = String(m); status.className = ''; } };
+    const hideStatus = () => { if (!DEBUG) status.style.display = 'none'; };
+
+    // Failures always surface — a silently blank page is the one outcome worth
+    // avoiding. Production gets the short human line; `detail` (internals, flag
+    // lists, stack traces) is for `?log` only, but always goes to the console so
+    // it's recoverable from a bug report.
+    const fail = (short, detail) => {
+      console.error(short + (detail ? '\n' + detail : ''));
+      status.style.display = '';
+      status.className = 'err';
+      status.textContent = DEBUG && detail
+        ? short + '\n\n' + detail
+        : short + '\n(add ?log to the URL for diagnostics)';
+    };
+
+    // WebMain.swift calls these once it knows the real outcome. setup() returns
+    // as soon as it spawns its Task, so the page must NOT treat that as success —
+    // adapter/canvas failures surface later, off the call stack we can catch.
+    let settled = false;
+    window.foretoldReady = () => { settled = true; note('rendering'); hideStatus(); };
+    window.foretoldFailed = (m) => { settled = true; fail(GENERIC_FAILURE, 'Renderer failed: ' + m); };
+
+    const FLAG_HELP = [
+      'Open chrome://gpu and read the WebGPU line for the blocklist reason, then try:',
+      '  chrome://flags/#enable-unsafe-webgpu       (Unsafe WebGPU Support)',
+      '  chrome://flags/#enable-unsafe-swiftshader  (software fallback — slow but renders)',
+      '  chrome://flags/#ignore-gpu-blocklist       (Override software rendering list)',
+      'Flag names move between Chrome versions; chrome://gpu is the source of truth.',
+    ].join('\n');
+
+    // `'gpu' in navigator` only proves the API exists, not that a GPU is usable.
+    // On managed/school machines the API is typically present while
+    // requestAdapter() resolves to null — policy-disabled acceleration, a
+    // blocklisted driver, or an RDP/VM session with no real GPU.
+    async function probeAdapter() {
+      if (!('gpu' in navigator)) {
+        return { ok: false, short: NO_WEBGPU,
+                 detail: 'navigator.gpu is missing — this browser exposes no WebGPU at all.\n' + FLAG_HELP };
+      }
+      let adapter = null, threw = null;
+      try { adapter = await navigator.gpu.requestAdapter(); } catch (e) { threw = e; }
+      if (adapter) return { ok: true, adapter };
+
+      // Does a software adapter exist? If so the flags are worth setting; if not,
+      // nothing on this machine can render and that's worth saying plainly.
+      let fallback = null;
+      try { fallback = await navigator.gpu.requestAdapter({ forceFallbackAdapter: true }); } catch {}
+      const head = threw
+        ? 'requestAdapter() threw: ' + threw.message
+        : 'requestAdapter() returned null — WebGPU exists but no GPU adapter is available.';
+      const mid = fallback
+        ? 'A software (fallback) adapter IS available, so the flags below should get it rendering.'
+        : 'No adapter at all, not even software.';
+      return { ok: false, short: NO_WEBGPU, detail: head + '\n' + mid + '\n' + FLAG_HELP };
+    }
+
+    const probe = await probeAdapter();
+    if (!probe.ok) {
+      fail(probe.short, probe.detail);
     } else {
+      let desc = '';
+      try {
+        const info = probe.adapter.info
+          ?? (probe.adapter.requestAdapterInfo ? await probe.adapter.requestAdapterInfo() : null);
+        if (info) {
+          const parts = [info.vendor, info.architecture, info.description].filter(Boolean).join(' ');
+          if (parts) desc = ' (' + parts + ')';
+        }
+      } catch {}
+      note('WebGPU adapter acquired' + desc + ' — starting…');
       try {
         const { instantiate, MODULE_PATH } = await import('./instantiate.js');
         const { WASI, OpenFile, File, ConsoleStdout } = await import('./wasi-shim.js');
@@ -86,9 +164,19 @@
         });
 
         instance.exports.setup();
-        status.textContent = 'setup() called — board should render.';
+        // Deliberately NOT reporting success here — setup() only starts a Task.
+        // foretoldReady/foretoldFailed above deliver the real verdict. The
+        // watchdog covers the case where Swift reports neither.
+        note('setup() called — waiting for first frame…');
+        setTimeout(() => {
+          if (!settled) {
+            fail(GENERIC_FAILURE,
+                 'setup() returned but no frame rendered within 10s and the renderer '
+               + 'reported nothing — neither foretoldReady nor foretoldFailed fired.');
+          }
+        }, 10000);
       } catch (e) {
-        fail(e && e.stack ? e.stack : e);
+        fail(GENERIC_FAILURE, e && e.stack ? e.stack : String(e));
       }
     }
   </script>

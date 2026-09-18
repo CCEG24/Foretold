@@ -15,3 +15,213 @@ index e1d55a9..d9b24bd 100644
          didSet {
              guard oldValue != allowsGroupOpacity else { return }
              markDirty(.appearance)
+diff --git a/Sources/OpenCoreAnimation/CAWebGPURenderer.swift b/Sources/OpenCoreAnimation/CAWebGPURenderer.swift
+index 17840e5..eca3d67 100644
+--- a/Sources/OpenCoreAnimation/CAWebGPURenderer.swift
++++ b/Sources/OpenCoreAnimation/CAWebGPURenderer.swift
+@@ -14092,10 +14092,10 @@ private final class CommittedAnimationEvaluationFailure {
+                 Double(configuration.contentsScale)
+             )
+ 
+-            // Set font
+-            ctx.font = .string(
+-                "\(configuration.fontSize)px \(configuration.cssFontFamily)"
+-            )
++            // Set font. Uses the full shorthand (style + weight + family list)
++            // rather than treating the PostScript name as a CSS family, which
++            // silently fell back to a different-metrics font.
++            ctx.font = .string(configuration.cssFont)
+ 
+             // Set text color
+             let color = configuration.foregroundRGBA
+diff --git a/Sources/OpenCoreAnimation/Rendering/CATextRenderConfiguration.swift b/Sources/OpenCoreAnimation/Rendering/CATextRenderConfiguration.swift
+index bd9518f..abb5ac9 100644
+--- a/Sources/OpenCoreAnimation/Rendering/CATextRenderConfiguration.swift
++++ b/Sources/OpenCoreAnimation/Rendering/CATextRenderConfiguration.swift
+@@ -1,4 +1,7 @@
+ import OpenFoundation
++#if arch(wasm32)
++import JavaScriptKit
++#endif
+ 
+ /// Describes why a text layer cannot become renderer-independent input.
+ internal enum CATextRenderConfigurationError: Error, Equatable, Sendable {
+@@ -17,6 +20,10 @@ internal struct CATextRenderConfiguration: Equatable, Sendable {
+     let text: String
+     let fontFamily: String
+     let cssFontFamily: String
++    /// The full CSS `font` shorthand (style + weight + size + families). Font
++    /// names arrive as PostScript names ("HelveticaNeue-Bold"), which are not
++    /// CSS families, so the weight/style has to be split out — see CATextMetrics.
++    let cssFont: String
+     let fontSize: CGFloat
+     let contentsScale: CGFloat
+     let foregroundRGBA: SIMD4<Float>
+@@ -79,6 +86,7 @@ internal struct CATextRenderConfiguration: Equatable, Sendable {
+         self.text = text
+         self.fontFamily = fontFamily
+         self.cssFontFamily = Self.cssFontFamily(from: fontFamily)
++        self.cssFont = CATextMetrics.cssFont(name: fontFamily, size: layer.fontSize)
+         self.fontSize = layer.fontSize
+         self.contentsScale = layer.contentsScale
+         self.foregroundRGBA = SIMD4(
+@@ -109,3 +117,159 @@ internal struct CATextRenderConfiguration: Equatable, Sendable {
+         return "\"\(escaped)\""
+     }
+ }
++
++// MARK: - Font resolution and measurement
++
++/// Turns Core Animation / SpriteKit font names into CSS font declarations, and
++/// measures text with Canvas2D.
++///
++/// SpriteKit names fonts the way Apple does — by PostScript name, e.g.
++/// "HelveticaNeue-Bold" or "Baskerville-Italic". Those are *not* CSS families:
++/// the family is "Helvetica Neue" and bold/italic are separate properties.
++/// Passing the PostScript name through as a family silently falls back to a
++/// default font whose metrics differ, so text renders at the wrong width and
++/// overflows (or gets truncated inside) its layer.
++///
++/// Measurement lives here too so the metrics used for layout are produced by the
++/// exact same font string the renderer draws with.
++public enum CATextMetrics {
++
++    /// The CSS `font` shorthand for a font name at a size, e.g.
++    /// `HelveticaNeue-Bold` @ 15 →
++    /// `700 15.0px "Helvetica Neue", "HelveticaNeue-Bold", sans-serif`.
++    public static func cssFont(name: String?, size: CGFloat) -> String {
++        let trimmed = (name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
++        guard !trimmed.isEmpty else { return "\(size)px sans-serif" }
++        if genericFamilies.contains(trimmed.lowercased()) {
++            return "\(size)px \(trimmed.lowercased())"
++        }
++
++        let traits = parse(trimmed)
++        var declaration = ""
++        if traits.isItalic { declaration += "italic " }
++        if let weight = traits.weight { declaration += "\(weight) " }
++        declaration += "\(size)px "
++
++        // Derived family first; the original name second (some engines resolve
++        // PostScript names directly); a generic last so text always renders.
++        var families = ["\"\(escaped(traits.family))\""]
++        if traits.family != trimmed { families.append("\"\(escaped(trimmed))\"") }
++        families.append("sans-serif")
++        return declaration + families.joined(separator: ", ")
++    }
++
++    /// The rendered width of `text`, measured with Canvas2D using the same font
++    /// string the renderer draws with.
++    ///
++    /// Returns `nil` when measurement isn't available (non-browser builds) so
++    /// callers can fall back to an estimate.
++    public static func measuredWidth(
++        _ text: String,
++        fontName: String?,
++        fontSize: CGFloat
++    ) -> CGFloat? {
++        #if arch(wasm32)
++        guard !text.isEmpty else { return 0 }
++        let font = cssFont(name: fontName, size: fontSize)
++        let key = font + "\u{1}" + text
++        if let cached = widthCache[key] { return cached }
++        guard let context = measurementContext() else { return nil }
++        context.font = .string(font)
++        let metrics = context.measureText!(text)
++        guard let width = metrics.width.number, width.isFinite, width >= 0 else {
++            return nil
++        }
++        // Layout churn (rebuilding a scrolling list every frame) can push a lot
++        // of distinct strings through here; drop the cache rather than grow it
++        // without bound.
++        if widthCache.count > 4096 { widthCache.removeAll(keepingCapacity: true) }
++        let measured = CGFloat(width)
++        widthCache[key] = measured
++        return measured
++        #else
++        return nil
++        #endif
++    }
++
++    // MARK: - Name parsing
++
++    private struct Traits {
++        let family: String
++        let weight: Int?
++        let isItalic: Bool
++    }
++
++    private static func parse(_ name: String) -> Traits {
++        let parts = name.split(separator: "-", omittingEmptySubsequences: true).map(String.init)
++        var weight: Int?
++        var isItalic = false
++        for trait in parts.dropFirst() {
++            let lowered = trait.lowercased()
++            if lowered.contains("italic") || lowered.contains("oblique") { isItalic = true }
++            if let value = weightValue(in: lowered) { weight = value }
++        }
++        return Traits(
++            family: spacedWords(parts.first ?? name),
++            weight: weight,
++            isItalic: isItalic
++        )
++    }
++
++    /// Compound names are checked before their substrings so "semibold" doesn't
++    /// match as "bold" and "extralight" doesn't match as "light".
++    private static func weightValue(in token: String) -> Int? {
++        let table: [(name: String, weight: Int)] = [
++            ("ultralight", 200), ("extralight", 200),
++            ("semibold", 600), ("demibold", 600),
++            ("extrabold", 800), ("ultrabold", 800),
++            ("thin", 100), ("light", 300),
++            ("regular", 400), ("roman", 400), ("normal", 400), ("book", 400),
++            ("medium", 500), ("bold", 700),
++            ("black", 900), ("heavy", 900),
++        ]
++        for entry in table where token.contains(entry.name) { return entry.weight }
++        return nil
++    }
++
++    /// "HelveticaNeue" → "Helvetica Neue"; single words are left alone.
++    private static func spacedWords(_ value: String) -> String {
++        var result = ""
++        var previousWasLower = false
++        for character in value {
++            if character.isUppercase && previousWasLower { result.append(" ") }
++            result.append(character)
++            previousWasLower = character.isLowercase || character.isNumber
++        }
++        return result
++    }
++
++    private static func escaped(_ value: String) -> String {
++        value
++            .replacingOccurrences(of: "\\", with: "\\\\")
++            .replacingOccurrences(of: "\"", with: "\\\"")
++    }
++
++    private static let genericFamilies: Set<String> = [
++        "serif", "sans-serif", "monospace", "cursive", "fantasy",
++        "system-ui", "ui-serif", "ui-sans-serif", "ui-monospace",
++        "ui-rounded", "math", "emoji", "fangsong",
++    ]
++
++    // MARK: - Measurement context (browser only)
++
++    #if arch(wasm32)
++    nonisolated(unsafe) private static var cachedContext: JSObject?
++    nonisolated(unsafe) private static var widthCache: [String: CGFloat] = [:]
++
++    /// A detached 2D context kept for the process lifetime; measuring needs no
++    /// pixels, so the canvas is never sized or attached to the document.
++    private static func measurementContext() -> JSObject? {
++        if let cachedContext { return cachedContext }
++        let document = JSObject.global.document
++        let canvas = document.createElement("canvas")
++        guard let context = canvas.getContext("2d").object else { return nil }
++        cachedContext = context
++        return context
++    }
++    #endif
++}

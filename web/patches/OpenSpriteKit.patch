@@ -1,8 +1,8 @@
 diff --git a/Sources/OpenSpriteKit/SKLabelNode.swift b/Sources/OpenSpriteKit/SKLabelNode.swift
-index dda47e3..b38a167 100644
+index dda47e3..2e40a0d 100644
 --- a/Sources/OpenSpriteKit/SKLabelNode.swift
 +++ b/Sources/OpenSpriteKit/SKLabelNode.swift
-@@ -92,25 +92,57 @@ open class SKLabelNode: SKNode {
+@@ -92,27 +92,59 @@ open class SKLabelNode: SKNode {
      /// This method only sets bounds width when preferredMaxLayoutWidth is specified
      /// (for multi-line text wrapping).
      private func updateLayerBounds() {
@@ -40,9 +40,9 @@ index dda47e3..b38a167 100644
          didSet {
              updateTextLayerAlignment()
 +            updateAnchorForAlignment()
-+        }
-+    }
-+
+         }
+     }
+ 
 +    /// Maps the label's alignment modes onto the backing layer's anchorPoint so
 +    /// text positions like SpriteKit. The base SKNode leaves anchorPoint at
 +    /// (0.5, 0.5), which centers every label on its position — wrong for left/
@@ -60,27 +60,112 @@ index dda47e3..b38a167 100644
 +        case .center: ay = 0.5
 +        case .bottom: ay = 0.0
 +        case .baseline: ay = 0.17   // baseline sits ~0.2·fontSize above the bottom
-         }
++        }
 +        layer.anchorPoint = CGPoint(x: ax, y: ay)
-     }
- 
++    }
++
      /// Updates the text layer alignment based on horizontal alignment mode.
-@@ -181,8 +213,12 @@ open class SKLabelNode: SKNode {
+     private func updateTextLayerAlignment() {
+         switch horizontalAlignmentMode {
+@@ -172,31 +204,86 @@ open class SKLabelNode: SKNode {
+ 
+     // MARK: - Computed Properties
+ 
+-    /// Estimates the text size based on the current text and font settings.
++    /// The size of the label's text with the current font settings.
+     ///
+-    /// This is an approximation since actual text measurement requires platform-specific APIs.
+-    /// The renderer may calculate the actual size for rendering purposes.
++    /// Prefers real Canvas2D metrics (`CATextMetrics`), measured with the exact
++    /// font string the renderer draws with, so the layer's bounds match what is
++    /// actually rasterized — mis-measuring here made the renderer truncate text
++    /// ("FORETOLD" → "foret…") and threw off any layout keyed off `frame`.
++    /// Falls back to a per-character approximation where measurement isn't
++    /// available (native test builds).
+     private func estimatedTextSize() -> CGSize {
+         guard let text = text, !text.isEmpty else {
              return .zero
          }
  
 -        // Approximate character width as 0.6 * fontSize for typical fonts
 -        let characterWidthFactor: CGFloat = 0.6
-+        // Approximate character width. 0.6 under-measures bold/caps (e.g.
-+        // "FORETOLD"), so the renderer truncated to "foret…"; 0.75 leaves margin.
-+        // Extra width is harmless — left/right anchoring keeps alignment correct,
-+        // and centered text stays centered. (A real Canvas2D measure upstream
-+        // would remove the guesswork entirely.)
-+        let characterWidthFactor: CGFloat = 0.75
          let lineHeight = fontSize * 1.2
++        let wraps = preferredMaxLayoutWidth > 0
++            && (lineBreakMode == .byWordWrapping || lineBreakMode == .byCharWrapping)
++
++        if let measured = CATextMetrics.measuredWidth(text, fontName: fontName, fontSize: fontSize) {
++            if wraps {
++                let lines = wrappedLineCount(text, maximumWidth: preferredMaxLayoutWidth, singleLineWidth: measured)
++                let effectiveLines = numberOfLines > 0 ? min(lines, numberOfLines) : lines
++                return CGSize(width: preferredMaxLayoutWidth, height: lineHeight * CGFloat(effectiveLines))
++            }
++            // Explicit line breaks still lay out as multiple lines even without
++            // a wrapping width; size to the widest of them.
++            let paragraphs = text.split(separator: "\n", omittingEmptySubsequences: false)
++            if paragraphs.count > 1 {
++                let widest = paragraphs
++                    .map { CATextMetrics.measuredWidth(String($0), fontName: fontName, fontSize: fontSize) ?? 0 }
++                    .max() ?? measured
++                return CGSize(
++                    width: widest + fontSize * 0.1,
++                    height: lineHeight * CGFloat(paragraphs.count)
++                )
++            }
++            // A sliver of padding keeps antialiased edges from clipping.
++            return CGSize(width: measured + fontSize * 0.1, height: lineHeight)
++        }
  
-         if preferredMaxLayoutWidth > 0 && (lineBreakMode == .byWordWrapping || lineBreakMode == .byCharWrapping) {
-@@ -339,6 +375,7 @@ open class SKLabelNode: SKNode {
+-        if preferredMaxLayoutWidth > 0 && (lineBreakMode == .byWordWrapping || lineBreakMode == .byCharWrapping) {
+-            // Multi-line text: estimate based on wrapping
++        // Fallback: approximate character width (no measurement available).
++        let characterWidthFactor: CGFloat = 0.75
++        if wraps {
+             let charWidth = fontSize * characterWidthFactor
+             let charsPerLine = max(1, Int(preferredMaxLayoutWidth / charWidth))
+             let lines = max(1, (text.count + charsPerLine - 1) / charsPerLine)
+             let effectiveLines = numberOfLines > 0 ? min(lines, numberOfLines) : lines
+             return CGSize(width: preferredMaxLayoutWidth, height: lineHeight * CGFloat(effectiveLines))
+-        } else {
+-            // Single line text
+-            let width = CGFloat(text.count) * fontSize * characterWidthFactor
+-            return CGSize(width: width, height: lineHeight)
+         }
++        let width = CGFloat(text.count) * fontSize * characterWidthFactor
++        return CGSize(width: width, height: lineHeight)
++    }
++
++    /// Greedy word wrap using measured widths, mirroring the renderer's layout so
++    /// the reserved height matches the number of lines actually drawn.
++    private func wrappedLineCount(
++        _ text: String,
++        maximumWidth: CGFloat,
++        singleLineWidth: CGFloat
++    ) -> Int {
++        let paragraphs = text.split(separator: "\n", omittingEmptySubsequences: false)
++        // Fits on one line and has no explicit breaks — nothing to wrap.
++        if singleLineWidth <= maximumWidth && paragraphs.count <= 1 { return 1 }
++
++        var total = 0
++        for paragraph in paragraphs {
++            var lines = 1
++            var current = ""
++            for word in paragraph.split(separator: " ") {
++                let candidate = current.isEmpty ? String(word) : current + " " + String(word)
++                let width = CATextMetrics.measuredWidth(candidate, fontName: fontName, fontSize: fontSize) ?? 0
++                if width > maximumWidth && !current.isEmpty {
++                    lines += 1
++                    current = String(word)
++                } else {
++                    current = candidate
++                }
++            }
++            total += lines
++        }
++        return max(1, total)
+     }
+ 
+     /// A rectangle in the label's local coordinate system that defines its content area.
+@@ -339,6 +426,7 @@ open class SKLabelNode: SKNode {
          #endif
          updateTextLayerAlignment()
          updateTextLayerTruncation()

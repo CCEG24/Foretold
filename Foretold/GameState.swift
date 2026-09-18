@@ -568,9 +568,25 @@ struct GameState {
         return iceSlide(landingOn: target, heading: direction, moverIsPlayer: true, extraBlocked: []).destination
     }
 
-    /// Where a drafted attack or throw would originate right now — the post-slide
-    /// landing, so aiming previews from where the player actually ends up.
-    var attackOrigin: GridPosition { plannedLanding }
+    /// Where the drafted move truly leaves the player standing: the post-slide
+    /// landing, and then the far end of any teleporter that landing steps onto.
+    /// This is the tile the scene should light gold as the real destination.
+    ///
+    /// The warp is only foreseen when the move actually relocates the player,
+    /// matching `resolveTurn`'s `steppedTile != playerStart` gate — standing
+    /// still on a portal end doesn't warp you, and neither does drafting no move
+    /// while parked on one.
+    var plannedDestination: GridPosition {
+        let landing = plannedLanding
+        guard landing != playerPosition else { return landing }
+        return teleportDestination(from: landing, movingPlayer: true)
+    }
+
+    /// Where a drafted attack or throw would originate right now — the tile the
+    /// move really ends on, so aiming previews from where the player actually
+    /// ends up (past an ice slide, and out the far end of a portal, which is
+    /// where `resolveTurn` swings from).
+    var attackOrigin: GridPosition { plannedDestination }
 
     /// Turns before the given carried weapon can attack again; 0 means ready.
     /// Dev no-cooldown reports every weapon as ready so it can be fired each turn.
@@ -735,48 +751,121 @@ struct GameState {
         return (shoves, explosions, hits)
     }
 
-    /// Drags every enemy within the diamond one tile toward `center` (the eye of
-    /// a lobbed Vortex): bodies cluster onto the eye, over live spikes, into your
-    /// reach, or off their telegraphed tiles. Nearest-first so a tile a closer
-    /// body vacates opens for the one behind it; a foe hauled into a barrel sets
-    /// it off; walls, the player, and occupied tiles stop the pull.
-    private mutating func performVortex(center: GridPosition, radius: Int)
-        -> (shoves: [TurnResolution.Shove], explosions: [TurnResolution.Explosion], hits: [TurnResolution.EnemyHit]) {
+    /// Drags everything the eye has hold of one tile toward `center` (the eye of
+    /// a lobbed Vortex): bodies cluster onto the eye, over live spikes, into
+    /// reach, or off their telegraphed tiles, and loose barrels come with them.
+    /// Nearest-first, so a tile a closer mover vacates opens for whatever was
+    /// queued behind it.
+    ///
+    /// A body hauled into a barrel sets it off; walls and occupied tiles just
+    /// stop the pull. A *barrel* reeled into a wall, a body, another barrel, or
+    /// the board's edge rams and bursts where it stands (full blast, chaining as
+    /// usual) — the same rule `shoveBarrels` uses; one with clear floor ahead
+    /// simply slides in, still live.
+    ///
+    /// In the player's hands only enemies and barrels are reeled in. An enemy's
+    /// Vortex sets `pullsPlayer`, so it yanks the player toward the eye too —
+    /// the same asymmetry the grapple already has. `chargesUltimate` is false
+    /// for an enemy cast, so a barrel it lights neither charges the omen nor
+    /// credits the player.
+    private mutating func performVortex(
+        center: GridPosition,
+        radius: Int,
+        pullsPlayer: Bool = false,
+        chargesUltimate: Bool = true
+    ) -> (shoves: [TurnResolution.Shove], explosions: [TurnResolution.Explosion], hits: [TurnResolution.EnemyHit], barrelMoves: [TurnResolution.BarrelMove], playerPulledTo: GridPosition?) {
+        /// What the eye has hold of.
+        enum Caught {
+            case enemy(Int)
+            case barrel(Int)
+            case player
+        }
         var shoves: [TurnResolution.Shove] = []
         var explosions: [TurnResolution.Explosion] = []
         var hits: [TurnResolution.EnemyHit] = []
+        var barrelMoves: [TurnResolution.BarrelMove] = []
+        var playerPulledTo: GridPosition?
 
-        let pulled = enemies
-            .filter { $0.position != center && $0.position.distance(to: center) <= radius }
-            .map(\.id)
-            .sorted { a, b in
-                let pa = enemies.first { $0.id == a }?.position ?? center
-                let pb = enemies.first { $0.id == b }?.position ?? center
-                return pa.distance(to: center) < pb.distance(to: center)
+        /// In the diamond, but not already sitting on the eye.
+        func inReach(_ tile: GridPosition) -> Bool {
+            tile != center && tile.distance(to: center) <= radius
+        }
+        var caught: [(what: Caught, distance: Int)] = []
+        for enemy in enemies where inReach(enemy.position) {
+            caught.append((.enemy(enemy.id), enemy.position.distance(to: center)))
+        }
+        for barrel in obstacles where barrel.kind == .barrel && inReach(barrel.position) {
+            caught.append((.barrel(barrel.id), barrel.position.distance(to: center)))
+        }
+        if pullsPlayer, !isGameOver, inReach(playerPosition) {
+            caught.append((.player, playerPosition.distance(to: center)))
+        }
+        caught.sort { $0.distance < $1.distance }
+
+        for (what, _) in caught {
+            // Where it stands now — a closer mover's blast may already have
+            // taken it off the board entirely.
+            let from: GridPosition
+            switch what {
+            case .enemy(let id):
+                guard let index = enemies.firstIndex(where: { $0.id == id }) else { continue }
+                from = enemies[index].position
+            case .barrel(let id):
+                guard let index = obstacles.firstIndex(where: { $0.id == id }) else { continue }
+                from = obstacles[index].position
+            case .player:
+                guard !isGameOver else { continue }
+                from = playerPosition
             }
-
-        for id in pulled {
-            guard let index = enemies.firstIndex(where: { $0.id == id }) else { continue }
-            let from = enemies[index].position
             guard let dir = Direction.aiming(from: from, toward: center, allowDiagonals: true) else { continue }
             let step = dir.unitStep
             let next = GridPosition(x: from.x + step.x, y: from.y + step.y)
-            guard next != from, contains(next) else { continue }
-            if let scenery = obstacle(at: next) {
-                // Reeled into a barrel: it goes off. A wall just stops the pull.
+            guard next != from else { continue }
+
+            let offBoard = !contains(next)
+            let scenery = offBoard ? nil : obstacle(at: next)
+            let occupied = !offBoard
+                && (next == playerPosition || enemies.contains { $0.position == next })
+
+            if case .barrel(let id) = what {
+                if offBoard || scenery != nil || occupied {
+                    // Rammed: it bursts on its own tile, chaining as usual.
+                    let blast = detonateBarrels(struckTiles: [from], chargesUltimate: chargesUltimate)
+                    explosions += blast.explosions
+                    hits += blast.hits
+                } else if let index = obstacles.firstIndex(where: { $0.id == id }) {
+                    obstacles[index].position = next
+                    barrelMoves.append(TurnResolution.BarrelMove(from: from, to: next))
+                }
+                continue
+            }
+
+            guard !offBoard else { continue }
+            if let scenery {
+                // Hauled into a barrel: it goes off. A wall just stops the pull.
                 if scenery.kind == .barrel {
-                    let blast = detonateBarrels(struckTiles: [next])
+                    let blast = detonateBarrels(struckTiles: [next], chargesUltimate: chargesUltimate)
                     explosions += blast.explosions
                     hits += blast.hits
                 }
                 continue
             }
-            if next == playerPosition { continue }
-            if enemies.contains(where: { $0.id != id && $0.position == next }) { continue }
-            enemies[index].position = next
-            shoves.append(TurnResolution.Shove(enemyID: id, from: from, to: next))
+            guard !occupied else { continue }
+            switch what {
+            case .enemy(let id):
+                guard let index = enemies.firstIndex(where: { $0.id == id }) else { continue }
+                enemies[index].position = next
+                shoves.append(TurnResolution.Shove(enemyID: id, from: from, to: next))
+            case .player:
+                // A one-tile drag only ever crosses its resting tile, so spikes
+                // there are left to the end-of-turn bite like any other landing.
+                playerPosition = next
+                playerPulledTo = next
+            case .barrel:
+                break   // handled above
+            }
         }
-        return (shoves, explosions, hits)
+        return (shoves, explosions, hits, barrelMoves, playerPulledTo)
     }
 
     /// Knocks the player `distance` tiles down `direction`, one step at a time
@@ -1282,11 +1371,16 @@ struct GameState {
     /// Where a mover ending on `tile` actually lands: the far end of a teleporter
     /// (a single hop, and only if that end is free of scenery, an enemy, or the
     /// player), otherwise `tile` itself.
-    func teleportDestination(from tile: GridPosition) -> GridPosition {
+    ///
+    /// Pass `movingPlayer` when the player is the one warping: they're the mover,
+    /// so their own tile can't block their exit. Without it, previewing a warp
+    /// back to the end you're standing on would report a fizzle that resolution
+    /// then goes ahead with (by which point `playerPosition` has already moved).
+    func teleportDestination(from tile: GridPosition, movingPlayer: Bool = false) -> GridPosition {
         guard let exit = teleporters.compactMap({ $0.exit(from: tile) }).first else { return tile }
         let blocked = obstacle(at: exit) != nil
             || enemies.contains { $0.position == exit }
-            || exit == playerPosition
+            || (!movingPlayer && exit == playerPosition)
         return blocked ? tile : exit
     }
 
@@ -1730,7 +1824,7 @@ struct GameState {
         let draftedDestination = steppedTile
         // Stepping onto a teleporter this turn warps the player to its far end.
         if steppedTile != playerStart {
-            let warped = teleportDestination(from: steppedTile)
+            let warped = teleportDestination(from: steppedTile, movingPlayer: true)
             if warped != steppedTile {
                 teleports.append(TurnResolution.Teleport(enemyID: nil, from: steppedTile, to: warped))
                 playerPosition = warped
@@ -2121,6 +2215,7 @@ struct GameState {
                 }
                 let suck = performVortex(center: target, radius: thrown.blastRadius)
                 shoves += suck.shoves
+                barrelMoves += suck.barrelMoves
                 playerExplosions += suck.explosions
                 playerPhaseHits += suck.hits
             } else if thrown.flightTurns > 0 {
@@ -2207,6 +2302,8 @@ struct GameState {
         var friendlyFireHits: [TurnResolution.EnemyHit] = []
         var enemyExplosions: [TurnResolution.Explosion] = []
         var enemyGrappleHooks: [TurnResolution.GrappleHook] = []
+        var enemyShoves: [TurnResolution.Shove] = []
+        var enemyBarrelMoves: [TurnResolution.BarrelMove] = []
 
         // Armed bombers burn their fuses first — and blow.
         for bomberID in enemies.compactMap({ $0.archetype == .bomber && $0.fuse != nil ? $0.id : nil }) {
@@ -2328,6 +2425,9 @@ struct GameState {
 
             var tiles: [GridPosition] = []
             var throwerIncluded = false
+            /// The eye of a Vortex this enemy just lobbed, if any — the pull runs
+            /// after the blast below (crush first, then drag the survivors).
+            var vortexEye: (center: GridPosition, radius: Int)?
             if attacker.plannedIntent == .nova {
                 // The cannon swept in a circle: everything around the boss
                 // takes a shell, its own tile spared.
@@ -2383,6 +2483,12 @@ struct GameState {
                 } else {
                     tiles = blastTiles(around: target, radius: thrown.blastRadius, includeCenter: true)
                     throwerIncluded = true
+                    // A Vortex in enemy hands doesn't just crush the diamond — it
+                    // hauls whatever survives (the player included) in toward the
+                    // eye. Recorded here, resolved after the blast.
+                    if attacker.weapon.vortex {
+                        vortexEye = (center: target, radius: thrown.blastRadius)
+                    }
                 }
             } else if attacker.plannedSecondaryDirection == nil {
                 continue
@@ -2475,11 +2581,31 @@ struct GameState {
             let comradeHits = damageEnemies(on: struckEnemies, damage: attackDamage, chargesUltimate: false)
             afflict(comradeHits, with: strikingWeapon.affliction, chargesUltimate: false, credit: nil)
             friendlyFireHits += comradeHits
-            let blast = detonateBarrels(struckTiles: struck, chargesUltimate: false)
-            enemyExplosions += blast.explosions
-            friendlyFireHits += blast.hits
+            // A Vortex doesn't pop the barrels it covers — it drags them (below),
+            // and they burst only if the pull rams them into something. Every
+            // other attack sets off whatever it swept.
+            if vortexEye == nil {
+                let blast = detonateBarrels(struckTiles: struck, chargesUltimate: false)
+                enemyExplosions += blast.explosions
+                friendlyFireHits += blast.hits
+            }
             if let lingering = strikingWeapon.lingering {
                 addLingeringEffect(at: tiles, damagePerTurn: lingering.damagePerTurn, duration: lingering.duration, chargesUltimate: false)
+            }
+            // The eye closes: everyone still standing in the diamond — comrades
+            // and the player alike — is dragged one tile inward. Deliberately
+            // outside the `hitsPlayer` check above: a dodge sidesteps the blast,
+            // not the gravity. Since the eye is drafted onto the player's tile,
+            // standing still leaves you *as* the eye (nothing to pull you toward),
+            // so the pull is what punishes walking out of the telegraphed diamond.
+            if let eye = vortexEye {
+                let suck = performVortex(center: eye.center, radius: eye.radius,
+                                         pullsPlayer: !devKnockbackImmune, chargesUltimate: false)
+                enemyShoves += suck.shoves
+                enemyBarrelMoves += suck.barrelMoves
+                enemyExplosions += suck.explosions
+                friendlyFireHits += suck.hits
+                if let landed = suck.playerPulledTo { playerShoveTo = landed }
             }
 
             enemyAttacks.append(TurnResolution.EnemyAttack(
@@ -2645,6 +2771,8 @@ struct GameState {
             grappleHook: grappleHook,
             playerGrappleTo: playerGrappleTo,
             enemyGrappleHooks: enemyGrappleHooks,
+            enemyShoves: enemyShoves,
+            enemyBarrelMoves: enemyBarrelMoves,
             enemyMoves: moves,
             enemyAttacks: enemyAttacks,
             friendlyFireHits: friendlyFireHits,

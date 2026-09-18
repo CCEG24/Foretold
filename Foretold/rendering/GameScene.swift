@@ -681,6 +681,9 @@ class GameScene: SKScene {
                 // child is positioned from the sprite's corner, not its center
                 // (fine on SpriteKit, off-center on OpenSpriteKit).
                 let container = SKNode()
+                // Named so the attack/dig telegraph can find the fill sprite
+                // inside the container (see refreshTileHighlights).
+                wall.name = "crumbleFill"
                 container.addChild(wall)
                 let crack = SKSpriteNode(color: SKColor(white: 0.75, alpha: 0.35),
                                          size: CGSize(width: 2, height: tileSize - 8))
@@ -1875,15 +1878,14 @@ class GameScene: SKScene {
         for spike in state.spikes where spike.active {
             hazardDamages[spike.position] = GameState.spikeDamage
         }
-        // Planning a move onto a portal foresees the warp: the exit lights up gold
-        // as the true destination.
         // Planning a move onto ice or a portal foresees where the player truly
         // ends up: the slide's resting tile (plannedLanding), then any warp from
-        // it, lit gold as the real destination.
+        // it, lit gold as the real destination — and the tile a drafted attack
+        // will swing from.
         var plannedWarpExit: GridPosition?
-        if planning, let target = state.plannedTarget {
-            let exit = state.teleportDestination(from: state.plannedLanding)
-            if exit != target { plannedWarpExit = exit }
+        if planning, state.plannedTarget != nil {
+            let exit = state.plannedDestination
+            if exit != state.plannedLanding { plannedWarpExit = exit }
         }
 
         // Incoming shells and armed bombers always telegraph their zones; while
@@ -1937,7 +1939,10 @@ class GameScene: SKScene {
         let digTint = SKColor(red: 0.60, green: 0.28, blue: 0.20, alpha: 1.0)
         let digTiles = planning ? Set(state.enemies.compactMap(\.plannedDigTile)) : []
         for (position, node) in obstacleNodes {
-            guard let wall = node as? SKSpriteNode, state.obstacle(at: position)?.destructible == true else { continue }
+            // A crumbling wall is a container (fill + crack seam), so reach in for
+            // the named fill sprite; a plain wall is the sprite itself.
+            let sprite = (node as? SKSpriteNode) ?? (node.childNode(withName: "crumbleFill") as? SKSpriteNode)
+            guard let wall = sprite, state.obstacle(at: position)?.destructible == true else { continue }
             if attackTiles.contains(position) {
                 wall.color = attackTint
             } else if digTiles.contains(position) {
@@ -2906,7 +2911,8 @@ class GameScene: SKScene {
         // hits and explosions alone still need this phase to play.
         guard !resolution.enemyAttacks.isEmpty || playerWasDamaged
             || !resolution.friendlyFireHits.isEmpty || !resolution.enemyExplosions.isEmpty
-            || !resolution.enemyGrappleHooks.isEmpty else {
+            || !resolution.enemyGrappleHooks.isEmpty || !resolution.enemyShoves.isEmpty
+            || !resolution.enemyBarrelMoves.isEmpty else {
             playHazards(resolution)
             return
         }
@@ -2922,6 +2928,10 @@ class GameScene: SKScene {
                 tileNodes[tile]?.color = SKColor(red: 0.55, green: 0.12, blue: 0.10, alpha: 1.0)
             }
         }
+        // Comrades and barrels hauled in by an enemy's Vortex slide as the blast
+        // lands — barrels first, so one rammed into scenery bursts on arrival.
+        animateBarrelMoves(resolution.enemyBarrelMoves)
+        animateShoves(resolution.enemyShoves)
         animateEnemyHits(resolution.friendlyFireHits)
         animateExplosions(resolution.enemyExplosions)
 

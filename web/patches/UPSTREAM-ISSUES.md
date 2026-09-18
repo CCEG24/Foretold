@@ -109,6 +109,12 @@ bottom/baseline→y0-ish, center→0.5, top→y1) whenever alignment changes.
 > Related: the width heuristic behind auto-sizing (`estimatedTextSize`,
 > `0.6·fontSize`/char) under-measures bold/caps and causes truncation ("FORETOLD"
 > → "foret…"). A real Canvas2D measurement (see issue #1) removes the guesswork.
+>
+> **Our fix:** `estimatedTextSize()` now measures with Canvas2D via a new
+> `CATextMetrics.measuredWidth` (see issue #8) instead of guessing, including
+> greedy word-wrap line counting and `\n` paragraphs. Measuring in `SKLabelNode`
+> rather than only in the renderer also fixes callers that lay out from
+> `label.frame.width`.
 
 ---
 
@@ -152,3 +158,41 @@ offset).
 **Expected:** child coordinates relative to the parent's anchor point (SpriteKit
 semantics) — i.e. the parent's content/sublayer coordinate origin should account for
 `anchorPoint × bounds.size`.
+
+---
+
+## 8. [OpenCoreAnimation] Font names are passed to CSS as-is — PostScript names don't resolve, and weight/style are dropped
+
+**Repo:** OpenCoreAnimation · **Files:** `Rendering/CATextRenderConfiguration.swift` (`cssFontFamily`), `CAWebGPURenderer.swift` (`renderText`)
+
+The renderer builds its Canvas2D font as:
+
+```swift
+ctx.font = .string("\(configuration.fontSize)px \(configuration.cssFontFamily)")
+```
+
+where `cssFontFamily` is just the quoted `CATextLayer.font` string. Two problems:
+
+1. **SpriteKit/CoreText name fonts by PostScript name** — `"HelveticaNeue-Bold"`,
+   `"Baskerville-Italic"`. Those are not CSS *families* (the family is
+   `"Helvetica Neue"`), so matching is unreliable and typically falls back to a
+   default font with different metrics.
+2. **Weight and style are never emitted.** Even when the family resolves, there is
+   no `bold` / `italic` in the shorthand, so `-Bold` and `-Italic` faces render as
+   regular.
+
+Combined effect: text is drawn in the wrong face at the wrong width, so it
+overflows or gets truncated inside its layer, and every metric derived from it is
+off.
+
+**Repro:** a label with `fontName = "HelveticaNeue-Bold"` renders non-bold, in a
+fallback face, and measures wider/narrower than the layer reserved.
+
+**Fix (implemented locally):** a `CATextMetrics.cssFont(name:size:)` that splits the
+PostScript name into family + weight + style and emits a proper shorthand —
+`HelveticaNeue-Bold` @15 → `700 15.0px "Helvetica Neue", "HelveticaNeue-Bold", sans-serif`
+(camelCase → spaced family; `Thin/Light/Medium/Semibold/Bold/Black…` → numeric
+weights, compound names matched before their substrings; `Italic`/`Oblique` → style;
+original name kept as a secondary family for engines that do resolve PostScript
+names; generic family last). The same helper is reused for measurement so layout
+and rasterization agree.
