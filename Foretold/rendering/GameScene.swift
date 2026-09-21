@@ -25,6 +25,24 @@ class GameScene: SKScene {
 
     private let boardNode = SKNode()
     private var tileNodes: [GridPosition: SKSpriteNode] = [:]
+    /// What each tile's colour was last computed from, so a repaint that would
+    /// land on the same colour is skipped entirely. Cleared for any tile
+    /// painted directly (a flash, a blocked spawn) so the next refresh
+    /// restores it.
+    private struct TileAppearance: Equatable {
+        let isLegalTarget: Bool
+        let isPlannedAttack: Bool
+        let isEnemyThreat: Bool
+        let hazardDamage: Int?
+        let isThrowRange: Bool
+        let isSpawnTelegraph: Bool
+        let isPlannedDestination: Bool
+    }
+    private var tileAppearances: [GridPosition: TileAppearance] = [:]
+    /// The same idea for crumbling walls, which carry their telegraph in their
+    /// own colour because the wall covers its tile.
+    private enum WallTint { case base, attack, breach }
+    private var wallTints: [GridPosition: WallTint] = [:]
     private var playerNode: ActorNode!
     private var enemyNodes: [Int: ActorNode] = [:]
     private var obstacleNodes: [GridPosition: SKNode] = [:]
@@ -52,6 +70,9 @@ class GameScene: SKScene {
     private var pactHUD: SKNode!
     private var pactTooltip: SKLabelNode?
     private var pactTooltipMod: RunModifier?
+    /// The strip the pact row occupies, in scene coordinates. Empty until the
+    /// row is built, which is exactly when there's nothing to hover.
+    private var pactHoverBounds: CGRect = .zero
     private var buffsLabel: SKLabelNode!
     /// The held-buffs row's resting colour, named so `flashBuffsRow` can always
     /// restore it rather than reading a possibly mid-flash value back.
@@ -951,6 +972,9 @@ class GameScene: SKScene {
 
     @discardableResult
     private func addObstacleNode(for obstacle: Obstacle) -> SKNode {
+        // A fresh node starts at its authored colour, so any remembered tint
+        // for this tile belongs to the wall that used to stand here.
+        wallTints[obstacle.position] = nil
         let node: SKNode
         switch obstacle.kind {
         case .wall:
@@ -2357,9 +2381,13 @@ class GameScene: SKScene {
             }
         }
 
+        // Only repaint what actually changed. Moving the mouse one tile used
+        // to rewrite all 225 colours, and every write dirties that layer —
+        // which on the web drags the textured layers through the renderer's
+        // upload path again and stalls the frame behind the GPU. Two or three
+        // tiles really change per hover; the rest are a no-op.
         for (position, tile) in tileNodes {
-            tile.color = tileColor(
-                for: position,
+            let appearance = TileAppearance(
                 isLegalTarget: legalTargets.contains(position),
                 isPlannedAttack: attackTiles.contains(position),
                 isEnemyThreat: threatTiles.contains(position),
@@ -2367,6 +2395,18 @@ class GameScene: SKScene {
                 isThrowRange: throwRange.contains(position),
                 isSpawnTelegraph: spawnTiles.contains(position),
                 isPlannedDestination: position == plannedWarpExit
+            )
+            guard tileAppearances[position] != appearance else { continue }
+            tileAppearances[position] = appearance
+            tile.color = tileColor(
+                for: position,
+                isLegalTarget: appearance.isLegalTarget,
+                isPlannedAttack: appearance.isPlannedAttack,
+                isEnemyThreat: appearance.isEnemyThreat,
+                hazardDamage: appearance.hazardDamage,
+                isThrowRange: appearance.isThrowRange,
+                isSpawnTelegraph: appearance.isSpawnTelegraph,
+                isPlannedDestination: appearance.isPlannedDestination
             )
         }
         // A destructible wall sits on top of its tile, hiding the tile-color
@@ -2396,14 +2436,27 @@ class GameScene: SKScene {
             // the named fill sprite; a plain wall is the sprite itself.
             let sprite = (node as? SKSpriteNode) ?? (node.childNode(withName: "crumbleFill") as? SKSpriteNode)
             guard let wall = sprite, state.obstacle(at: position)?.destructible == true else { continue }
-            if attackTiles.contains(position) {
-                wall.color = attackTint
-            } else if breachTiles.contains(position) {
-                wall.color = breachTint
-            } else {
-                wall.color = crumbleBase
+            // Same reason as the tiles: repaint only on a change. Barricades
+            // fills the board with these, so a blind rewrite is 200 dirtied
+            // layers every time the pointer crosses a tile.
+            let tint: WallTint = attackTiles.contains(position) ? .attack
+                : breachTiles.contains(position) ? .breach : .base
+            guard wallTints[position] != tint else { continue }
+            wallTints[position] = tint
+            switch tint {
+            case .attack: wall.color = attackTint
+            case .breach: wall.color = breachTint
+            case .base: wall.color = crumbleBase
             }
         }
+    }
+
+    /// Paints a tile outside the highlight pass — a swing flash, a blocked
+    /// spawn. Forgets the cached appearance so the next refresh repaints it
+    /// rather than assuming the colour it left there is still on screen.
+    private func paintTile(_ position: GridPosition, _ color: SKColor) {
+        tileNodes[position]?.color = color
+        tileAppearances[position] = nil
     }
 
     private func tileColor(
@@ -3408,7 +3461,7 @@ class GameScene: SKScene {
         }
 
         for tile in resolution.attackTiles {
-            tileNodes[tile]?.color = SKColor(red: 0.85, green: 0.25, blue: 0.15, alpha: 1.0)
+            paintTile(tile, SKColor(red: 0.85, green: 0.25, blue: 0.15, alpha: 1.0))
         }
         // Whip the grapple line out to whatever it bit, and reel the player in if
         // it grabbed a wall or barrel (a dragged enemy rides `shoves`, below).
@@ -3501,7 +3554,7 @@ class GameScene: SKScene {
             run(SKAction.sequence([
                 SKAction.wait(forDuration: delay),
                 SKAction.run { [weak self] in
-                    self?.tileNodes[tile]?.color = .white
+                    self?.paintTile(tile, .white)
                 },
             ]))
         }
@@ -3587,7 +3640,7 @@ class GameScene: SKScene {
 
         for attack in resolution.enemyAttacks {
             for tile in attack.tiles {
-                tileNodes[tile]?.color = SKColor(red: 0.55, green: 0.12, blue: 0.10, alpha: 1.0)
+                paintTile(tile, SKColor(red: 0.55, green: 0.12, blue: 0.10, alpha: 1.0))
             }
         }
         // Comrades and barrels hauled in by an enemy's Vortex slide as the blast
@@ -3704,7 +3757,7 @@ class GameScene: SKScene {
                     SKAction.fadeIn(withDuration: 0.20),
                 ]))
             } else {
-                tileNodes[spawn.position]?.color = .white
+                paintTile(spawn.position, .white)
             }
         }
         run(SKAction.wait(forDuration: 0.25)) { [weak self] in
@@ -3799,6 +3852,7 @@ class GameScene: SKScene {
         enemyNodes.removeAll()
         obstacleNodes.values.forEach { $0.removeFromParent() }
         obstacleNodes.removeAll()
+        wallTints.removeAll()
         setUpEnemies()
         setUpObstacles()
         setUpTerrain()
@@ -4377,10 +4431,29 @@ class GameScene: SKScene {
             x += label.frame.width
             pactHUD.addChild(label)
         }
+        // Remembered so hover can reject the rest of the screen with a rect
+        // test instead of a scene-graph search (see updatePactTooltip).
+        pactHoverBounds = CGRect(
+            x: pactHUD.position.x - total / 2,
+            y: pactHUD.position.y - 12,
+            width: total,
+            height: 24
+        )
     }
 
     /// Shows the hovered pact half's full effect just under the pact row.
     private func updatePactTooltip(at location: CGPoint) {
+        // This runs on every pointer move, and `nodes(at:)` walks the whole
+        // scene graph — which on the web build costs more than the frame it's
+        // stealing from. The pact row occupies one known strip of the HUD, so
+        // anywhere else is answered by a rectangle test.
+        guard pactHoverBounds.contains(location) else {
+            guard pactTooltipMod != nil else { return }
+            pactTooltipMod = nil
+            pactTooltip?.removeFromParent()
+            pactTooltip = nil
+            return
+        }
         let name = nodes(at: location).compactMap(\.name).first { $0.hasPrefix("pactHover:") }
         let mod = name.flatMap { RunModifier(rawValue: String($0.dropFirst("pactHover:".count))) }
         guard mod != pactTooltipMod else { return }
@@ -4441,8 +4514,10 @@ class GameScene: SKScene {
         removeAllChildren()
         boardNode.removeAllChildren()
         tileNodes.removeAll()
+        tileAppearances.removeAll()
         enemyNodes.removeAll()
         obstacleNodes.removeAll()
+        wallTints.removeAll()
         spikeNodes.removeAll()
         teleporterNodes.removeAll()
         terrainNodes.removeAll()

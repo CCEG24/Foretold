@@ -483,9 +483,17 @@ final class ActorNode: SKNode {
         holder.addChild(sprite)
     }
 
+    /// The pose the hands were last laid out for. Writing a node's position
+    /// dirties its layer, and on the web that re-snapshots the layer tree for
+    /// the next frame — so a hover, which refreshes every actor, must not
+    /// touch a single hand it doesn't have to.
+    private var laidOutFor: (pose: ActorPose, mirrored: Bool)?
+
     /// Re-pins both hands after a pose change: hand position, mirroring, and
     /// whether the weapon passes in front of the body or behind it.
     private func layOutWeapons() {
+        if let laidOutFor, laidOutFor == (pose, mirrored) { return }
+        laidOutFor = (pose, mirrored)
         let reference = Art.hand(pose: pose)
         let reach = Art.handScale(footprint: footprint)
         let hand = CGPoint(x: reference.x * reach, y: reference.y * reach)
