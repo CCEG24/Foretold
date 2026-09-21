@@ -101,6 +101,23 @@ echo "   no DWARF ✓  ($((bytes / 1048576)) MiB)"
 cp Web/index.html dist/index.html
 cp Web/wasi-shim.js dist/wasi-shim.js
 
+# The sprites. There's no asset catalog in the browser, so the PNGs ship
+# beside the wasm, flattened out of their .imageset folders, with a manifest
+# naming them — WebArt fetches that list at boot and registers each one under
+# the same name the mac build looks up. No art, no manifest, no problem: the
+# board falls back to the shapes it always drew.
+mkdir -p dist/assets
+sprites=""
+for imageset in ../Foretold/Assets.xcassets/*.imageset; do
+  [ -d "$imageset" ] || continue
+  name="$(basename "$imageset" .imageset)"
+  [ -f "$imageset/$name.png" ] || continue
+  cp "$imageset/$name.png" "dist/assets/$name.png"
+  sprites="$sprites\"$name\","
+done
+printf '[%s]\n' "${sprites%,}" > dist/assets/manifest.json
+echo "   sprites: $(ls dist/assets/*.png 2>/dev/null | wc -l | tr -d '[:space:]') copied"
+
 echo
 echo "== bundle → ./dist =="
 ls -la dist

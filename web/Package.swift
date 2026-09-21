@@ -14,6 +14,10 @@ let package = Package(
     platforms: [.macOS(.v15)],
     dependencies: [
         .package(path: "../web-spike/Deps/OpenSpriteKit"),
+        // Only for the art loader: SKTexture(imageData:) takes OpenFoundation's
+        // own Data, which is a different type from swift-foundation's, so the
+        // module has to be imported directly rather than leaned on transitively.
+        .package(path: "../web-spike/Deps/OpenFoundation"),
         // Pinned to the minor we resolved against (Package.resolved: 0.56.1).
         // An open `from:` range lets any 0.x in, so a JavaScriptKit release could
         // change the CI build with no commit here — and 0.56 is where the faster
@@ -25,6 +29,7 @@ let package = Package(
             name: "FortoldWeb",
             dependencies: [
                 .product(name: "OpenSpriteKit", package: "OpenSpriteKit"),
+                .product(name: "OpenFoundation", package: "OpenFoundation"),
                 .product(name: "JavaScriptKit", package: "JavaScriptKit"),
                 .product(name: "JavaScriptEventLoop", package: "JavaScriptKit"),
             ],

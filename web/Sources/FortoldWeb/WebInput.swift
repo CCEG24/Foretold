@@ -33,7 +33,12 @@ func installInput(scene: GameScene, canvas: JSObject, width: Double, height: Dou
 
     let move = JSClosure { args in
         guard let e = args[0].object else { return .undefined }
+        // Hover repaints every tile and re-reads every actor, and it happens
+        // outside the frame callback — so its cost is invisible in the frame
+        // timing while still being what starves the frame. Counted here.
+        let started = JSObject.global.performance.now().number ?? 0
         scene.handleMouseMoved(GameInput(location: scenePoint(e)))
+        WebFrameStats.recordInput((JSObject.global.performance.now().number ?? 0) - started)
         return .undefined
     }
     let down = JSClosure { args in
