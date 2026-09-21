@@ -243,3 +243,44 @@ should be requested at all when nothing in the tree asks for extended range.
 > Related: Firefox reports no `toneMapping` from `getConfiguration()`, which the
 > existing `supportsExtendedDynamicRangeOutput` probe already reads correctly as
 > "no EDR" — that part degrades cleanly.
+
+---
+
+## 10. [OpenCoreAnimation] Image contents are re-converted on every snapshot, defeating the texture cache
+
+**Repo:** OpenCoreAnimation · **Files:** `Sources/OpenCoreAnimation/CARenderSnapshot.swift`
+(`captureImageContents`) + `CALayer.swift`
+
+`captureImageContents` reuses a layer's existing storage only when
+`_committedImageContentsStorage` is set — and that field is populated solely by
+the committed *animation* evaluator. A plain layer with a `CGImage` in
+`contents` therefore takes the other branch every time:
+
+```swift
+} else if let contents = layer.contents {
+    storage = try CGImageTextureStorageConverter.convert(contentsImage)
+```
+
+Each conversion allocates a fresh `CGImageTextureStorage`, and with it a fresh
+`CacheIdentity` — which is exactly the key the renderer uses for its
+constant-time texture lookups (`TexturedCacheKey.committedImage`). So every
+snapshot that isn't served by `staticValues` re-uploads and re-mipmaps every
+image in the tree, even though not one pixel changed.
+
+**Repro:** a scene with a handful of `SKSpriteNode`s carrying textures, plus
+anything that dirties one unrelated layer each frame (changing one small
+sprite's colour is enough). Idle holds 60fps because the snapshot reuses
+`staticValues`; the moment something is dirty it drops to single digits. In
+Foretold, seven 256×256 sprites and one tile changing colour on mouse hover cost
+~100ms per frame — and the cost is invisible in CPU frame timing, because it
+lands in the GPU queue.
+
+**Expected:** the conversion is a pure function of the `CGImage`, so it should
+be cached for as long as `contents` is unchanged. `CALayer` already bumps
+`_contentsAssignmentGeneration` and clears `_committedImageContentsStorage` in
+the `contents` setter, so the invalidation point exists.
+
+**Fix (implemented locally):** `CALayer` gains `_contentsStorageCache`, set when
+`captureImageContents` converts and consulted before converting. It's cleared by
+the `contents` setter and carried across the copy-init and — importantly — onto
+the presentation layer, which is the one actually snapshotted each frame.

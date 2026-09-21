@@ -1,8 +1,48 @@
 diff --git a/Sources/OpenCoreAnimation/CALayer.swift b/Sources/OpenCoreAnimation/CALayer.swift
-index e1d55a9..d9b24bd 100644
+index e1d55a9..8086a34 100644
 --- a/Sources/OpenCoreAnimation/CALayer.swift
 +++ b/Sources/OpenCoreAnimation/CALayer.swift
-@@ -3937,7 +3937,11 @@ open class CALayer: CAMediaTiming, Hashable {
+@@ -58,6 +58,8 @@ open class CALayer: CAMediaTiming, Hashable {
+             self._contents = otherLayer._contents
+             self._committedImageContentsStorage =
+                 otherLayer._committedImageContentsStorage
++            // NOTE(foretold fork): carried with the contents it belongs to.
++            self._contentsStorageCache = otherLayer._contentsStorageCache
+             self._contentsRect = otherLayer._contentsRect
+             self._contentsCenter = otherLayer._contentsCenter
+             self.contentsGravity = otherLayer.contentsGravity
+@@ -323,6 +325,9 @@ open class CALayer: CAMediaTiming, Hashable {
+         presentation._contents = _contents
+         presentation._committedImageContentsStorage =
+             _committedImageContentsStorage
++        // NOTE(foretold fork): the presentation layer is what gets snapshotted
++        // each frame, so without this the cache would never be consulted.
++        presentation._contentsStorageCache = _contentsStorageCache
+         presentation._contentsRect = _contentsRect
+         presentation._contentsCenter = _contentsCenter
+         presentation.contentsGravity = contentsGravity
+@@ -3621,6 +3626,12 @@ open class CALayer: CAMediaTiming, Hashable {
+     /// Renderer-ready image storage owned by a committed animation evaluator.
+     internal var _committedImageContentsStorage:
+         CGImageTextureStorage?
++    /// NOTE(foretold fork): the last conversion of `contents` into
++    /// renderer-ready storage, kept so repeated snapshots of an unchanged
++    /// image reuse it — and reuse its `CacheIdentity`, which is what the
++    /// renderer's texture cache is keyed on. Cleared by the `contents` setter
++    /// below, so it can never outlive the image it was made from.
++    internal var _contentsStorageCache: CGImageTextureStorage?
+     internal var _contentsAssignmentGeneration: UInt64 = 0
+     open var contents: Any? {
+         get { _contents }
+@@ -3628,6 +3639,7 @@ open class CALayer: CAMediaTiming, Hashable {
+             let oldValue = _contents
+             _contents = newValue
+             _committedImageContentsStorage = nil
++            _contentsStorageCache = nil
+             _contentsAssignmentGeneration &+= 1
+             delegateBackingStore = nil
+             markDirty(.contents)
+@@ -3937,7 +3949,11 @@ open class CALayer: CAMediaTiming, Hashable {
      }
  
      /// A Boolean indicating whether the layer is allowed to composite itself as a group separate from its parent.
@@ -15,6 +55,39 @@ index e1d55a9..d9b24bd 100644
          didSet {
              guard oldValue != allowsGroupOpacity else { return }
              markDirty(.appearance)
+diff --git a/Sources/OpenCoreAnimation/CARenderSnapshot.swift b/Sources/OpenCoreAnimation/CARenderSnapshot.swift
+index 253953c..fc9878d 100644
+--- a/Sources/OpenCoreAnimation/CARenderSnapshot.swift
++++ b/Sources/OpenCoreAnimation/CARenderSnapshot.swift
+@@ -1337,6 +1337,11 @@ internal struct CARenderSnapshot: Sendable {
+                     layer._committedImageContentsStorage {
+             storage = committedStorage
+             origin = .layerContents
++        } else if let cached = layer._contentsStorageCache {
++            // NOTE(foretold fork): see below — a snapshot of an unchanged
++            // image reuses the conversion, and with it its cache identity.
++            storage = cached
++            origin = .layerContents
+         } else if let contents = layer.contents {
+             guard let contentsImage = contents as? CGImage else {
+                 throw .unsupportedContentsType(
+@@ -1349,6 +1354,16 @@ internal struct CARenderSnapshot: Sendable {
+             } catch {
+                 throw .imageConversion(error)
+             }
++            // NOTE(foretold fork): remember the conversion on the layer.
++            // Without this, every snapshot that isn't served by `staticValues`
++            // re-converts the CGImage and mints a fresh `CacheIdentity`, so
++            // the renderer's texture cache misses and re-uploads (and re-mips)
++            // every image on screen. One dirtied layer anywhere in the tree —
++            // a single tile changing colour — cost ~100ms of GPU work with
++            // only seven small sprites on the board. The `contents` setter
++            // clears this, so a layer that genuinely changes image still
++            // converts exactly once.
++            layer._contentsStorageCache = storage
+             origin = .layerContents
+         } else {
+             return nil
 diff --git a/Sources/OpenCoreAnimation/CAWebGPURenderer.swift b/Sources/OpenCoreAnimation/CAWebGPURenderer.swift
 index 17840e5..81cd9da 100644
 --- a/Sources/OpenCoreAnimation/CAWebGPURenderer.swift
@@ -82,7 +155,7 @@ index 17840e5..81cd9da 100644
              // Set text color
              let color = configuration.foregroundRGBA
 diff --git a/Sources/OpenCoreAnimation/Rendering/CATextRenderConfiguration.swift b/Sources/OpenCoreAnimation/Rendering/CATextRenderConfiguration.swift
-index bd9518f..abb5ac9 100644
+index bd9518f..6a225c9 100644
 --- a/Sources/OpenCoreAnimation/Rendering/CATextRenderConfiguration.swift
 +++ b/Sources/OpenCoreAnimation/Rendering/CATextRenderConfiguration.swift
 @@ -1,4 +1,7 @@
@@ -112,7 +185,7 @@ index bd9518f..abb5ac9 100644
          self.fontSize = layer.fontSize
          self.contentsScale = layer.contentsScale
          self.foregroundRGBA = SIMD4(
-@@ -109,3 +117,159 @@ internal struct CATextRenderConfiguration: Equatable, Sendable {
+@@ -109,3 +117,178 @@ internal struct CATextRenderConfiguration: Equatable, Sendable {
          return "\"\(escaped)\""
      }
  }
@@ -172,11 +245,27 @@ index bd9518f..abb5ac9 100644
 +        let font = cssFont(name: fontName, size: fontSize)
 +        let key = font + "\u{1}" + text
 +        if let cached = widthCache[key] { return cached }
-+        guard let context = measurementContext() else { return nil }
++        guard let context = measurementContext() else {
++            if diagnosticBudget > 0 {
++                diagnosticBudget -= 1
++                print("[MEASURE] no 2d context — falling back to estimate")
++            }
++            return nil
++        }
 +        context.font = .string(font)
 +        let metrics = context.measureText!(text)
 +        guard let width = metrics.width.number, width.isFinite, width >= 0 else {
++            if diagnosticBudget > 0 {
++                diagnosticBudget -= 1
++                print("[MEASURE] measureText gave no width | font=\(font) text=\(text.prefix(40))")
++            }
 +            return nil
++        }
++        // Only log the weapon-button strings; the HUD measures dozens of labels
++        // and a plain budget gets eaten by the nav tabs before these appear.
++        if diagnosticBudget > 0, text.contains("· move ") || text.contains("swap ⇄") {
++            diagnosticBudget -= 1
++            print("[MEASURE] \(Int(width))px | font=\(font) | chars=\(text.count) | \(text.prefix(48))")
 +        }
 +        // Layout churn (rebuilding a scrolling list every frame) can push a lot
 +        // of distinct strings through here; drop the cache rather than grow it
@@ -259,6 +348,9 @@ index bd9518f..abb5ac9 100644
 +    #if arch(wasm32)
 +    nonisolated(unsafe) private static var cachedContext: JSObject?
 +    nonisolated(unsafe) private static var widthCache: [String: CGFloat] = [:]
++    /// TEMP: logs the first few measurements so a browser run can confirm the
++    /// Canvas2D path is actually used (and with which font string).
++    nonisolated(unsafe) private static var diagnosticBudget = 8
 +
 +    /// A detached 2D context kept for the process lifetime; measuring needs no
 +    /// pixels, so the canvas is never sized or attached to the document.
