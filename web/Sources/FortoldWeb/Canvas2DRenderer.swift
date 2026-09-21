@@ -308,7 +308,7 @@ final class Canvas2DRenderer {
 
         let pixels = JSUInt8ClampedArray(rgba)
         let imageData = JSObject.global.ImageData.function!.new(pixels.jsObject, width, height)
-        let offscreen = JSObject.global.document.createElement!("canvas").object!
+        let offscreen = JSObject.global.document.createElement("canvas").object!
         offscreen.width = .number(Double(width))
         offscreen.height = .number(Double(height))
         guard let octx = offscreen.getContext!("2d").object else { return nil }
@@ -325,7 +325,7 @@ final class Canvas2DRenderer {
         if let cached = tintCache[key] { return cached }
         let width = base.width.number ?? 0, height = base.height.number ?? 0
         guard width > 0, height > 0 else { return nil }
-        let offscreen = JSObject.global.document.createElement!("canvas").object!
+        let offscreen = JSObject.global.document.createElement("canvas").object!
         offscreen.width = .number(width)
         offscreen.height = .number(height)
         guard let octx = offscreen.getContext!("2d").object else { return nil }
