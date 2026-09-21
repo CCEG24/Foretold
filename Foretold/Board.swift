@@ -159,6 +159,30 @@ struct TerrainPatch {
     let kind: Kind
 }
 
+/// Something worth having, buried in a mud tile. Non-blocking, and dug out just
+/// by ending a move on it — the mud already charged the player an extra step to
+/// get there, so making it cost the turn's attack too (the way a `WeaponDrop`
+/// does) would price it out of ever being worth the detour.
+///
+/// Nothing on the board or in the hover text says what's inside. The gamble is
+/// the point: the player is paying a known cost in tempo against an unknown
+/// return, which is a different decision from walking to a weapon they can
+/// already see and identify.
+struct Cache {
+    /// What was buried. A boon runs on the turn clock — a window to spend
+    /// rather than a stat to carry. A weapon is dug up onto the tile as an
+    /// ordinary drop, so claiming it still costs the usual turn: the cache
+    /// gives it to you for free, the *swap* is what you pay for.
+    enum Contents {
+        case boon(Buff)
+        case weapon(Weapon)
+    }
+
+    let id: Int
+    let position: GridPosition
+    let contents: Contents
+}
+
 /// A weapon lying on the ground. While standing on one the player may draft a
 /// pickup, spending their attack (and dodge) for the turn to swap it with the
 /// equipped weapon — the old weapon stays on the tile for trading back later.

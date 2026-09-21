@@ -79,6 +79,14 @@ struct Enemy {
     /// attack, no boss intent — and any telegraphed attack this resolve fizzles.
     /// Decremented as it drafts each turn.
     var stunTurns = 0
+    /// The cold, built up by riding the tundra's ice — one per ice tile crossed,
+    /// exactly as the player accrues it. At `GameState.frostbiteAt` the enemy
+    /// seizes up (a stun, so it telegraphs through the usual stars) and the
+    /// count resets. Ice cuts both ways or it isn't terrain, it's a player
+    /// mechanic wearing terrain's clothes.
+    var freezeStacks = 0
+    /// Turns since this enemy last shed a stack.
+    var turnsSinceFreezeDecay = 0
     /// Bosses only: the drafted intent for next resolve.
     var plannedIntent: BossIntent?
     /// Volley only: the facing of the cannon shot alongside the primary swing.

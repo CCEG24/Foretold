@@ -153,6 +153,12 @@ struct TurnResolution {
     let barrelSpawns: [GridPosition]
     /// The weapon the player picked up this turn, if any.
     let pickedUpWeapon: Weapon?
+    /// The cache the player's move ended on this turn, carried whole so the
+    /// scene knows both what was inside and which tile to play the reveal on.
+    /// Unlike `pickedUpWeapon` this was never drafted — it's dug up just by
+    /// arriving — and nothing on the board said what was in it, so the scene
+    /// announcing this *is* the reveal.
+    let openedCache: Cache?
     /// Set when the score crossed a threshold: the level reached. The board has
     /// been fully regenerated (the scene should rebuild its entities) and
     /// `pendingBuffChoices` holds the boons awaiting the player's pick.
@@ -167,4 +173,11 @@ struct TurnResolution {
     let playerArmor: Int
     /// True when the player's drafted action was voided by a stun this turn.
     let playerActionStunned: Bool
+    /// True when the cold hit its limit this turn: the stacks reset and the
+    /// player loses next turn's action. Announced rather than inferred — the
+    /// freeze counter resetting to zero looks identical to it bleeding off.
+    let frostbite: Bool
+    /// Enemies the cold seized up this turn, so the scene can call out that a
+    /// threat just went quiet for a reason the player caused.
+    let frostbittenEnemies: [Int]
 }

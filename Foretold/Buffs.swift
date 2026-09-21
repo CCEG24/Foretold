@@ -10,10 +10,16 @@
 ///   the buff is held (a buff with only instant effects is never "held").
 /// - `levelDuration` is how many level-ups the buff survives: 1 lasts just the
 ///   current level, 2 wears off two level-ups later, nil lasts the whole run.
+/// - `turnDuration` is the other clock: a buff dug out of a mud cache burns off
+///   after this many turns instead of surviving to a level-up. Set one clock or
+///   the other, never both.
 /// - `stackable: false` removes it from the pool while owned.
 struct Buff: Equatable {
     let name: String
     let levelDuration: Int?
+    /// Turns this buff lasts when it came out of a cache; nil for the
+    /// level-scoped boons the level-up screen hands out.
+    let turnDuration: Int?
     let stackable: Bool
     let instantHeal: Int
     let instantArmorRepair: Int
@@ -54,6 +60,7 @@ struct Buff: Equatable {
     init(
         name: String,
         levelDuration: Int? = nil,
+        turnDuration: Int? = nil,
         stackable: Bool = true,
         instantHeal: Int = 0,
         instantArmorRepair: Int = 0,
@@ -76,6 +83,7 @@ struct Buff: Equatable {
     ) {
         self.name = name
         self.levelDuration = levelDuration
+        self.turnDuration = turnDuration
         self.stackable = stackable
         self.instantHeal = instantHeal
         self.instantArmorRepair = instantArmorRepair
@@ -135,6 +143,22 @@ extension Buff {
         .quickHands, .rampage, .sureFeet, .aftershock, .executioner,
         .deadeye, .bloodthirst, .thorns, .siegecraft,
     ]
+
+    // MARK: Cache boons
+    // What's buried in the mud. These run on the turn clock, not the level
+    // clock, so they're a window to spend rather than a stat to carry — which
+    // is why every one of them is a verb. A flat +1 for four turns can pass
+    // without the player ever seeing it change an outcome; "your shots pierce"
+    // announces itself the first time you fire.
+    //
+    // Four turns, not three: you dig these out while standing in mud, so the
+    // first turn or two goes on slogging back to anything worth using them on.
+    static let flintEdge = Buff(name: "Flint Edge · your shots pierce", turnDuration: 4, piercingShots: true)
+    static let maulHead = Buff(name: "Maul Head · your blows shatter any wall", turnDuration: 4, siege: true)
+    static let oiledStrap = Buff(name: "Oiled Strap · swaps are free", turnDuration: 4, freeSwap: true)
+    static let warHorn = Buff(name: "War Horn · a kill shaves your reload", turnDuration: 4, killRefundsCooldown: true)
+    /// The boons a mud cache can hold.
+    static let cacheBoons: [Buff] = [.flintEdge, .maulHead, .oiledStrap, .warHorn]
 }
 
 // MARK: - Omens
@@ -209,9 +233,15 @@ enum Omen: String, CaseIterable {
     static let ordered: [Omen] = [.smite, .quickening, .detonation, .stillness]
 }
 
-/// A buff the player currently holds, with its remaining lifetime.
+/// A buff the player currently holds, with its remaining lifetime. Exactly one
+/// of the two clocks runs: level-up boons age on `levelsRemaining`, cache boons
+/// on `turnsRemaining`. The other stays nil, which reads as "this clock doesn't
+/// apply" rather than "never expires" — each decay pass only culls buffs whose
+/// own clock has run out.
 struct HeldBuff {
     let buff: Buff
-    /// Level-ups left before it wears off; nil = the whole run.
-    var levelsRemaining: Int?
+    /// Level-ups left before it wears off; nil = not on the level clock.
+    var levelsRemaining: Int? = nil
+    /// Turns left before it burns off; nil = not on the turn clock.
+    var turnsRemaining: Int? = nil
 }

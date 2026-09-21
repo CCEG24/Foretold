@@ -4,6 +4,60 @@
 //
 //  Name idea - The Final Draft
 
+/// Where a level is set. Biomes are a teaching ramp rather than a set of
+/// variants: each one keeps everything the last had and adds one more class of
+/// thing to the board, so a new player meets the systems a few at a time
+/// instead of all at once on level one.
+///
+/// Plains is deliberately bare — walls and bodies, nothing else. Everything a
+/// player needs to learn there is positioning, and a board with no hazards on
+/// it is the only place that lesson is legible.
+enum Biome: CaseIterable {
+    /// Walls only. The warm-up.
+    case plains
+    /// Adds the hazards: barrels, mud, spike traps.
+    case forest
+    /// Adds the movement chaos: ice, and the portals to go with it. Ice also
+    /// bites back here — see `freezeStacks`.
+    case tundra
+
+    /// First level of each biome. Tuning knobs, not structure: shifting these
+    /// re-paces the ramp without touching anything else.
+    static let forestFromLevel = 3
+    static let tundraFromLevel = 6
+
+    static func forLevel(_ level: Int) -> Biome {
+        if level >= tundraFromLevel { return .tundra }
+        if level >= forestFromLevel { return .forest }
+        return .plains
+    }
+
+    var title: String {
+        switch self {
+        case .plains: return "Plains"
+        case .forest: return "Forest"
+        case .tundra: return "Tundra"
+        }
+    }
+
+    /// What this biome brought with it, for the banner when the player arrives.
+    var blurb: String {
+        switch self {
+        case .plains: return "open ground — walls and whoever's on them"
+        case .forest: return "powder, mud and spikes underfoot"
+        case .tundra: return "ice and portals — and the cold builds as you slide"
+        }
+    }
+
+    var hasBarrels: Bool { self != .plains }
+    var hasMud: Bool { self != .plains }
+    var hasSpikes: Bool { self != .plains }
+    var hasIce: Bool { self == .tundra }
+    var hasTeleporters: Bool { self == .tundra }
+    /// Only the tundra punishes sliding.
+    var freezes: Bool { self == .tundra }
+}
+
 /// Difficulty knobs for one level — the Tetris-style ramp.
 struct LevelConfig {
     /// Enemies placed when the level's board is generated.
@@ -25,17 +79,26 @@ struct LevelConfig {
     /// Mud tiles scattered on the floor (each costs a step of movement).
     let mudPatches: Int
 
+    /// The biome this level is set in — what it's allowed to put on the board.
+    let biome: Biome
+
     static func forLevel(_ level: Int) -> LevelConfig {
-        LevelConfig(
+        // Enemy pressure ramps with the level regardless of biome; the biome
+        // only decides which *kinds* of scenery are allowed on the floor. So a
+        // late plains level (if the breakpoints ever move) is still crowded,
+        // just bare.
+        let biome = Biome.forLevel(level)
+        return LevelConfig(
             startingEnemies: min(3 + level, 8),
             spawnInterval: max(2, 3 - (level - 1) / 4),
             spawnBatch: 1 + (level - 1) / 3,
             walls: 10,
-            barrels: min(3 + level, 12),
-            spikeTraps: min(2 + level / 2, 6),
-            teleporterPairs: level >= 2 ? 1 : 0,
-            icePatches: level >= 2 ? min(1 + level / 3, 3) : 0,
-            mudPatches: level >= 2 ? min(2 + level / 2, 5) : 0
+            barrels: biome.hasBarrels ? min(3 + level, 12) : 0,
+            spikeTraps: biome.hasSpikes ? min(2 + level / 2, 6) : 0,
+            teleporterPairs: biome.hasTeleporters ? 1 : 0,
+            icePatches: biome.hasIce ? min(1 + level / 3, 3) : 0,
+            mudPatches: biome.hasMud ? min(2 + level / 2, 5) : 0,
+            biome: biome
         )
     }
 }
@@ -408,6 +471,9 @@ struct GameState {
     /// Movement-warping floor patches (ice, mud); affect player and enemies
     /// alike — see `TerrainPatch`.
     private(set) var terrain: [TerrainPatch] = []
+    /// Blind caches buried in mud tiles — see `Cache`.
+    private(set) var caches: [Cache] = []
+    private var nextCacheID = 0
     private(set) var lingeringEffects: [LingeringEffect] = []
     private(set) var playerHealth: Int
     private(set) var playerArmor: Int
@@ -458,6 +524,8 @@ struct GameState {
     /// What landed the killing blow, recorded by the first fatal applyDamage.
     private(set) var causeOfDeath: String?
     private(set) var level = 1
+    /// Where this level is set, and so what the board is allowed to hold.
+    var biome: Biome { Biome.forLevel(level) }
     /// Consecutive turns (before this one) that scored at least one kill.
     private(set) var killStreak = 0
     /// Kills banked so far during the current resolve; drives combo bonuses.
@@ -635,6 +703,26 @@ struct GameState {
     /// taken away — only the drafted attack/throw/ultimate fizzles — so the
     /// player is never denied a choice they can't see coming.
     private(set) var playerStunTurns = 0
+
+    /// The cold, built up by riding the tundra's ice. Every slide adds one; at
+    /// `frostbiteAt` the player seizes up (an action lost next turn) and the
+    /// count resets. It bleeds off slowly on its own, so the danger is sliding
+    /// *repeatedly* — one slide to cross a gap is free, using ice as your main
+    /// way around the board is not. Ice is the fastest thing on a tundra board
+    /// and this is the bill for it.
+    private(set) var freezeStacks = 0
+    /// Turns since the last stack bled off, counted toward `freezeDecayTurns`.
+    private var turnsSinceFreezeDecay = 0
+    /// Stacks that trigger frostbite.
+    static let frostbiteAt = 10
+    /// Turns without frostbite before one stack melts away.
+    static let freezeDecayTurns = 3
+    /// Turns of lost action a frostbite costs.
+    static let frostbiteStunTurns = 1
+
+    /// True while one more slide would tip the player into frostbite — the HUD
+    /// leans on this so the last stack before the cliff is unmissable.
+    var freezeIsCritical: Bool { freezeStacks >= Self.frostbiteAt - 1 }
 
     /// Sticks a weapon's damage-over-time to every survivor of a strike.
     private mutating func afflict(
@@ -1250,19 +1338,24 @@ struct GameState {
             Enemy(id: 2, position: GridPosition(x: 0, y: rows - 1), weapon: weaponPool.randomElement()!),
             Enemy(id: 3, position: GridPosition(x: columns - 1, y: rows - 1), weapon: weaponPool.randomElement()!),
         ]
+        // Board features for the opening level. The biome decides which kinds
+        // are allowed at all — level one is the plains, so everything but walls
+        // comes out zero.
+        let openingConfig = LevelConfig.forLevel(1)
         self.obstacles = obstacles ?? Self.scatterObstacles(
             columns: columns,
             rows: rows,
             walls: walls,
-            barrels: barrels,
+            // The caller's `barrels:` is a ceiling, not an override: a plains
+            // opening has none no matter what was asked for. Tests and the
+            // sandbox that hand in an explicit `obstacles:` list bypass this
+            // entirely, which is what they want.
+            barrels: min(barrels, openingConfig.barrels),
             keepClear: Set(self.enemies.map(\.position)),
             playerStart: start
         )
         self.nextEnemyID = (self.enemies.map(\.id).max() ?? -1) + 1
         self.nextObstacleID = (self.obstacles.map(\.id).max() ?? -1) + 1
-        // Board hazards for the opening level (spikes from the start; teleporters
-        // begin appearing at level 2 per LevelConfig).
-        let openingConfig = LevelConfig.forLevel(1)
         let occupied = Set(self.obstacles.map(\.position)).union(self.enemies.map(\.position)).union([start])
         self.spikes = Self.scatterSpikes(count: openingConfig.spikeTraps + self.rules.spikeTrapBonus, columns: columns, rows: rows, occupied: occupied, playerStart: start)
         if self.rules.spikesAlwaysLive {
@@ -1270,6 +1363,8 @@ struct GameState {
         }
         self.teleporters = Self.scatterTeleporters(pairs: openingConfig.teleporterPairs, columns: columns, rows: rows, occupied: occupied.union(self.spikes.map(\.position)), playerStart: start)
         self.terrain = Self.scatterTerrain(icePatches: openingConfig.icePatches, mudPatches: openingConfig.mudPatches, columns: columns, rows: rows, occupied: occupied.union(self.spikes.map(\.position)).union(self.teleporters.flatMap { [$0.a, $0.b] }), playerStart: start)
+        self.caches = Self.scatterCaches(terrain: self.terrain, occupied: occupied, playerStart: start, firstID: 0)
+        self.nextCacheID = self.caches.count
         if self.rules.wallsEverywhere { fillWithDestructibleWalls() }
         draftEnemyPlans()
     }
@@ -1390,6 +1485,75 @@ struct GameState {
             }
         }
         return placed
+    }
+
+    /// One cache per this many mud tiles. Scaled rather than flat: mud is scarce
+    /// today (3–5 tiles a floor), and burying two on a three-tile floor would
+    /// mean most mud pays out — at which point it stops being terrain the player
+    /// weighs and becomes a vending machine they always detour to.
+    static let mudTilesPerCache = 3
+    /// Even on a mud-heavy floor, more than this stops being a decision.
+    static let maxCachesPerLevel = 2
+    /// Chance in 100 that a cache holds a weapon rather than a boon.
+    static let cacheWeaponChance = 35
+
+    /// Weapons a cache can hold: everything ordinary, unlocked or not. Drawing
+    /// from the whole table rather than the profile's arsenal is the point —
+    /// digging up something you haven't earned is the biggest payout a blind
+    /// cache has, and limiting it to what you already own makes most digs a
+    /// shrug.
+    ///
+    /// Elite trophies are the exception. Claiming one permanently unlocks it,
+    /// so burying them here would turn a mud puddle into a shortcut past the
+    /// gatekeeper fight that's meant to be the only way to earn them — and
+    /// would drop a Greataxe into level-two hands besides.
+    static let cacheWeapons: [Weapon] = Weapon.lootTable.filter { candidate in
+        !Weapon.eliteTrophies.contains { $0.name == candidate.name }
+    }
+
+    /// What a cache turns out to hold.
+    private static func rollCacheContents(boons: inout [Buff]) -> Cache.Contents {
+        let weapon = cacheWeapons.randomElement()
+        if Int.random(in: 0..<100) < cacheWeaponChance, let weapon {
+            return .weapon(weapon)
+        }
+        // Boons are drawn without replacement: two caches on one floor holding
+        // the same boon halves the choice, and on a four-boon pool that would
+        // come up a quarter of the time. If the boons run out, fall back to a
+        // weapon rather than repeating one.
+        guard !boons.isEmpty else { return weapon.map { .weapon($0) } ?? .boon(.flintEdge) }
+        return .boon(boons.removeLast())
+    }
+
+    /// Buries caches in mud tiles. Mud only — the whole point is that the tile
+    /// charging you a step to enter is the tile worth entering. Never on the
+    /// player's own tile, so a cache is always somewhere they chose to walk to.
+    private static func scatterCaches(
+        terrain: [TerrainPatch],
+        occupied: Set<GridPosition>,
+        playerStart: GridPosition,
+        firstID: Int
+    ) -> [Cache] {
+        var mud = terrain.filter { $0.kind == .mud && $0.position != playerStart && !occupied.contains($0.position) }
+        guard !mud.isEmpty else { return [] }
+        let count = min(maxCachesPerLevel, max(1, mud.count / mudTilesPerCache))
+        var boons = Buff.cacheBoons.shuffled()
+        var placed: [Cache] = []
+        var nextID = firstID
+        for _ in 0..<count {
+            guard let index = mud.indices.randomElement() else { break }
+            placed.append(Cache(
+                id: nextID,
+                position: mud.remove(at: index).position,
+                contents: rollCacheContents(boons: &boons)
+            ))
+            nextID += 1
+        }
+        return placed
+    }
+
+    func cache(at position: GridPosition) -> Cache? {
+        caches.first { $0.position == position }
     }
 
     func contains(_ position: GridPosition) -> Bool {
@@ -1884,7 +2048,17 @@ struct GameState {
         var steppedTile = plannedTarget ?? playerPosition
         if let target = plannedTarget, terrainKind(at: target) == .ice,
            let direction = Direction.aiming(from: playerStart, toward: target, allowDiagonals: true) {
-            steppedTile = iceSlide(landingOn: target, heading: direction, moverIsPlayer: true, extraBlocked: []).destination
+            let slide = iceSlide(landingOn: target, heading: direction, moverIsPlayer: true, extraBlocked: [])
+            steppedTile = slide.destination
+            // One stack per ice tile ridden: the tile stepped onto, plus every
+            // ice tile the slide carried through. The momentum tile past the
+            // end of the ice isn't ice, so it doesn't count — you're already
+            // back on solid ground by then. Charging per tile means a long
+            // slide is the expensive one, which is what makes a tundra board's
+            // fastest route also its coldest.
+            if biome.freezes {
+                freezeStacks += 1 + slide.crossed.count { terrainKind(at: $0) == .ice }
+            }
         }
         tilesMoved += playerStart.distance(to: steppedTile)
         plannedTarget = nil
@@ -1900,6 +2074,27 @@ struct GameState {
                 playerPosition = warped
             }
         }
+        // A cache under the tile the player landed on is dug out for free — no
+        // draft, no action spent. Resolved here, before the player's attack goes
+        // off below, so a boon is live for the very swing they walked in to
+        // make; its clock ticks at the end of this turn like everything else.
+        var openedCache: Cache?
+        if let index = caches.firstIndex(where: { $0.position == playerPosition }) {
+            let dug = caches.remove(at: index)
+            openedCache = dug
+            switch dug.contents {
+            case let .boon(buff):
+                heldBuffs.append(HeldBuff(buff: buff, turnsRemaining: buff.turnDuration))
+            case let .weapon(weapon):
+                // Unearthed onto the tile rather than forced into the player's
+                // hands: a weapon is permanent and swapping is a real cost, so
+                // whether to take it stays their call. They're standing on it,
+                // so next turn it drafts like any other drop.
+                weaponDrops.append(WeaponDrop(id: nextDropID, weapon: weapon, position: dug.position))
+                nextDropID += 1
+            }
+        }
+
         var playerShoveTo: GridPosition?
         killsThisTurn = 0
         struckByPlayerThisTurn = []
@@ -2035,6 +2230,7 @@ struct GameState {
             guard let index = enemies.firstIndex(where: { $0.id == enemyID }) else { continue }
             let from = enemies[index].position
             var to = enemies[index].plannedTarget ?? from
+            let draftedTarget = to
             let path = enemies[index].plannedPath
             // The drafted tile may have been taken since drafting (by the player
             // dodging into it or another enemy); a blocked enemy stays put.
@@ -2058,6 +2254,15 @@ struct GameState {
                 if let free = step.first(where: { contains($0) && !occupied.contains($0) }) {
                     to = free
                 }
+            }
+            // The cold, counted on the move that actually happened rather than
+            // the one that was drafted: plans are redrafted every turn and a
+            // blocked enemy never took the slide, so charging at draft time
+            // would freeze enemies for journeys they didn't make. `plannedPath`
+            // only describes the route when the drafted tile is the one reached.
+            if biome.freezes, to == draftedTarget, to != from {
+                let ridden = path.count { terrainKind(at: $0) == .ice }
+                if ridden > 0 { enemies[index].freezeStacks += ridden }
             }
             enemies[index].position = to
             enemies[index].plannedTarget = nil
@@ -2804,6 +3009,62 @@ struct GameState {
             }
         }
 
+        // The cold settles or bites. Resolved here, at the *end* of the turn,
+        // rather than the moment the slide banks the tenth stack — the stun is
+        // read before the player's attack goes off, so triggering it mid-move
+        // would void an attack they'd already drafted with nothing on screen
+        // warning them. Ending here means frostbite costs next turn's action,
+        // which the player sees in the HUD while they plan it.
+        var frostbite = false
+        if freezeStacks >= Self.frostbiteAt {
+            frostbite = true
+            freezeStacks = 0
+            turnsSinceFreezeDecay = 0
+            applyPlayerStun(Self.frostbiteStunTurns)
+        } else if freezeStacks > 0 {
+            turnsSinceFreezeDecay += 1
+            if turnsSinceFreezeDecay >= Self.freezeDecayTurns {
+                turnsSinceFreezeDecay = 0
+                freezeStacks -= 1
+            }
+        } else {
+            turnsSinceFreezeDecay = 0
+        }
+
+        // Enemies freeze on the same clock. Frostbite lands as an ordinary
+        // stun, so it telegraphs through the stars and the plan-suppression
+        // that already exist — the player reads a frozen enemy exactly the way
+        // they read a hammered one.
+        var frostbittenEnemies: [Int] = []
+        for index in enemies.indices {
+            if enemies[index].freezeStacks >= Self.frostbiteAt {
+                enemies[index].freezeStacks = 0
+                enemies[index].turnsSinceFreezeDecay = 0
+                enemies[index].stunTurns = max(enemies[index].stunTurns, Self.frostbiteStunTurns)
+                frostbittenEnemies.append(enemies[index].id)
+            } else if enemies[index].freezeStacks > 0 {
+                enemies[index].turnsSinceFreezeDecay += 1
+                if enemies[index].turnsSinceFreezeDecay >= Self.freezeDecayTurns {
+                    enemies[index].turnsSinceFreezeDecay = 0
+                    enemies[index].freezeStacks -= 1
+                }
+            } else {
+                enemies[index].turnsSinceFreezeDecay = 0
+            }
+        }
+
+        // Cache boons burn down a turn. A buff dug out this turn was granted in
+        // the move phase above, so it already got the use of this turn's attack
+        // — ticking it here means a 4-turn window really is four usable turns.
+        // Only the turn-clocked buffs are touched; level-clocked ones have a nil
+        // `turnsRemaining` and age on their own schedule at each level-up.
+        for index in heldBuffs.indices {
+            if let remaining = heldBuffs[index].turnsRemaining {
+                heldBuffs[index].turnsRemaining = remaining - 1
+            }
+        }
+        heldBuffs.removeAll { ($0.turnsRemaining ?? 1) <= 0 }
+
         let tookDamage = playerHealth < healthBefore || playerArmor < armorBefore
         if tookDamage {
             undamagedTurns = 0
@@ -2914,6 +3175,7 @@ struct GameState {
             spawns: spawns,
             barrelSpawns: barrelSpawns,
             pickedUpWeapon: pickedUp,
+            openedCache: openedCache,
             leveledUpTo: leveledUpTo,
             killsThisTurn: killsThisTurn,
             killStreak: killStreak,
@@ -2921,7 +3183,9 @@ struct GameState {
             armorLost: max(0, armorBefore - playerArmor),
             playerHealth: playerHealth,
             playerArmor: playerArmor,
-            playerActionStunned: playerActionStunned
+            playerActionStunned: playerActionStunned,
+            frostbite: frostbite,
+            frostbittenEnemies: frostbittenEnemies
         )
     }
 
@@ -3053,16 +3317,22 @@ struct GameState {
     /// modifier like Powder Keg or Swarm reshapes every board, not just the first.
     func effectiveLevelConfig(for level: Int) -> LevelConfig {
         let base = LevelConfig.forLevel(level)
+        // The biome gate outranks the run's conditions. A curse that adds spike
+        // traps mustn't put them in the plains: the whole value of a bare
+        // opening biome is that it's reliably bare, and a pact rolled at the
+        // draft would otherwise silently cancel the teaching ramp.
+        let barrels = base.biome.hasBarrels
         return LevelConfig(
             startingEnemies: base.startingEnemies + rules.startingEnemiesBonus,
             spawnInterval: max(2, base.spawnInterval + rules.spawnIntervalDelta),
             spawnBatch: max(1, base.spawnBatch + rules.spawnBatchBonus),
-            walls: rules.allBarrels ? 0 : base.walls,
-            barrels: rules.allBarrels ? min(14 + level, 20) : base.barrels,
-            spikeTraps: base.spikeTraps + rules.spikeTrapBonus,
+            walls: (rules.allBarrels && barrels) ? 0 : base.walls,
+            barrels: (rules.allBarrels && barrels) ? min(14 + level, 20) : base.barrels,
+            spikeTraps: base.biome.hasSpikes ? base.spikeTraps + rules.spikeTrapBonus : 0,
             teleporterPairs: base.teleporterPairs,
             icePatches: base.icePatches,
-            mudPatches: base.mudPatches
+            mudPatches: base.mudPatches,
+            biome: base.biome
         )
     }
 
@@ -3093,6 +3363,10 @@ struct GameState {
         formationAnchors = [:]
         playerAffliction = nil
         playerStunTurns = 0
+        // The cold doesn't follow you off the floor — and leaving the tundra
+        // for good shouldn't leave a counter stranded on the HUD.
+        freezeStacks = 0
+        turnsSinceFreezeDecay = 0
 
         var fresh: [Enemy] = []
         for tile in edgeTiles().shuffled() where fresh.count < config.startingEnemies {
@@ -3123,6 +3397,8 @@ struct GameState {
         }
         teleporters = Self.scatterTeleporters(pairs: config.teleporterPairs, columns: columns, rows: rows, occupied: floorClear.union(spikes.map(\.position)), playerStart: playerPosition)
         terrain = Self.scatterTerrain(icePatches: config.icePatches, mudPatches: config.mudPatches, columns: columns, rows: rows, occupied: floorClear.union(spikes.map(\.position)).union(teleporters.flatMap { [$0.a, $0.b] }), playerStart: playerPosition)
+        caches = Self.scatterCaches(terrain: terrain, occupied: floorClear, playerStart: playerPosition, firstID: nextCacheID)
+        nextCacheID += caches.count
         if rules.wallsEverywhere { fillWithDestructibleWalls() }
 
         // Held buffs age by one level and expired ones wear off; then a new boon
@@ -3186,6 +3462,18 @@ struct GameState {
         advanceLevel()
     }
 
+    /// The tutorial's stand-in for dying. Hits land for real there — armor and
+    /// health drop, so a first-timer learns the red tiles cost something — but
+    /// a killing blow patches the player up instead of ending the lesson.
+    /// Returns what would have done it, for the coach to name.
+    mutating func tutorialRevive() -> String {
+        let killer = causeOfDeath ?? "that"
+        causeOfDeath = nil
+        playerHealth = maxHealth
+        playerArmor = armorCap
+        return killer
+    }
+
     /// One illustrative board per advanced-tutorial beat. Sandbox only: wipes the
     /// board clean and lays out the props (and equips the weapon) for one lesson.
     enum TutorialDemo { case barrels, spikes, teleporters, walls, grapple, slipstep, ice, mud }
@@ -3196,6 +3484,7 @@ struct GameState {
         spikes.removeAll()
         teleporters.removeAll()
         terrain.removeAll()
+        caches.removeAll()
         lingeringEffects.removeAll()
         projectiles.removeAll()
         bolts.removeAll()
@@ -3226,6 +3515,12 @@ struct GameState {
             let t = tile(dx, dy)
             guard contains(t) else { return }
             terrain.append(TerrainPatch(position: t, kind: kind))
+        }
+        func addCache(_ contents: Cache.Contents, _ dx: Int, _ dy: Int) {
+            let t = tile(dx, dy)
+            guard contains(t) else { return }
+            caches.append(Cache(id: nextCacheID, position: t, contents: contents))
+            nextCacheID += 1
         }
 
         switch demo {
@@ -3282,10 +3577,14 @@ struct GameState {
             addEnemy(6, 0)
         case .mud:
             // Mud between you and the foe: standing in it costs a step of move.
+            // The far tile hides a cache, so the lesson is the whole trade —
+            // the slog costs you a step, and you don't know what's buried until
+            // you've paid it.
             equippedWeapon = .sword
             holsteredWeapon = .bow
             addTerrain(.mud, 1, 0)
             addTerrain(.mud, 2, 0)
+            addCache(.boon(.flintEdge), 2, 0)
             addEnemy(4, 0)
         }
         turnStartWeapon = equippedWeapon
@@ -3619,15 +3918,18 @@ struct GameState {
                     alive = false
                     break
                 }
-                // A wall. crumbleWalls shatters it if it's destructible (or Breach
-                // is active); a piercing bolt then bores straight on through any
-                // wall, a plain one dies against it.
+                // A wall. A crumbling one (or any wall, under Breach) shatters,
+                // and a piercing shot carries on through the gap it just made;
+                // a plain shot spends itself on it. A solid wall stops every
+                // shot dead, piercing or not — the same rule the aim preview
+                // draws, so the highlight can't promise a shot through stone.
+                let breakable = obstacle.destructible || wallsAllBreakable
                 crumbleWalls(in: [next])
-                if !bolt.pierces {
+                if !breakable || !bolt.pierces {
                     alive = false
                     break
                 }
-                // Piercing: fall through and keep flying past this tile.
+                // Piercing, through the rubble: keep flying past this tile.
             }
             bolt.position = next
             bolt.remainingRange -= 1
@@ -3724,18 +4026,25 @@ struct GameState {
     }
 
     /// The tiles an attack actually covers, in authored order: clipped to the
-    /// board, stopped dead by walls (which can't be hit), and truncated just
-    /// after the first blocker or barrel when the weapon doesn't pierce.
+    /// board, stopped dead by solid walls (which can't be hit), and truncated
+    /// just after the first blocker or barrel when the weapon doesn't pierce.
+    /// Crumbling walls are hittable; a piercing thrust smashes every one along
+    /// its line, a non-piercing one stops at the first.
     private func sweep(_ pattern: AttackPattern, from origin: GridPosition, facing direction: Direction, pierces: Bool, blockers: Set<GridPosition>) -> [GridPosition] {
         var result: [GridPosition] = []
         for tile in pattern.tiles(from: origin, facing: direction) where contains(tile) {
             let obstacle = obstacle(at: tile)
             if let obstacle, obstacle.kind == .wall {
-                // A crumbling wall can be struck: it's a hittable tile (so it
-                // gets smashed), and it still stops a thrust like any wall.
-                if obstacle.destructible {
+                // A crumbling wall can be struck: it's a hittable tile, so it
+                // gets smashed. A piercing thrust carries on through the
+                // rubble and takes out every wall along its length; a
+                // non-piercing one spends itself on the first. Under Breach a
+                // solid wall gives way to any blow, so it plays by the same
+                // rule — otherwise the preview would stop where the attack
+                // doesn't.
+                if obstacle.destructible || wallsAllBreakable {
                     result.append(tile)
-                    if pattern.isLine { break }
+                    if pattern.isLine && !pierces { break }
                     continue
                 }
                 // A solid wall stops a thrust dead, but a shaped swing just can't

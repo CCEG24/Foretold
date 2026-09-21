@@ -25,8 +25,8 @@ class GameScene: SKScene {
 
     private let boardNode = SKNode()
     private var tileNodes: [GridPosition: SKSpriteNode] = [:]
-    private var playerNode: SKShapeNode!
-    private var enemyNodes: [Int: SKShapeNode] = [:]
+    private var playerNode: ActorNode!
+    private var enemyNodes: [Int: ActorNode] = [:]
     private var obstacleNodes: [GridPosition: SKNode] = [:]
     private var spikeNodes: [GridPosition: SKNode] = [:]
     private var teleporterNodes: [GridPosition: SKShapeNode] = [:]
@@ -41,6 +41,11 @@ class GameScene: SKScene {
     private let ultimateBarNode = SKNode()
     private var dodgeChipLabel: SKLabelNode!
     private var afflictionLabel: SKLabelNode!
+    /// The cold, on its own row under the ult bar. Kept out of
+    /// `afflictionLabel` because frostbite *causes* a stun: the two would
+    /// otherwise appear on the same line at the same moment, which is exactly
+    /// when each needs to be read separately.
+    private var freezeLabel: SKLabelNode!
     private var itemsLabel: SKLabelNode!
     private var scoreLabel: SKLabelNode!
     /// The pact row (boon + curse) as separate colored, hoverable pieces.
@@ -48,19 +53,24 @@ class GameScene: SKScene {
     private var pactTooltip: SKLabelNode?
     private var pactTooltipMod: RunModifier?
     private var buffsLabel: SKLabelNode!
+    /// The held-buffs row's resting colour, named so `flashBuffsRow` can always
+    /// restore it rather than reading a possibly mid-flash value back.
+    private static let buffsLabelColor = SKColor(red: 0.65, green: 0.85, blue: 0.65, alpha: 1.0)
     private var spawnMarkerNodes: [SKNode] = []
     private var weaponDropNodes: [SKNode] = []
+    private var cacheNodes: [GridPosition: SKNode] = [:]
     /// Lob shell beads, keyed by projectile id — persistent so the resolve
     /// phase can glide them along their arc.
-    private var lobNodes: [Int: SKShapeNode] = [:]
+    private var lobNodes: [Int: SKNode] = [:]
     /// Where each airborne lob will land, for the landing dive animation.
     private var lobTargets: [Int: CGPoint] = [:]
     /// Bolt slivers, keyed by bolt id — persistent so the resolve phase can
     /// glide them along their flight.
-    private var boltNodes: [Int: SKShapeNode] = [:]
+    private var boltNodes: [Int: SKNode] = [:]
     private var weaponButton: SKShapeNode!
     private var weaponLabel: SKLabelNode!
     private var weaponSubLabel: SKLabelNode!
+    private var weaponButtonIcon: SKSpriteNode!
     private var tileSize: CGFloat = 0
 
     private var hoveredTile: GridPosition?
@@ -70,6 +80,28 @@ class GameScene: SKScene {
     private var heldHazardTiles: [GridPosition: Int]?
     /// True while the resolve phase animates; input is ignored until planning resumes.
     private var isResolving = false
+    /// Sprite state held back during the resolve. The model resolves the whole
+    /// turn in one go before a single frame animates, so without this every
+    /// body turns and every weapon empties on the first frame — a bow would
+    /// look spent while its arrow is still on the string. Each field is
+    /// released on the beat that earns it.
+    private struct ResolveHold {
+        /// Weapon readiness as it stood before the turn resolved; released to
+        /// the live value when that actor's attack plays.
+        var playerWeaponReady: Bool
+        var enemyWeaponReady: [Int: Bool] = [:]
+        var enemySecondaryReady: [Int: Bool] = [:]
+        /// The facing each actor is drawn with right now: along the move while
+        /// they walk, onto their aim when they strike. Missing = leave it be.
+        var playerFacing: Direction?
+        var enemyFacing: [Int: Direction] = [:]
+        /// The drafted aims, applied at the attack beat.
+        var playerAim: Direction?
+        var enemyAim: [Int: Direction] = [:]
+        /// The drafted moves, applied when that actor starts walking.
+        var enemyMoveFacing: [Int: Direction] = [:]
+    }
+    private var resolveHold: ResolveHold?
 
     /// Fraction of the smaller scene dimension the board occupies; the margin
     /// below the board leaves room for the GO button and HUD.
@@ -112,6 +144,11 @@ class GameScene: SKScene {
     /// Set when this resolve's kills finished charging the ultimate; announced
     /// once the animations wrap up.
     private var pendingUltimateReadyToast = false
+    /// Set when a boon was dug out this turn. The HUD row it landed in isn't
+    /// repainted until the resolve finishes, so the flash that points at it has
+    /// to wait for that repaint or it draws the eye to a row not yet showing
+    /// the boon.
+    private var pendingBuffRowFlash: SKColor?
     /// While false (early resolve phases), freshly painted pools stay hidden:
     /// the arrow that paints a trail must visibly cross the tiles first.
     private var revealLiveHazards = true
@@ -305,6 +342,26 @@ class GameScene: SKScene {
         "hark! the gate walks in flesh most foul!| yes, the massive one. kill that.",
     ]
     private static let weaponButtonSize = CGSize(width: 208, height: 56)
+    private static let weaponIconSize: CGFloat = 34
+    /// The icon's centre, measured in from the button's left edge.
+    private static let weaponIconInset: CGFloat = 22
+
+    /// The column the weapon button's two labels get to use. They're centred
+    /// in it, so with no art they sit across the whole button as before, and
+    /// once a weapon's sprite exists they shift right to clear it.
+    ///
+    /// Without this the labels centre on the full width and simply overlap the
+    /// icon — which went unnoticed while every weapon was a placeholder, since
+    /// there was nothing under the text to collide with.
+    private static func weaponTextColumn(hasIcon: Bool) -> (centerX: CGFloat, width: CGFloat) {
+        let half = weaponButtonSize.width / 2
+        let padding: CGFloat = 8
+        let left = hasIcon
+            ? -half + weaponIconInset + weaponIconSize / 2 + padding
+            : -half + padding
+        let right = half - padding
+        return ((left + right) / 2, right - left)
+    }
 
     // MARK: - Setup
 
@@ -346,6 +403,7 @@ class GameScene: SKScene {
         updateEnemyPlanArrows()
         updateSpawnMarkers()
         updateWeaponDropNodes()
+        updateCacheNodes()
         updatePickupHint()
         refreshTileHighlights()
     }
@@ -369,12 +427,18 @@ class GameScene: SKScene {
     }
 
     private func setUpPlayer() {
-        playerNode = SKShapeNode(circleOfRadius: tileSize * 0.32)
-        playerNode.fillColor = playerColor
-        playerNode.strokeColor = .white
-        playerNode.lineWidth = 2
+        // The cyan disc is the stand-in body; once player-front/back/side art
+        // lands the rig hides it and poses the sprite instead. Either way the
+        // equipped weapon is drawn in the hand.
+        let placeholder = SKShapeNode(circleOfRadius: tileSize * 0.32)
+        placeholder.fillColor = playerColor
+        placeholder.strokeColor = .white
+        placeholder.lineWidth = 2
+        playerNode = ActorNode(bodyID: Art.playerBodyID, tileSize: tileSize,
+                               footprint: 0.65, placeholder: placeholder)
         playerNode.zPosition = 10
         playerNode.position = point(for: state.playerPosition)
+        playerNode.hold(state.equippedWeapon, ready: playerWeaponIsReady)
         boardNode.addChild(playerNode)
     }
 
@@ -415,19 +479,134 @@ class GameScene: SKScene {
     }
 
     @discardableResult
-    private func addEnemyNode(for enemy: Enemy) -> SKShapeNode {
+    private func addEnemyNode(for enemy: Enemy) -> ActorNode {
         let style = enemyStyle(enemy.archetype)
         let side = tileSize * style.sizeFactor
-        let node = SKShapeNode(rectOf: CGSize(width: side, height: side), cornerRadius: 2)
-        node.zRotation = .pi / 4
-        node.fillColor = style.fill
-        node.strokeColor = style.stroke
-        node.lineWidth = style.lineWidth
+        // The diamond is the stand-in body. It carries the 45° rotation itself
+        // rather than the actor node, so the weapon in the enemy's hand (and
+        // the shield plank, and the stun stars) sit in an upright frame.
+        let placeholder = SKShapeNode(rectOf: CGSize(width: side, height: side), cornerRadius: 2)
+        placeholder.zRotation = .pi / 4
+        placeholder.fillColor = style.fill
+        placeholder.strokeColor = style.stroke
+        placeholder.lineWidth = style.lineWidth
+        let node = ActorNode(bodyID: Art.bodyID(for: enemy.archetype, armed: enemy.fuse != nil),
+                             tileSize: tileSize, footprint: style.sizeFactor, placeholder: placeholder)
         node.zPosition = 10
         node.position = point(for: enemy.position)
+        // Every enemy shows what it's carrying — the weapon *is* the enemy's
+        // identity in the HUD readout, so it should be readable on the board.
+        node.hold(heldWeapon(of: enemy), ready: enemy.cooldownRemaining == 0,
+                  secondary: enemy.secondaryWeapon,
+                  secondaryReady: enemy.secondaryCooldownRemaining == 0)
+        node.face(facing(of: enemy))
         boardNode.addChild(node)
         enemyNodes[enemy.id] = node
         return node
+    }
+
+    /// What an enemy visibly carries. A bomber carries a dagger in the data —
+    /// it's what gives it three tiles of charge — but it never swings the
+    /// thing: the rules force its plans to nil and its threat preview shows
+    /// the blast instead. Drawing it would promise a jab that can't happen.
+    private func heldWeapon(of enemy: Enemy) -> Weapon? {
+        enemy.archetype == .bomber ? nil : enemy.weapon
+    }
+
+    /// Which way an enemy is turned: at the swing it has drafted, else along
+    /// the move it has drafted, else at the player (a shieldbearer's raised
+    /// shield already points that way). Nil leaves it as it stands.
+    private func facing(of enemy: Enemy) -> Direction? {
+        if let direction = enemy.plannedDirection { return direction }
+        if let throwTarget = enemy.plannedThrowTarget {
+            return Direction.aiming(from: enemy.position, toward: throwTarget, allowDiagonals: true)
+        }
+        if let target = enemy.plannedTarget, target != enemy.position {
+            return Direction.aiming(from: enemy.position, toward: target, allowDiagonals: true)
+        }
+        if let shieldFacing = enemy.facing { return shieldFacing }
+        return Direction.aiming(from: enemy.position, toward: state.playerPosition, allowDiagonals: true)
+    }
+
+    /// Whether the equipped weapon can swing this turn. Weapons that have a
+    /// `-cooldown` sprite show it while this is false.
+    private var playerWeaponIsReady: Bool {
+        state.attackCooldownRemaining(of: state.equippedWeapon) == 0
+    }
+
+    /// Which way the player is turned: at the drafted swing or throw, else
+    /// along the drafted move, else left as they stand.
+    private func playerFacing() -> Direction? {
+        if let direction = state.plannedAttackDirection { return direction }
+        if let throwTarget = state.plannedThrowTarget {
+            return Direction.aiming(from: state.playerPosition, toward: throwTarget, allowDiagonals: true)
+        }
+        if let target = state.plannedTarget, target != state.playerPosition {
+            return Direction.aiming(from: state.playerPosition, toward: target, allowDiagonals: true)
+        }
+        return nil
+    }
+
+    /// Re-poses every body and refreshes the weapon in every hand. Cheap and
+    /// idempotent — the rig skips the work when nothing changed — so it can
+    /// ride along with the tile highlights after any state change.
+    private func refreshActorSprites() {
+        let hold = resolveHold
+        playerNode?.hold(state.equippedWeapon, ready: hold?.playerWeaponReady ?? playerWeaponIsReady)
+        // Mid-resolve the facing is driven beat by beat, so an unset one means
+        // "don't turn yet" rather than "work it out from the plan".
+        playerNode?.face(hold == nil ? playerFacing() : hold?.playerFacing)
+        for enemy in state.enemies {
+            guard let node = enemyNodes[enemy.id] else { continue }
+            node.setBodyID(Art.bodyID(for: enemy.archetype, armed: enemy.fuse != nil))
+            // An enemy that arrived mid-resolve has nothing held for it, and
+            // shows the live state — the only one it has.
+            node.hold(heldWeapon(of: enemy),
+                      ready: hold?.enemyWeaponReady[enemy.id] ?? (enemy.cooldownRemaining == 0),
+                      secondary: enemy.secondaryWeapon,
+                      secondaryReady: hold?.enemySecondaryReady[enemy.id] ?? (enemy.secondaryCooldownRemaining == 0))
+            node.face(hold == nil ? facing(of: enemy) : hold?.enemyFacing[enemy.id])
+        }
+    }
+
+    /// Lets the player's weapon show what the resolve did to it: a spent bow
+    /// goes to its cooldown art, and they turn onto the aim they loosed along.
+    private func releasePlayerWeaponArt() {
+        guard var hold = resolveHold else { return }
+        hold.playerWeaponReady = playerWeaponIsReady
+        if let aim = hold.playerAim {
+            hold.playerFacing = aim
+        }
+        resolveHold = hold
+        refreshActorSprites()
+    }
+
+    /// Snapshots what the sprites should keep showing while the resolve
+    /// animates. Must run *before* `state.resolveTurn()`: it reads the drafted
+    /// plans and the cooldowns that the resolve is about to spend.
+    private func beginResolveHold() {
+        var hold = ResolveHold(playerWeaponReady: playerWeaponIsReady, playerFacing: nil)
+        hold.playerAim = state.plannedAttackDirection
+            ?? state.plannedThrowTarget.flatMap {
+                Direction.aiming(from: state.playerPosition, toward: $0, allowDiagonals: true)
+            }
+        // The player steps off first thing, so they turn to walk right away.
+        if let target = state.plannedTarget, target != state.playerPosition {
+            hold.playerFacing = Direction.aiming(from: state.playerPosition, toward: target, allowDiagonals: true)
+        }
+        for enemy in state.enemies {
+            hold.enemyWeaponReady[enemy.id] = enemy.cooldownRemaining == 0
+            hold.enemySecondaryReady[enemy.id] = enemy.secondaryCooldownRemaining == 0
+            hold.enemyAim[enemy.id] = enemy.plannedDirection
+                ?? enemy.plannedThrowTarget.flatMap {
+                    Direction.aiming(from: enemy.position, toward: $0, allowDiagonals: true)
+                }
+            if let target = enemy.plannedTarget, target != enemy.position {
+                hold.enemyMoveFacing[enemy.id] = Direction.aiming(from: enemy.position,
+                                                                  toward: target, allowDiagonals: true)
+            }
+        }
+        resolveHold = hold
     }
 
     /// Armed bombers pulse angrily so the lit fuse is unmistakable.
@@ -435,7 +614,9 @@ class GameScene: SKScene {
         for enemy in state.enemies where enemy.archetype == .bomber {
             guard let node = enemyNodes[enemy.id] else { continue }
             if enemy.fuse != nil, node.action(forKey: "armed") == nil {
-                node.strokeColor = SKColor(red: 1.0, green: 0.30, blue: 0.20, alpha: 1.0)
+                // Sprite sets have their own armed variant (swapped in by
+                // refreshActorSprites); the placeholder gets the red rim.
+                node.bodyStrokeColor = SKColor(red: 1.0, green: 0.30, blue: 0.20, alpha: 1.0)
                 node.run(SKAction.repeatForever(SKAction.sequence([
                     SKAction.scale(to: 1.25, duration: 0.25),
                     SKAction.scale(to: 1.0, duration: 0.25),
@@ -468,12 +649,8 @@ class GameScene: SKScene {
             if let existing = lobNodes[shell.id] {
                 existing.position = destination
             } else {
-                let bead = SKShapeNode(circleOfRadius: tileSize * 0.14)
-                bead.fillColor = SKColor(red: 0.25, green: 0.25, blue: 0.28, alpha: 1.0)
-                bead.strokeColor = .white
-                bead.lineWidth = 1.5
+                let bead = makeShellNode()
                 bead.position = point(for: shell.origin)
-                bead.zPosition = 16
                 boardNode.addChild(bead)
                 lobNodes[shell.id] = bead
                 lobTargets[shell.id] = point(for: shell.target)
@@ -496,11 +673,11 @@ class GameScene: SKScene {
             boltNodes[id] = nil
         }
         for bolt in state.bolts {
-            let node: SKShapeNode
+            let node: SKNode
             if let existing = boltNodes[bolt.id] {
                 node = existing
             } else {
-                node = makeBoltSliver(direction: bolt.direction)
+                node = makeBoltNode(Art.ammo(for: bolt), direction: bolt.direction)
                 boardNode.addChild(node)
                 boltNodes[bolt.id] = node
             }
@@ -508,15 +685,48 @@ class GameScene: SKScene {
         }
     }
 
-    private func makeBoltSliver(direction: Direction) -> SKShapeNode {
-        let sliver = SKShapeNode(rectOf: CGSize(width: tileSize * 0.45, height: tileSize * 0.12), cornerRadius: 2)
-        sliver.fillColor = SKColor(red: 0.75, green: 0.78, blue: 0.82, alpha: 1.0)
-        sliver.strokeColor = SKColor(white: 0.3, alpha: 1.0)
-        sliver.lineWidth = 1
+    /// One shot in flight, turned to point down its line — the only piece on
+    /// the board that rotates. Ammo art is authored pointing right, like every
+    /// weapon; without it the steel sliver stands in.
+    private func makeBoltNode(_ ammo: Art.ProjectileArt, direction: Direction) -> SKNode {
         let step = direction.unitStep
-        sliver.zRotation = atan2(CGFloat(step.y), CGFloat(step.x))
-        sliver.zPosition = 16
-        return sliver
+        let angle = atan2(CGFloat(step.y), CGFloat(step.x))
+        let node: SKNode
+        if let texture = Art.texture(ammo) {
+            let sprite = SKSpriteNode(texture: texture, color: .clear,
+                                      size: CGSize(width: tileSize, height: tileSize))
+            // Ammo that points where it's going gets turned; anything that
+            // tumbles is drawn as it lies.
+            sprite.zRotation = ammo.rotatesToFlight ? angle : 0
+            node = sprite
+        } else {
+            let sliver = SKShapeNode(rectOf: CGSize(width: tileSize * 0.45, height: tileSize * 0.12), cornerRadius: 2)
+            sliver.fillColor = SKColor(red: 0.75, green: 0.78, blue: 0.82, alpha: 1.0)
+            sliver.strokeColor = SKColor(white: 0.3, alpha: 1.0)
+            sliver.lineWidth = 1
+            sliver.zRotation = angle
+            node = sliver
+        }
+        node.zPosition = 16
+        return node
+    }
+
+    /// A lobbed grenade or flask mid-arc. It tumbles rather than points, so it
+    /// isn't rotated; the dark bead stands in until there's art.
+    private func makeShellNode() -> SKNode {
+        let node: SKNode
+        if let texture = Art.texture(Art.ProjectileArt.shell) {
+            node = SKSpriteNode(texture: texture, color: .clear,
+                                size: CGSize(width: tileSize, height: tileSize))
+        } else {
+            let bead = SKShapeNode(circleOfRadius: tileSize * 0.14)
+            bead.fillColor = SKColor(red: 0.25, green: 0.25, blue: 0.28, alpha: 1.0)
+            bead.strokeColor = .white
+            bead.lineWidth = 1.5
+            node = bead
+        }
+        node.zPosition = 16
+        return node
     }
 
     /// Gold rings (with the weapon's initial) marking weapons lying on the
@@ -536,15 +746,62 @@ class GameScene: SKScene {
             ring.position = point(for: drop.position)
             ring.zPosition = 7
 
-            let letter = SKLabelNode(text: String(drop.weapon.name.prefix(1)))
-            letter.fontName = "HelveticaNeue-Bold"
-            letter.fontSize = 14
-            letter.fontColor = tint
-            letter.verticalAlignmentMode = .center
-            ring.addChild(letter)
+            // The same sprite the wielder holds, lying in the ring; until it
+            // exists the weapon's initial stands in for it.
+            // A weapon on the floor is always shown ready, whatever state it
+            // was in when its owner dropped it.
+            if let texture = Art.weaponTexture(drop.weapon) {
+                let icon = SKSpriteNode(texture: texture, color: .clear,
+                                        size: CGSize(width: tileSize * 0.52, height: tileSize * 0.52))
+                // Canted, so a drop reads as dropped rather than mounted.
+                icon.zRotation = -.pi / 6
+                ring.addChild(icon)
+            } else {
+                let letter = SKLabelNode(text: String(drop.weapon.name.prefix(1)))
+                letter.fontName = "HelveticaNeue-Bold"
+                letter.fontSize = 14
+                letter.fontColor = tint
+                letter.verticalAlignmentMode = .center
+                ring.addChild(letter)
+            }
 
             boardNode.addChild(ring)
             weaponDropNodes.append(ring)
+        }
+    }
+
+    /// Jade crate-lids on the mud tiles hiding a cache; rebuilt from state after
+    /// every turn. Deliberately the only thing on the board that pulses without
+    /// being a threat: the whole mechanic is the player deciding from across the
+    /// board whether the slog into the mud is worth it, which they can't do if
+    /// the reward doesn't catch the eye against a dim brown tile.
+    private func updateCacheNodes() {
+        cacheNodes.values.forEach { $0.removeFromParent() }
+        cacheNodes.removeAll()
+        let jade = SKColor(red: 0.45, green: 0.88, blue: 0.68, alpha: 1.0)
+        for cache in state.caches {
+            let side = tileSize * 0.36
+            let lid = SKShapeNode(rectOf: CGSize(width: side, height: side), cornerRadius: 3)
+            lid.strokeColor = jade
+            lid.lineWidth = 2
+            lid.fillColor = jade.withAlphaComponent(0.15)
+            lid.position = point(for: cache.position)
+            // Below the weapon drops' rings (7) so a drop stacked nearby still
+            // reads first, and below the entities so standing on it covers it.
+            lid.zPosition = 6
+
+            let clasp = SKShapeNode(circleOfRadius: max(1.5, tileSize * 0.05))
+            clasp.fillColor = jade
+            clasp.strokeColor = .clear
+            lid.addChild(clasp)
+
+            lid.run(.repeatForever(.sequence([
+                .scale(to: 1.12, duration: 0.7),
+                .scale(to: 1.0, duration: 0.7),
+            ])))
+
+            boardNode.addChild(lid)
+            cacheNodes[cache.position] = lid
         }
     }
 
@@ -846,6 +1103,16 @@ class GameScene: SKScene {
         afflictionLabel.position = CGPoint(x: columnLeft, y: columnTop - 88)
         boardPageNode.addChild(afflictionLabel)
 
+        // Under the ult bar (which spans rowY ±7 at columnTop − 168) and clear
+        // of the dodge chip below it.
+        freezeLabel = SKLabelNode(text: "")
+        freezeLabel.fontName = "HelveticaNeue-Bold"
+        freezeLabel.fontSize = 11
+        freezeLabel.horizontalAlignmentMode = .left
+        freezeLabel.verticalAlignmentMode = .center
+        freezeLabel.position = CGPoint(x: columnLeft, y: columnTop - 192)
+        boardPageNode.addChild(freezeLabel)
+
         dodgeChipLabel = SKLabelNode(text: "DODGE ✓")
         dodgeChipLabel.fontName = "HelveticaNeue-Bold"
         dodgeChipLabel.fontSize = 12
@@ -888,7 +1155,7 @@ class GameScene: SKScene {
         buffsLabel = SKLabelNode()
         buffsLabel.fontName = "HelveticaNeue"
         buffsLabel.fontSize = 12
-        buffsLabel.fontColor = SKColor(red: 0.65, green: 0.85, blue: 0.65, alpha: 1.0)
+        buffsLabel.fontColor = Self.buffsLabelColor
         buffsLabel.verticalAlignmentMode = .center
         buffsLabel.position = CGPoint(x: size.width / 2, y: size.height - (size.height - boardSide) / 4 - 22)
         buffsLabel.zPosition = 20
@@ -1037,8 +1304,24 @@ class GameScene: SKScene {
         weaponSubLabel.name = Self.weaponButtonName
         button.addChild(weaponSubLabel)
 
+        weaponButtonIcon = SKSpriteNode(
+            texture: nil, color: .clear,
+            size: CGSize(width: Self.weaponIconSize, height: Self.weaponIconSize)
+        )
+        weaponButtonIcon.position = CGPoint(x: -buttonSize.width / 2 + Self.weaponIconInset, y: 0)
+        weaponButtonIcon.name = Self.weaponButtonName
+        button.addChild(weaponButtonIcon)
+
         boardPageNode.addChild(button)
         weaponButton = button
+    }
+
+    /// The equipped weapon's sprite on its HUD button — the third place the
+    /// one weapon PNG is used (hand, floor, HUD). It tracks the reload the
+    /// same way the held weapon does, so the button and the hand agree.
+    /// Empty until the art exists.
+    private func updateWeaponButtonIcon() {
+        weaponButtonIcon?.texture = Art.weaponTexture(state.equippedWeapon, ready: playerWeaponIsReady)
     }
 
     private var legendNode: SKNode?
@@ -1313,7 +1596,7 @@ class GameScene: SKScene {
             case .move:
                 return "TUTORIAL 2/4 · left-click a green tile to draft your move — nothing moves until you commit"
             case .attack:
-                return "TUTORIAL 3/4 · right-click to aim — the orange tiles are your strike, from where you WILL be standing"
+                return "TUTORIAL 3/4 · now right-click an enemy — you get a move AND an attack every turn. Orange is where your strike lands, from where you WILL be standing"
             case .go:
                 return "TUTORIAL 4/4 · press SPACE (or click GO) — you and every enemy resolve at once"
             }
@@ -1362,7 +1645,10 @@ class GameScene: SKScene {
         // a mid-run replay's progress accounting survives the sandbox.
         let savedBaseline = tallyBaseline
         state = makeRunState(modifiersOverride: [])
-        state.devInvincible = true   // no dying in the sandbox tutorial
+        // Not invincible: hits have to cost something or the tutorial teaches
+        // that they don't, and the first real hit of a run comes as a nasty
+        // surprise. A killing blow coaches and revives instead — see
+        // `tutorialRevive`.
         tallyBaseline = savedBaseline
         resyncBoardToState()
         tutorialStep = .hover
@@ -1431,6 +1717,52 @@ class GameScene: SKScene {
         container.run(SKAction.sequence(sequence))
     }
 
+    /// True while any coached lesson is running — the four beginner steps, the
+    /// showcase beats, or the advanced track.
+    private var inTutorial: Bool {
+        tutorialStep != nil || tutorialShowcasePending || advancedTutorialActive
+    }
+
+    /// The "you would have died there" callout. Red-edged and dead-center on the
+    /// board so it can't be mistaken for the gold lesson banner above it, and
+    /// its own node so it never displaces the current step's prompt. Sees itself
+    /// out after a few seconds; the board is already playable again.
+    private func showTutorialRescue(_ killer: String) {
+        let boardSide = min(size.width, size.height) * boardScale
+        let container = SKNode()
+        container.zPosition = 78
+
+        let label = SKLabelNode(
+            text: "CAREFUL · \(killer) would have finished you there. In a real run that ends it — read the red tiles before you commit. Patched you up; carry on."
+        )
+        label.fontName = "HelveticaNeue-Bold"
+        label.fontSize = 15
+        label.fontColor = SKColor(red: 0.96, green: 0.58, blue: 0.52, alpha: 1.0)
+        label.verticalAlignmentMode = .center
+        label.numberOfLines = 0
+        label.preferredMaxLayoutWidth = boardSide - 120
+
+        let plate = SKShapeNode(
+            rectOf: CGSize(width: label.frame.width + 36, height: label.frame.height + 22),
+            cornerRadius: 9
+        )
+        plate.fillColor = SKColor(white: 0.06, alpha: 0.94)
+        plate.strokeColor = SKColor(red: 0.95, green: 0.45, blue: 0.40, alpha: 0.9)
+        plate.lineWidth = 1.5
+        container.addChild(plate)
+        container.addChild(label)
+
+        container.position = CGPoint(x: size.width / 2, y: size.height / 2)
+        container.alpha = 0
+        addChild(container)
+        container.run(SKAction.sequence([
+            SKAction.fadeIn(withDuration: 0.15),
+            SKAction.wait(forDuration: 3.2),
+            SKAction.fadeOut(withDuration: 0.5),
+            SKAction.removeFromParent(),
+        ]))
+    }
+
     /// Steps forward when the taught input actually happened, in order; after
     /// the last interactive step it arms the showcase, which fires once turn one
     /// has finished resolving.
@@ -1475,7 +1807,7 @@ class GameScene: SKScene {
         state.tutorialSpawnFormation()
         resyncBoardToState()
         buildLessonOverlay(
-            text: "FORMATIONS · enemies sometimes march in as a squad — a shield wall, a bomber charge — holding ranks until they close, then breaking to swarm. Take a swing if you like."
+            text: "FORMATIONS · enemies sometimes march in as a squad, holding ranks until they close, then breaking to swarm. Take a swing if you like."
         ) { [weak self] in self?.showcaseGatekeeper() }
     }
 
@@ -1483,7 +1815,9 @@ class GameScene: SKScene {
         state.tutorialSpawnGatekeeper()
         resyncBoardToState()
         buildLessonOverlay(
-            text: "GATEKEEPERS · every level is locked until its gatekeeper falls. A JUGGERNAUT wades in and summons waves; a SUMMONER hangs back and floods the board with fodder; a BOMBARDIER calls in bomber swarms and rains barrels; every third gate is a BOSS that volleys, cannon-novas, summons, and barrages. Read the telegraph before you commit."
+            // The four archetypes and their tricks are all in the ENEMIES
+            // dropdown; reciting them here made this the longest card by far.
+            text: "GATEKEEPERS · every level is locked until its gatekeeper falls, and every third gate is a BOSS. Read its telegraph before you commit — the ENEMIES dropdown lists what each one does."
         ) { [weak self] in self?.showcaseLevelUp() }
     }
 
@@ -1504,7 +1838,7 @@ class GameScene: SKScene {
     private func finishTutorialShowcase() {
         beginnerShowcaseActive = false
         buildLessonOverlay(
-            text: "THAT'S THE GIST · move 2+ tiles without acting to dodge a hit; the rest is in the dropdowns on the left. Want the ADVANCED tactics — barrels, ice & mud, grapple, blink? NEXT to learn them, EXIT to play."
+            text: "THAT'S THE GIST · one last trick: move 2+ tiles without attacking and you dodge a hit. The rest is in the dropdowns on the left. Want the ADVANCED tactics — barrels, ice, grapple, blink? NEXT to learn them, EXIT to play."
         ) { [weak self] in
             self?.advancedReturnToBuildPicker = false   // chained into a live run
             self?.startAdvancedTutorial()
@@ -1523,12 +1857,15 @@ class GameScene: SKScene {
     }
 
     private let advancedLessons: [AdvancedLesson] = [
-        AdvancedLesson(demo: .barrels, text: "KNOCKBACK & BARRELS · you're holding the Ram (knockback 2). Attack the enemy beside you to fling it into the orange barrel behind it. Barrels have flavors: orange bursts, green leaves fire, yellow (the Keg's) bursts weak. Flinging a foe into a wall or off the edge bruises it too — and it cuts both ways. (Tab swaps to the Keg — lob it to drop your own barrel.)"),
-        AdvancedLesson(demo: .spikes, text: "SPIKES · lit tiles bite whoever ends the turn on them, then toggle. Attack the enemy — the Ram flings it across the live spikes, and it takes a bite on the way. Mind your own footing."),
+        // Each card names the one thing to try. Flavor catalogues (barrel
+        // colours, tile behaviour) live in the TILES dropdown — repeating them
+        // here buried the instruction.
+        AdvancedLesson(demo: .barrels, text: "KNOCKBACK & BARRELS · you're holding the Ram (knockback 2). Attack the enemy beside you to fling it into the barrel behind it. Slamming a foe into a wall or off the edge bruises it too — and it cuts both ways. (Tab swaps to the Keg: lob it to drop your own barrel.)"),
+        AdvancedLesson(demo: .spikes, text: "SPIKES · lit tiles bite whoever ends the turn on them, then toggle. Attack the enemy — the Ram flings it across the live spikes for a bite on the way. Mind your own footing."),
         AdvancedLesson(demo: .teleporters, text: "TELEPORTERS · step onto the portal to warp to its linked twin across the board. Enemies path through them to reach you, and a bolt fired through one flies out the far side."),
-        AdvancedLesson(demo: .ice, text: "ICE · standing on ice gives +1 move, and a move that ends on ice slides you on down the strip until it runs out or something stops you. The gold marker shows where you'll really land — draft a step onto the ice and slide into the foe."),
-        AdvancedLesson(demo: .mud, text: "MUD · slogging into a mud tile eats an extra step, so it bogs down anyone crossing it — you and enemies alike. Route around it, or use it to slow a foe closing on you."),
-        AdvancedLesson(demo: .walls, text: "WALLS · brown walls crumble — smash one with a swing or blow it apart with a blast to open a path. Grey walls are solid. (The Barricades pact packs the whole board with crumbling walls to dig through.)"),
+        AdvancedLesson(demo: .ice, text: "ICE · a move that ends on ice slides you on down the strip until something stops you, and the gold marker shows where you'll really land. Draft a step onto the ice and slide into the foe."),
+        AdvancedLesson(demo: .mud, text: "MUD · crossing a mud tile eats an extra step — yours or an enemy's. Route around it, or use it to slow a foe closing on you."),
+        AdvancedLesson(demo: .walls, text: "WALLS · brown walls crumble: smash one with a swing or a blast to open a path. Grey walls are solid."),
         AdvancedLesson(demo: .grapple, text: "GRAPPLE · right-click a direction to fire it: aim RIGHT at the enemy to reel it in, UP at the wall to haul yourself over, or LEFT at the barrel to yank it into your lap for a 2 damage hit."),
         AdvancedLesson(demo: .slipstep, text: "SLIPSTEP · sends you 7 tiles but barely scratches them. Go next to the enemy, then Tab to the Sword (free) and strike the same turn. Next turn, swap back and get out."),
     ]
@@ -1541,7 +1878,7 @@ class GameScene: SKScene {
         let savedBaseline = tallyBaseline
         state = makeRunState(modifiersOverride: [])
         state.devFreeSwap = true
-        state.devInvincible = true   // no dying in the sandbox tutorial
+        // Damage is real here too; `tutorialRevive` catches a killing blow.
         tallyBaseline = savedBaseline
         tutorialPrompt?.removeFromParent()
         tutorialPrompt = nil
@@ -1604,10 +1941,18 @@ class GameScene: SKScene {
         label.horizontalAlignmentMode = .center
         label.numberOfLines = 0
         label.preferredMaxLayoutWidth = boardSide - 60
-        label.position = CGPoint(x: size.width / 2, y: topEdge - 6)
+        // A card tall enough to outgrow the strip above the board would hang its
+        // plate off the top of the scene, where the first lines are simply
+        // clipped away. Clamp the centre down until the whole plate fits: it
+        // reaches further over the board, which stays legible beneath it.
+        let plateHeight = label.frame.height + 22
+        label.position = CGPoint(
+            x: size.width / 2,
+            y: min(topEdge - 6, size.height - plateHeight / 2 - 10)
+        )
 
         let plate = SKShapeNode(
-            rectOf: CGSize(width: label.frame.width + 36, height: label.frame.height + 22),
+            rectOf: CGSize(width: label.frame.width + 36, height: plateHeight),
             cornerRadius: 9
         )
         plate.fillColor = SKColor(white: 0.06, alpha: 0.92)
@@ -1653,6 +1998,7 @@ class GameScene: SKScene {
         updateEnemyPlanArrows()
         updateSpawnMarkers()
         updateWeaponDropNodes()
+        updateCacheNodes()
         updateProjectileNodes()
         updateBomberFuses()
         updatePickupHint()
@@ -1814,6 +2160,23 @@ class GameScene: SKScene {
         if state.playerStunTurns > 0 {
             playerStatuses.append("STUNNED · attack disabled")
         }
+        // The cold gets its own row under the ult bar rather than joining the
+        // affliction line: frostbite's whole payload *is* a stun, so the two
+        // would collide on the same line at the one moment both matter. It
+        // shows from the first slide and clears once the cold has bled off.
+        // The last stack before the cliff shouts, since by then the next slide
+        // costs a whole action.
+        freezeLabel.isHidden = state.freezeStacks <= 0
+        if state.freezeStacks > 0 {
+            freezeLabel.text = state.freezeIsCritical
+                ? "❄ FREEZING \(state.freezeStacks)/\(GameState.frostbiteAt) — ONE MORE SLIDE AND YOU SEIZE UP"
+                : "❄ FREEZING \(state.freezeStacks)/\(GameState.frostbiteAt)"
+            // Brighter, not a different hue: it stays unmistakably the cold
+            // rather than borrowing the red the affliction row already owns.
+            freezeLabel.fontColor = state.freezeIsCritical
+                ? SKColor(red: 0.85, green: 0.97, blue: 1.0, alpha: 1.0)
+                : SKColor(red: 0.55, green: 0.80, blue: 0.98, alpha: 1.0)
+        }
         afflictionLabel.text = playerStatuses.joined(separator: "  ·  ")
         afflictionLabel.isHidden = playerStatuses.isEmpty
         dodgeChipLabel.isHidden = !state.plannedDodgeReady
@@ -1823,7 +2186,7 @@ class GameScene: SKScene {
         // While the best is frozen it neither climbs nor persists, and the whole
         // score line turns blue to make the testing mode unmistakable.
         let best = devFreezeHighScore ? highScore : max(highScore, state.score)
-        scoreLabel.text = "LVL \(state.level) · SCORE \(progress)\(streak) · TURN \(state.turnNumber) · BEST \(best)"
+        scoreLabel.text = "LVL \(state.level) · \(state.biome.title.uppercased()) · SCORE \(progress)\(streak) · TURN \(state.turnNumber) · BEST \(best)"
         scoreLabel.fontColor = devFreezeHighScore ? SKColor(red: 0.45, green: 0.65, blue: 0.95, alpha: 1.0) : .white
 
         // The run's pact: the boon (gold) and curse (red) as separate hoverable
@@ -1844,6 +2207,13 @@ class GameScene: SKScene {
             if let soonest = stack.compactMap(\.levelsRemaining).min() {
                 text += " (\(soonest) lv)"
             }
+            // A cache boon is gone in a handful of turns, so its countdown has
+            // to be louder than the level-scoped ones sharing this row — the
+            // player is already tracking telegraphs, cooldowns and omen charge,
+            // and a quiet "(2)" tucked among them lapses unnoticed.
+            if let soonest = stack.compactMap(\.turnsRemaining).min() {
+                text += soonest == 1 ? " ‼ LAST TURN" : " \(soonest) TURNS"
+            }
             buffTexts.append(text)
         }
         buffsLabel.text = buffTexts.joined(separator: " · ")
@@ -1851,6 +2221,7 @@ class GameScene: SKScene {
         let readiness = cooldown > 0 ? " · ready in \(cooldown)" : ""
         weaponLabel.text = "\(state.equippedWeapon.name) · move \(state.moveRange) · dmg \(state.attackDamage)\(readiness)"
         weaponSubLabel.text = "swap ⇄ \(state.holsteredWeapon.name) · \(state.swapsAreFree ? "free" : "costs attack")"
+        updateWeaponButtonIcon()
 
         if state.weaponSwapCostsAttack {
             itemsLabel.text = "swapped to \(state.equippedWeapon.name) — spends your attack (swap back to undo)"
@@ -1874,10 +2245,16 @@ class GameScene: SKScene {
             itemsLabel.text = ""
         }
 
-        // Long loadouts ("Crossbow · move 1 · dmg 2 · ready in 2") shrink to fit
-        // instead of spilling out of the button.
-        fitLabel(weaponLabel, within: Self.weaponButtonSize.width - 16)
-        fitLabel(weaponSubLabel, within: Self.weaponButtonSize.width - 16)
+        // Centre the labels in whatever the icon left them, then shrink long
+        // loadouts ("Crossbow · move 1 · dmg 2 · ready in 2") to fit that
+        // column rather than spilling across the icon or out of the button.
+        // Driven off the texture actually being set, so a weapon whose art
+        // hasn't been drawn yet still gets the full width.
+        let column = Self.weaponTextColumn(hasIcon: weaponButtonIcon?.texture != nil)
+        weaponLabel.position.x = column.centerX
+        weaponSubLabel.position.x = column.centerX
+        fitLabel(weaponLabel, within: column.width)
+        fitLabel(weaponSubLabel, within: column.width)
     }
 
     /// Scales a label down (never up) so its text fits the given width.
@@ -1912,6 +2289,11 @@ class GameScene: SKScene {
     // MARK: - Highlighting
 
     private func refreshTileHighlights() {
+        // Every path that changes the state ends here, so the bodies re-pose
+        // and re-arm from the same call — drafting an aim turns the player,
+        // and a swap puts the new weapon in their hand immediately.
+        refreshActorSprites()
+
         let planning = !isResolving && !state.isGameOver
         let legalTargets = planning ? state.legalMoveTargets() : []
         var attackTiles = planning ? Set(state.plannedAttackTiles) : []
@@ -2069,7 +2451,23 @@ class GameScene: SKScene {
         if isThrowRange {
             return SKColor(red: 0.18, green: isDarkTile ? 0.32 : 0.36, blue: 0.48, alpha: 1.0)
         }
-        return SKColor(white: isDarkTile ? 0.16 : 0.20, alpha: 1.0)
+        // Only the *resting* floor is tinted by biome. Every telegraph colour
+        // above returns before this point, so the language the player reads
+        // under pressure — green walkable, red incoming, orange yours — is
+        // pixel-identical on every floor. The biome shifts the quiet ground
+        // it's all drawn on, which is enough to feel a change of place without
+        // anything having to be relearned.
+        let shade: CGFloat = isDarkTile ? 0.16 : 0.20
+        switch state.biome {
+        case .plains:
+            // Neutral grey — the original board, and the baseline the other
+            // two are read against.
+            return SKColor(white: shade, alpha: 1.0)
+        case .forest:
+            return SKColor(red: shade * 0.72, green: shade * 1.12, blue: shade * 0.68, alpha: 1.0)
+        case .tundra:
+            return SKColor(red: shade * 0.80, green: shade * 1.02, blue: shade * 1.30, alpha: 1.0)
+        }
     }
 
     /// Full mid-flight readout for a bolt: heading, damage, speed, and how much
@@ -2197,6 +2595,18 @@ class GameScene: SKScene {
                     at: hovered,
                     color: SKColor(red: 0.55, green: 0.80, blue: 1.0, alpha: 1.0)
                 )
+            } else if state.cache(at: hovered) != nil {
+                // Checked before the terrain branch below: a cache always sits
+                // on mud, so the mud label would otherwise swallow it.
+                //
+                // Says nothing about what's inside, on purpose — the player is
+                // betting a known cost in tempo against an unknown return, and
+                // naming the prize here would turn that bet into arithmetic.
+                addHoverLabel(
+                    "cache · buried in the mud · dig it up to see",
+                    at: hovered,
+                    color: SKColor(red: 0.45, green: 0.88, blue: 0.68, alpha: 1.0)
+                )
             } else if let terrain = state.terrainKind(at: hovered) {
                 switch terrain {
                 case .ice:
@@ -2244,6 +2654,11 @@ class GameScene: SKScene {
         }
         if enemy.stunTurns > 0 {
             status += " · STUNNED ×\(enemy.stunTurns)"
+        }
+        // Readable for the same reason the player's counter is: an enemy near
+        // the cliff is one you can herd onto ice instead of hitting.
+        if enemy.freezeStacks > 0 {
+            status += " · ❄ \(enemy.freezeStacks)/\(GameState.frostbiteAt)"
         }
         if enemy.archetype == .shieldbearer, let facing = enemy.facing {
             status += enemy.shieldReady ? " · shield \(facing.arrow)" : " · shield down"
@@ -2367,10 +2782,10 @@ class GameScene: SKScene {
     }
 
     /// A steel plank on each shieldbearer's front, telegraphing the side its
-    /// parry covers so a flank can be set up. It's a child of the enemy sprite,
-    /// so it rides along during the move animation instead of floating off (or
-    /// vanishing). Enemy sprites are rotated 45°, so the plank counter-rotates
-    /// and places its offset in the sprite's local frame.
+    /// parry covers so a flank can be set up. It's a child of the enemy's
+    /// actor node, so it rides along during the move animation instead of
+    /// floating off (or vanishing). That node is unrotated — the placeholder
+    /// diamond carries its own 45° — so the plank sits at its world angle.
     private func refreshShieldPlanks() {
         for (id, node) in enemyNodes {
             node.childNode(withName: "shieldPlank")?.removeFromParent()
@@ -2391,14 +2806,9 @@ class GameScene: SKScene {
             plank.name = "shieldPlank"
             plank.zPosition = 5
 
-            // Undo the sprite's own rotation so the plank sits at the right world
-            // angle and offset.
-            let parentRotation = node.zRotation
-            plank.zRotation = worldAngle + .pi / 2 - parentRotation
+            plank.zRotation = worldAngle + .pi / 2
             let offset = tileSize * 0.34
-            let world = CGPoint(x: unit.x * offset, y: unit.y * offset)
-            let c = cos(-parentRotation), s = sin(-parentRotation)
-            plank.position = CGPoint(x: world.x * c - world.y * s, y: world.x * s + world.y * c)
+            plank.position = CGPoint(x: unit.x * offset, y: unit.y * offset)
             node.addChild(plank)
         }
     }
@@ -2481,6 +2891,9 @@ class GameScene: SKScene {
             uniqueKeysWithValues: state.lingeringEffects.map { ($0.position, $0.damagePerTurn) }
         )
         revealLiveHazards = false
+        // Same idea for the actors: hold their sprites at the pre-resolve
+        // state, then release each on its own beat below.
+        beginResolveHold()
         let ultWasReady = state.ultimateKillCharge >= state.ultimateChargeKills
         let resolution = state.resolveTurn()
         pendingUltimateReadyToast = !ultWasReady
@@ -2494,6 +2907,18 @@ class GameScene: SKScene {
             } else {
                 showToast("picked up \(picked.name)", duration: 1.0)
             }
+        }
+        // The cache reveal isn't announced here — it fires from the player's
+        // move animation instead (see animatePlayerMove), so it lands as the
+        // piece arrives on the tile rather than a beat before it sets off.
+        if !resolution.frostbittenEnemies.isEmpty {
+            let count = resolution.frostbittenEnemies.count
+            showToast(count == 1 ? "AN ENEMY FREEZES SOLID" : "\(count) ENEMIES FREEZE SOLID", duration: 1.8)
+        }
+        if resolution.frostbite {
+            // Fires the turn the cold maxes out; the lost action lands on the
+            // *next* turn, so say so rather than letting the player find out.
+            showToast("FROSTBITE — you seize up; no attack next turn", duration: 2.4)
         }
         if resolution.playerActionStunned {
             showToast("STUNNED — your attack fizzled", duration: 1.4)
@@ -2531,12 +2956,134 @@ class GameScene: SKScene {
         }
 
         playerNode.run(resolveAnimation) { [weak self] in
+            if let dug = resolution.openedCache {
+                self?.revealCache(dug)
+            }
             self?.playSpawns(resolution)
         }
     }
 
+    /// The dig, played the instant the player lands on the tile.
+    ///
+    /// A weapon announces itself — it stays on the floor inside a gold ring.
+    /// A boon has no physical tell at all: it's a line appended to a HUD row
+    /// the player isn't looking at while they watch the board resolve. So the
+    /// reveal has to happen *on* the board, at the tile, at the moment the
+    /// piece arrives, and it has to be the loudest non-threatening thing on
+    /// screen or the player walks out of the mud unsure anything happened.
+    private func revealCache(_ cache: Cache) {
+        let jade = SKColor(red: 0.45, green: 0.88, blue: 0.68, alpha: 1.0)
+        let origin = point(for: cache.position)
+
+        // Pop the lid rather than letting it linger until the post-turn
+        // rebuild: the thing that was buried should visibly come out.
+        if let lid = cacheNodes.removeValue(forKey: cache.position) {
+            lid.removeAllActions()
+            lid.run(.sequence([
+                .group([.scale(to: 1.8, duration: 0.22), .fadeOut(withDuration: 0.22)]),
+                .removeFromParent(),
+            ]))
+        }
+
+        // An expanding ring, the same grammar as a portal flash so it reads as
+        // "something happened here" without reading as a threat.
+        let burst = SKShapeNode(circleOfRadius: tileSize * 0.22)
+        burst.strokeColor = jade
+        burst.fillColor = .clear
+        burst.lineWidth = 3
+        burst.position = origin
+        burst.zPosition = 13
+        boardNode.addChild(burst)
+        burst.run(.sequence([
+            .group([.scale(to: 2.6, duration: 0.34), .fadeOut(withDuration: 0.34)]),
+            .removeFromParent(),
+        ]))
+
+        // The name, rising off the tile. This is the part that carries the
+        // information; the ring just makes the eye go there first.
+        let headline: String
+        let tint: SKColor
+        switch cache.contents {
+        case let .boon(buff):
+            // Just the boon's short name here — the full "· what it does" half
+            // is already spelled out in the HUD row it just joined.
+            headline = buff.name.components(separatedBy: " · ").first ?? buff.name
+            tint = jade
+        case let .weapon(weapon):
+            headline = weapon.name
+            tint = SKColor(red: 0.95, green: 0.85, blue: 0.35, alpha: 1.0)
+        }
+        let label = SKLabelNode(text: headline)
+        label.fontName = "HelveticaNeue-Bold"
+        label.fontSize = 15
+        label.fontColor = tint
+        label.verticalAlignmentMode = .center
+        label.position = CGPoint(x: origin.x, y: origin.y + tileSize * 0.45)
+        label.zPosition = 30
+        label.setScale(0.6)
+        boardNode.addChild(label)
+        label.run(.sequence([
+            .group([.scale(to: 1.0, duration: 0.16), .moveBy(x: 0, y: tileSize * 0.30, duration: 0.16)]),
+            .wait(forDuration: 0.85),
+            .group([.fadeOut(withDuration: 0.35), .moveBy(x: 0, y: tileSize * 0.25, duration: 0.35)]),
+            .removeFromParent(),
+        ]))
+
+        switch cache.contents {
+        case let .boon(buff):
+            let turns = buff.turnDuration.map { " · \($0) turns" } ?? ""
+            showToast("DUG OUT: \(buff.name)\(turns)", duration: 2.2)
+            // Tie the board moment to the HUD row the boon landed in, so the
+            // player learns where to look for its countdown. Deferred until
+            // the resolve repaints the HUD — see `pendingBuffRowFlash`.
+            pendingBuffRowFlash = tint
+        case let .weapon(weapon):
+            // A cache can turn up a weapon the profile hasn't unlocked, which
+            // is the best thing it can do — call that out rather than letting
+            // it read as an ordinary floor drop.
+            let known = currentWeaponPool().contains { $0.name == weapon.name }
+            showToast(
+                known
+                    ? "DUG OUT: \(weapon.name) — pick it up to swap"
+                    : "DUG OUT: \(weapon.name) — not yet in your arsenal",
+                duration: 2.6
+            )
+        }
+    }
+
+    /// Pulses the held-buffs HUD row, so a boon that appeared without the
+    /// player drafting anything has something drawing the eye to where it went.
+    private func flashBuffsRow(_ tint: SKColor) {
+        // A fixed constant, not whatever the label is currently showing: an
+        // overlapping flash would otherwise capture the tint as the resting
+        // colour and leave the row stuck on it.
+        let resting = Self.buffsLabelColor
+        buffsLabel.removeAllActions()
+        buffsLabel.run(.sequence([
+            .repeat(.sequence([
+                .run { [weak self] in self?.buffsLabel.fontColor = tint },
+                .wait(forDuration: 0.16),
+                .run { [weak self] in self?.buffsLabel.fontColor = resting },
+                .wait(forDuration: 0.16),
+            ]), count: 3),
+            .run { [weak self] in self?.buffsLabel.fontColor = resting },
+        ]))
+    }
+
     /// Steps every enemy to its drafted tile, then hands off to the player's attack.
     private func animateEnemyMoves(_ resolution: TurnResolution) {
+        // They turn as they set off, not back when the turn was drafted.
+        // Mutate a local copy: writing through `resolveHold?` while the same
+        // expression reads it is two overlapping accesses to one property,
+        // which traps at runtime.
+        if var hold = resolveHold {
+            for move in resolution.enemyMoves where move.from != move.to {
+                hold.enemyFacing[move.enemyID] = hold.enemyMoveFacing[move.enemyID]
+            }
+            resolveHold = hold
+        }
+        refreshActorSprites()
+
         var longestDuration: TimeInterval = 0
         for move in resolution.enemyMoves where move.from != move.to {
             guard let node = enemyNodes[move.enemyID] else { continue }
@@ -2636,6 +3183,12 @@ class GameScene: SKScene {
     /// dive into their targets), then anything that landed or struck blows up —
     /// all before anyone attacks.
     private func playProjectileImpacts(_ resolution: TurnResolution) {
+        // The player's shot leaves here — a fired bow empties as its arrow
+        // goes, and they turn onto their aim to loose it. A melee swing falls
+        // straight through the guard below to the attack, so the same release
+        // lands on that beat instead.
+        releasePlayerWeaponArt()
+
         guard !resolution.projectileImpacts.isEmpty || !resolution.boltFlights.isEmpty || !lobNodes.isEmpty else {
             playPlayerAttack(resolution)
             return
@@ -2682,12 +3235,18 @@ class GameScene: SKScene {
         let flightsByBolt = Dictionary(grouping: resolution.boltFlights, by: \.boltID)
         for (boltID, segments) in flightsByBolt {
             guard let first = segments.first else { continue }
-            let node: SKShapeNode
+            let node: SKNode
             if let existing = boltNodes[boltID] {
                 node = existing
             } else {
-                // Fired this very turn: the sliver enters at the shooter's tile.
-                node = makeBoltSliver(direction: first.direction)
+                // Fired this very turn: the shot enters at the shooter's tile.
+                // A bolt that struck home is already out of `state.bolts`, so
+                // its ammo can't be read back — a plain arrow covers it.
+                // Called inside a closure rather than passed as `Art.ammo(for:)`:
+                // handing a main-actor method over as a function value strips
+                // the isolation the caller has and won't compile.
+                let ammo = state.bolts.first { $0.id == boltID }.map { Art.ammo(for: $0) } ?? .arrow
+                node = makeBoltNode(ammo, direction: first.direction)
                 node.position = point(for: first.from)
                 boardNode.addChild(node)
                 boltNodes[boltID] = node
@@ -2993,6 +3552,22 @@ class GameScene: SKScene {
     /// steel blue when armor soaked it all. Friendly fire and barrel blasts play
     /// out here too.
     private func playEnemyAttacks(_ resolution: TurnResolution) {
+        // Everyone who swings turns onto their aim and spends their weapon
+        // here; enemies that did nothing keep the art they had.
+        if var hold = resolveHold {
+            for attack in resolution.enemyAttacks {
+                if let aim = hold.enemyAim[attack.enemyID] {
+                    hold.enemyFacing[attack.enemyID] = aim
+                }
+                if let enemy = state.enemies.first(where: { $0.id == attack.enemyID }) {
+                    hold.enemyWeaponReady[enemy.id] = enemy.cooldownRemaining == 0
+                    hold.enemySecondaryReady[enemy.id] = enemy.secondaryCooldownRemaining == 0
+                }
+            }
+            resolveHold = hold
+        }
+        refreshActorSprites()
+
         let playerWasDamaged = resolution.healthLost > 0 || resolution.armorLost > 0
         // Bomber fuses can blow with no attack drafted anywhere: friendly-fire
         // hits and explosions alone still need this phase to play.
@@ -3069,13 +3644,13 @@ class GameScene: SKScene {
             SKAction.wait(forDuration: 0.08),
             SKAction.run { [weak self] in
                 guard let self, gotHit else { return }
-                self.playerNode.fillColor = flashColor
+                self.playerNode.bodyFillColor = flashColor
                 self.updateHUD()
             },
             SKAction.wait(forDuration: 0.20),
             SKAction.run { [weak self] in
                 guard let self else { return }
-                self.playerNode.fillColor = self.playerColor
+                self.playerNode.clearTint()
                 self.playHazards(resolution)
             },
         ]))
@@ -3261,6 +3836,13 @@ class GameScene: SKScene {
         }
         if let newLevel = resolution.leveledUpTo {
             rebuildBoardEntities()
+            // Crossing into a new biome changes what the board can throw at
+            // you, so it gets called out. The tint shift alone is too quiet to
+            // carry "barrels exist now".
+            if Biome.forLevel(newLevel) != Biome.forLevel(newLevel - 1) {
+                let arrived = Biome.forLevel(newLevel)
+                showToast("ENTERING THE \(arrived.title.uppercased()) — \(arrived.blurb)", duration: 3.0)
+            }
             showBuffChoice(forLevel: newLevel)
         }
         // Sweep any sprite whose enemy or obstacle left the state without a
@@ -3285,19 +3867,36 @@ class GameScene: SKScene {
         heldHazardTiles = nil
         revealLiveHazards = true
         isResolving = false
+        // Planning resumes: the sprites answer to the live state again.
+        resolveHold = nil
+        refreshActorSprites()
         goButton.alpha = 1.0
         refreshSpikes()
         updateHUD()
+        // Now that the row shows the new boon, point at it.
+        if let tint = pendingBuffRowFlash {
+            pendingBuffRowFlash = nil
+            flashBuffsRow(tint)
+        }
         updateEnemyPlanArrows()
         updateSpawnMarkers()
         updateWeaponDropNodes()
+        updateCacheNodes()
         updateProjectileNodes()
         updateBomberFuses()
         updatePickupHint()
         updateEnemyHoverInfo()
         refreshTileHighlights()
         if state.isGameOver {
-            showDeathRecap()
+            // A lesson can't be lost: the hit landed, but the coach picks you
+            // back up and names what got you instead of ending the run.
+            if inTutorial {
+                let killer = state.tutorialRevive()
+                updateHUD()
+                showTutorialRescue(killer)
+            } else {
+                showDeathRecap()
+            }
         }
         // Turn one has fully resolved — roll the interactive coach into its
         // sandboxed showcase of the systems a first turn can't reach.
@@ -3850,6 +4449,8 @@ class GameScene: SKScene {
         enemyPlanArrowNodes.removeAll()
         spawnMarkerNodes.removeAll()
         weaponDropNodes.removeAll()
+        cacheNodes.removeAll()
+        pendingBuffRowFlash = nil
         lobNodes.removeAll()
         lobTargets.removeAll()
         boltNodes.removeAll()
@@ -3860,6 +4461,7 @@ class GameScene: SKScene {
         heldHazardTiles = nil
         buffChoiceOverlay = nil
         isResolving = false
+        resolveHold = nil
         state = makeRunState()
         setUpScene()
     }
