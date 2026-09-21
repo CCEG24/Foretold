@@ -15,6 +15,16 @@
               font: 13px/1.4 monospace; background: rgba(0,0,0,0.7);
               padding: 8px 12px; border-radius: 5px; white-space: pre-wrap; max-width: 90vw; }
     #status.err { color: #ff7b7b; }
+    /* Covers the canvas until the renderer has warmed its textures, so the
+       upload stall and the first blank frames happen out of sight. */
+    #boot { position: fixed; inset: 0; z-index: 50; background: #16161c;
+            display: grid; place-items: center; align-content: center; gap: 14px;
+            text-align: center; transition: opacity 0.4s ease; }
+    #boot .title { color: #eecc73; font: 400 34px/1 Papyrus, "Papyrus", fantasy;
+                   letter-spacing: 0.14em; }
+    #boot .line { color: #8c8f99; font: 13px/1.5 "Helvetica Neue", sans-serif;
+                  letter-spacing: 0.06em; }
+    #boot.gone { opacity: 0; pointer-events: none; }
     /* On-page log so console messages (incl. Swift stdout) are visible without DevTools. */
     /* Debug log panel — hidden unless the URL has ?log */
     #log { display: none; position: fixed; top: 0; right: 0; width: 42vw; height: 100vh; overflow: auto;
@@ -28,6 +38,10 @@
 <body>
   <div id="app">
     <canvas id="canvas" width="1680" height="900" tabindex="0"></canvas>
+  </div>
+  <div id="boot">
+    <div class="title">FORETOLD</div>
+    <div class="line">consulting the bones…</div>
   </div>
   <div id="status">Loading…</div>
   <pre id="log"></pre>
@@ -85,6 +99,7 @@
     // it's recoverable from a bug report.
     const fail = (short, detail) => {
       console.error(short + (detail ? '\n' + detail : ''));
+      clearBoot();   // never leave an error hidden behind the loading cover
       status.style.display = '';
       status.className = 'err';
       status.textContent = DEBUG && detail
@@ -96,7 +111,17 @@
     // as soon as it spawns its Task, so the page must NOT treat that as success —
     // adapter/canvas failures surface later, off the call stack we can catch.
     let settled = false;
-    window.foretoldReady = () => { settled = true; note('rendering'); hideStatus(); };
+    // The loading cover comes down on the first real frame — by which point
+    // the textures are warm — and on failure too, so an error is never hidden
+    // behind it.
+    const boot = document.getElementById('boot');
+    const clearBoot = () => {
+      if (!boot || boot.classList.contains('gone')) return;
+      boot.classList.add('gone');
+      setTimeout(() => boot.remove(), 500);
+    };
+
+    window.foretoldReady = () => { settled = true; note('rendering'); hideStatus(); clearBoot(); };
     window.foretoldFailed = (m) => { settled = true; fail(GENERIC_FAILURE, 'Renderer failed: ' + m); };
 
     // Breadcrumbs from start(), so a boot that dies without reporting still says
