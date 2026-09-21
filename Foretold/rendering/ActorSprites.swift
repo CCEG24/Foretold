@@ -86,10 +86,12 @@ enum Art {
         texture.usesMipmaps = true
         return texture
         #else
-        // OpenSpriteKit has no bundle to search: anything it can resolve was
-        // put there by `register`, and an unknown name yields an empty texture.
-        let texture = SKTexture(imageNamed: name)
-        return texture.size().width > 0 ? texture : nil
+        // The web build has no asset catalog, so the only art in existence
+        // there is whatever the boot step handed to `register` — and that's
+        // already in the cache before this runs. Never ask OpenSpriteKit to
+        // resolve a name: SKTexture(imageNamed:) searches Bundle.main, which
+        // traps under WASI and took the scene down on startup.
+        return nil
         #endif
     }
 
