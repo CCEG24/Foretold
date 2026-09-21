@@ -72,7 +72,7 @@
 
     // What a normal player sees. Anything more specific is diagnostics.
     const GENERIC_FAILURE = "Foretold couldn't start on this machine.";
-    const NO_WEBGPU = 'Foretold needs WebGPU — try a recent Chrome or Edge.';
+    const NO_WEBGPU = 'Foretold was asked to use WebGPU (?webgpu) but this browser has none — drop the flag to use the Canvas 2D presenter.';
 
     // Progress chatter is debug-only — in production the status line stays
     // hidden and the canvas is the whole page.
@@ -155,20 +155,29 @@
       return { ok: false, short: NO_WEBGPU, detail: head + '\n' + mid + '\n' + FLAG_HELP };
     }
 
-    const probe = await probeAdapter();
+    // Canvas 2D is the default presenter and needs no probing — every browser
+    // has it. `?webgpu` opts into OpenSpriteKit's GPU path (kept for output
+    // comparison), and only then does a missing adapter block startup.
+    // WebMain.swift reads the same flag to pick its presenter.
+    const WANT_WEBGPU = /[?&]webgpu\b/.test(location.search);
+    const probe = WANT_WEBGPU ? await probeAdapter() : { ok: true, adapter: null };
     if (!probe.ok) {
       fail(probe.short, probe.detail);
     } else {
       let desc = '';
-      try {
-        const info = probe.adapter.info
-          ?? (probe.adapter.requestAdapterInfo ? await probe.adapter.requestAdapterInfo() : null);
-        if (info) {
-          const parts = [info.vendor, info.architecture, info.description].filter(Boolean).join(' ');
-          if (parts) desc = ' (' + parts + ')';
-        }
-      } catch {}
-      note('WebGPU adapter acquired' + desc + ' — starting…');
+      if (probe.adapter) {
+        try {
+          const info = probe.adapter.info
+            ?? (probe.adapter.requestAdapterInfo ? await probe.adapter.requestAdapterInfo() : null);
+          if (info) {
+            const parts = [info.vendor, info.architecture, info.description].filter(Boolean).join(' ');
+            if (parts) desc = ' (' + parts + ')';
+          }
+        } catch {}
+        note('WebGPU adapter acquired' + desc + ' — starting…');
+      } else {
+        note('Canvas 2D presenter — starting…');
+      }
       try {
         const { instantiate, MODULE_PATH } = await import('./instantiate.js');
         const { WASI, OpenFile, File, ConsoleStdout } = await import('./wasi-shim.js');

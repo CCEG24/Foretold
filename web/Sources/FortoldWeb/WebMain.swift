@@ -2,9 +2,14 @@
 //  WebMain.swift
 //  FortoldWeb — browser entry point (WASM only)
 //
-//  Presents the real GameScene through OpenSpriteKit's SKRenderer, mirroring the
-//  proven spike bootstrap (see web-spike). Input isn't wired yet — that's the
-//  DOM→GameInput adapter step; this first gets the actual board rendering.
+//  Presents the real GameScene in the browser. The SpriteKit frame cycle
+//  (update → actions → callbacks) is always driven by OpenSpriteKit's
+//  SKRenderer; what puts pixels on the canvas is one of two presenters:
+//
+//    - Canvas 2D (default) — `Canvas2DRenderer` walks the node tree and draws
+//      it with the plain 2D context. Works in every browser; no GPU needed.
+//    - WebGPU (opt-in via `?webgpu`) — OpenSpriteKit's own presenter, kept
+//      for comparing output while the 2D path matures.
 
 import OpenSpriteKit
 import JavaScriptKit
@@ -18,6 +23,7 @@ private enum CanvasConfig {
 
 private var animationCallback: JSClosure?
 private var skRenderer: SKRenderer?
+private var canvasRenderer: Canvas2DRenderer?
 private var gameScene: GameScene?
 private var didAnnounceFirstFrame = false
 
@@ -77,15 +83,35 @@ private func start() async {
         return
     }
 
+    // `?webgpu` in the URL selects OpenSpriteKit's GPU presenter; everything
+    // else gets Canvas 2D. The page mirrors this flag when it decides whether
+    // to probe for a GPU adapter at all.
+    let search = JSObject.global.location.search.string ?? ""
+    let useWebGPU = search.contains("webgpu")
+
     stage("renderer-init")
-    let renderer = SKRenderer(canvas: canvas)
-    do {
-        try await renderer.initialize()
-    } catch {
-        report(failure: "SKRenderer.initialize failed: \(String(describing: error))")
-        return
+    let renderer: SKRenderer
+    if useWebGPU {
+        renderer = SKRenderer(canvas: canvas)
+        do {
+            try await renderer.initialize()
+        } catch {
+            report(failure: "SKRenderer.initialize failed: \(String(describing: error))")
+            return
+        }
+        renderer.resize(width: CanvasConfig.width, height: CanvasConfig.height)
+    } else {
+        // No canvas binding: this SKRenderer only runs the update cycle.
+        renderer = SKRenderer()
+        do {
+            canvasRenderer = try Canvas2DRenderer(canvas: canvas,
+                                                  sceneWidth: CanvasConfig.width,
+                                                  sceneHeight: CanvasConfig.height)
+        } catch {
+            report(failure: "Canvas2DRenderer failed: \(String(describing: error))")
+            return
+        }
     }
-    renderer.resize(width: CanvasConfig.width, height: CanvasConfig.height)
 
     stage("scene")
     let scene = GameScene(size: CGSize(width: CanvasConfig.width, height: CanvasConfig.height))
@@ -95,6 +121,7 @@ private func start() async {
     let view = SKView()
     scene.didMove(to: view)
     skRenderer = renderer
+    canvasRenderer?.scene = scene
     gameScene = scene
 
     // Route browser pointer/keyboard/wheel events into GameScene's shared handlers.
@@ -110,7 +137,11 @@ private func start() async {
         }
         let now = JSObject.global.performance.now().number ?? 0
         skRenderer?.update(atTime: (now - startTime) / 1000.0)
-        skRenderer?.render()
+        if let canvasRenderer {
+            canvasRenderer.render()
+        } else {
+            skRenderer?.render()
+        }
         reportFirstFrame()
         return .undefined
     }
