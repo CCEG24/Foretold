@@ -1,7 +1,7 @@
 # Foretold
 
 A turn-drafting tactics roguelite — playable in your browser, also native on macOS.
-Built with SpriteKit (and OpenSpriteKit/WebGPU for the web).
+Built with SpriteKit (and OpenSpriteKit + a Canvas 2D presenter for the web).
 
 Every turn is drafted before it resolves: you plan a move plus an action while
 seeing every enemy's telegraphed move, aim, and incoming spawn — then
@@ -12,9 +12,9 @@ outplaying it.
 
 ▶ **[Play in your browser →](https://foretold.onrender.com)**
 
-Nothing to install — it just loads. Needs a WebGPU-capable browser (a current
-Chrome/Edge/Safari; Chrome recommended). The whole game runs client-side as
-WebAssembly.
+Nothing to install — it just loads, in any current browser (Chrome, Edge,
+Firefox, Safari). The whole game runs client-side as WebAssembly and draws
+with the plain Canvas 2D API, so no GPU or WebGPU support is required.
 
 There's nothing to read here to start: the game has a built-in interactive
 tutorial and hover tooltips for everything, so this README sticks to the
@@ -76,5 +76,9 @@ targets via `#if canImport(SpriteKit)` (Apple's SpriteKit) vs OpenSpriteKit (web
 - **macOS:** open `Foretold.xcodeproj` in Xcode and run.
 - **Web:** the `web/` SwiftPM package compiles the shared source to WebAssembly
   against OpenSpriteKit; `web-spike/fetch-deps.sh` pins + patches the engine.
+  OpenSpriteKit only runs the update loop in the browser — pixels come from
+  `web/Sources/FortoldWeb/Canvas2DRenderer.swift`, which walks the node tree
+  and draws it with Canvas 2D (no WebGPU needed). Append `?webgpu` to the URL
+  to use OpenSpriteKit's WebGPU presenter instead, for comparison.
   GitHub Actions rebuilds `web/dist` on every push and Render serves it. See
   `web/patches/UPSTREAM-ISSUES.md` for the OpenSpriteKit fixes this port needed.
