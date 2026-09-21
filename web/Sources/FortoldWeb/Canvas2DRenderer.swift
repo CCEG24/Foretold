@@ -59,6 +59,12 @@ private struct Affine {
     }
 }
 
+/// The failure reason when the 2D context can't be created — the page shows it.
+enum Canvas2DRendererFailure: Error, CustomStringConvertible {
+    case noContext
+    var description: String { "canvas.getContext('2d') returned null" }
+}
+
 @MainActor
 final class Canvas2DRenderer {
 
@@ -96,12 +102,6 @@ final class Canvas2DRenderer {
     /// `Path2D` objects for shape paths, keyed by path identity.
     private var pathCache: [ObjectIdentifier: (path: CGPath, path2D: JSObject)] = [:]
 
-    /// The failure reason when the 2D context can't be created — the page shows it.
-    enum Failure: Error, CustomStringConvertible {
-        case noContext
-        var description: String { "canvas.getContext('2d') returned null" }
-    }
-
     init(canvas: JSObject, sceneWidth: Int, sceneHeight: Int) throws {
         self.canvas = canvas
         self.sceneWidth = Double(sceneWidth)
@@ -111,7 +111,7 @@ final class Canvas2DRenderer {
         let options = JSObject.global.Object.function!.new()
         options.alpha = .boolean(false)
         guard let context = canvas.getContext!("2d", options).object else {
-            throw Failure.noContext
+            throw Canvas2DRendererFailure.noContext
         }
         self.ctx = context
         resizeBackingStore()
