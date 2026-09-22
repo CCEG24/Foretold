@@ -10,11 +10,13 @@ outplaying it.
 
 ## Play
 
-▶ **[Play in your browser →](https://foretold.onrender.com)**
+▶ **[Play in your browser →](https://superheroghost.github.io/Foretold/)**
 
 Nothing to install — it just loads, in any current browser (Chrome, Edge,
 Firefox, Safari). The whole game runs client-side as WebAssembly and draws
-with the plain Canvas 2D API, so no GPU or WebGPU support is required.
+with the plain Canvas 2D API, so **no GPU or WebGPU support is required** —
+the page never even asks for `navigator.gpu` (WebGPU is strictly opt-in via
+`?webgpu` for output comparison, and a browser without it plays fine).
 
 There's nothing to read here to start: the game has a built-in interactive
 tutorial and hover tooltips for everything, so this README sticks to the
@@ -80,5 +82,12 @@ targets via `#if canImport(SpriteKit)` (Apple's SpriteKit) vs OpenSpriteKit (web
   `web/Sources/FortoldWeb/Canvas2DRenderer.swift`, which walks the node tree
   and draws it with Canvas 2D (no WebGPU needed). Append `?webgpu` to the URL
   to use OpenSpriteKit's WebGPU presenter instead, for comparison.
-  GitHub Actions rebuilds `web/dist` on every push and Render serves it. See
-  `web/patches/UPSTREAM-ISSUES.md` for the OpenSpriteKit fixes this port needed.
+  GitHub Actions rebuilds the bundle on every push: `build-web.yml` commits a
+  fresh `web/dist` (Render mirrors it) and `deploy-pages.yml` runs a
+  headless-Chrome smoke test — boots the exact built artifact with WebGPU
+  removed from the browser and no cross-origin isolation, asserts real
+  pixels on the canvas — before deploying to
+  [GitHub Pages](https://superheroghost.github.io/Foretold/). A build that
+  ever started to require WebGPU (or SharedArrayBuffer) can't reach the live
+  site. See `web/patches/UPSTREAM-ISSUES.md` for the OpenSpriteKit fixes this
+  port needed.

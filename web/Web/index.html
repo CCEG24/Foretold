@@ -188,11 +188,28 @@
           ConsoleStdout.lineBuffered((m) => console.warn('[swift]', m)),
         ]);
 
-        const { instance } = await instantiate({
-          module: fetch(new URL(MODULE_PATH, import.meta.url)),
+        const wasmUrl = new URL(MODULE_PATH, import.meta.url);
+        const makeOptions = (module) => ({
+          module,
           addToCoreImports(imports) { imports['wasi_snapshot_preview1'] = wasi.wasiImport; },
           instrumentInstance(inst) { wasi.initialize(inst); return inst; },
         });
+        // Streaming compilation is fastest, but it HARD-FAILS (TypeError) unless
+        // the server labels the bytes application/wasm. GitHub Pages does label
+        // them correctly — but any host that doesn't (a reverse proxy that
+        // strips content types, a local `python -m http.server`, some CDNs)
+        // gets a dead page, and the generated glue offers no fallback. So: try
+        // streaming, and on that failure mode retry with raw bytes, where the
+        // MIME type is irrelevant. (Fetch/network errors are also TypeError —
+        // retrying them just re-surfaces the same real error.)
+        let instance;
+        try {
+          instance = (await instantiate(makeOptions(fetch(wasmUrl)))).instance;
+        } catch (e) {
+          if (!(e instanceof TypeError)) throw e;
+          const bytes = await (await fetch(wasmUrl)).arrayBuffer();
+          instance = (await instantiate(makeOptions(bytes))).instance;
+        }
 
         instance.exports.setup();
         // Deliberately NOT reporting success here — setup() only starts a Task.
