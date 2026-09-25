@@ -66,6 +66,10 @@ func installInput(scene: GameScene, canvas: JSObject, width: Double, height: Dou
     }
     let key = JSClosure { args in
         guard let e = args[0].object else { return .undefined }
+        // Cmd/Ctrl chords belong to the browser — copy, reload, find, zoom. The
+        // game binds no modified keys, and swallowing them below made Cmd+C and
+        // Cmd+R silently do nothing anywhere on the page.
+        if e.metaKey.boolean == true || e.ctrlKey.boolean == true { return .undefined }
         guard let code = e.code.string, let mac = domToMacKeyCode[code] else { return .undefined }
         _ = e.preventDefault!()   // stop Space/Tab/arrows from scrolling or moving focus
         scene.handleKeyDown(GameInput(keyCode: mac, timestamp: timestamp(e)))

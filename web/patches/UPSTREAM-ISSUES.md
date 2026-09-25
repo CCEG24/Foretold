@@ -137,6 +137,28 @@ render at device resolution.
 that renders the backing at `logical×scale` while keeping scene coordinates in
 logical points, and rasterizes text/CATextLayer at that scale.
 
+> **Our fix:** `resize(width:height:contentsScale:)` on `SKRenderer` and
+> `CAWebGPURenderer` (the 2-argument spelling still exists at 1× — it's what
+> `CARendererDelegate` requires). The renderer now keeps two sizes: `size` stays
+> in points and drives every projection matrix, vertex and layer bound, while a
+> new `pixelSize` (`size × contentsScale`) drives everything measured in device
+> pixels — the canvas backing store, the depth attachment, both main-pass
+> `setViewport` calls, `currentRenderTargetSize` (so scissor rects, which
+> `setScissorRect` takes in framebuffer pixels, and the viewport-sized shadow /
+> filter / composition captures that pair with the pixel-sized depth texture all
+> agree), and the rasterization-cache budget. Separating the two is the whole
+> fix: growing them together is what put the scene in a corner.
+>
+> Text is the one thing that doesn't sharpen for free — glyphs are rasterized by
+> Canvas2D into a texture — so `renderText` multiplies the layer's own
+> `contentsScale` by the renderer's and rasterizes at the product, keyed into the
+> text-texture cache by that effective scale.
+>
+> Not covered: shadow/filter blur uniforms still derive their texel step from the
+> pixel viewport, which is self-consistent but means a blur radius authored in
+> points widens with the scale. Nothing in Foretold uses layer shadows or
+> filters, so this is untested rather than known-good.
+
 ---
 
 ## 7. [OpenSpriteKit] Children of sized nodes (SKSpriteNode/SKShapeNode) are offset by anchorPoint × parentSize

@@ -11,12 +11,71 @@ import JavaScriptKit
 import JavaScriptEventLoop
 
 private enum CanvasConfig {
-    // Match the mac layout (wide board + side HUD columns).
+    // Match the mac layout (wide board + side HUD columns). These are logical
+    // points — the scene's coordinate space — not the canvas backing store,
+    // which is this times the contents scale below.
     static let width = 1680
     static let height = 900
+
+    /// Ceiling on device-pixels-per-point.
+    ///
+    /// The board is drawn to fit the window, so on a large retina display the
+    /// honest ratio can climb past 3 — a 5040×2700 backing store, with every
+    /// viewport-sized cache sized to match. 2× is where the sharpness stops
+    /// being visible and the memory starts to be; past it the browser's own
+    /// upscale is a fine trade.
+    static let maxContentsScale: Double = 2
+
+    /// Render this many times the screen's pixels and let the browser shrink it.
+    ///
+    /// The WebGPU renderer has no multisampling, so every shape edge, circle and
+    /// stroke comes out hard-stepped where SpriteKit on the Mac smooths it — that
+    /// jaggedness reads as "low resolution" even at 1:1 pixels. Oversampling and
+    /// letting the browser filter it down is antialiasing by brute force: 4× the
+    /// pixels at 2, bounded by `maxContentsScale`. `?ss=1` in the URL turns it
+    /// off to compare. Stopgap until the renderer does MSAA itself.
+    nonisolated(unsafe) static let supersample: Double = {
+        // Plain stdlib parsing — no Foundation string search on the wasm side.
+        let query = (JSObject.global.location.search.string ?? "").dropFirst()   // drop "?"
+        for pair in query.split(separator: "&") where pair.hasPrefix("ss=") {
+            if let value = Double(pair.dropFirst(3)), value >= 1, value.isFinite {
+                return value
+            }
+        }
+        return 2
+    }()
+}
+
+/// Device pixels per scene point, for the canvas as the page lays it out now.
+///
+/// The canvas's CSS box is what the player actually sees (`min(100vw, …)` in
+/// index.html), so the physical pixels across it are `cssWidth × devicePixelRatio`.
+/// Spreading those over the scene's logical width gives the scale at which the
+/// renderer should rasterize to land exactly one texel per screen pixel.
+private func canvasContentsScale(_ canvas: JSObject) -> CGFloat {
+    let rect = canvas.getBoundingClientRect!()
+    let cssWidth = rect.width.number ?? 0
+    let ratio = JSObject.global.devicePixelRatio.number ?? 1
+    guard cssWidth > 0, ratio > 0, cssWidth.isFinite, ratio.isFinite else { return 1 }
+    let ideal = cssWidth * ratio / Double(CanvasConfig.width)
+    return CGFloat(min(ideal * CanvasConfig.supersample, CanvasConfig.maxContentsScale))
+}
+
+/// The backing width the current scale asks for, used to ignore resize events
+/// that wouldn't change a single pixel — a reconfigure drops the depth texture
+/// and every viewport-sized cache, so it isn't free.
+private func backingWidth(for scale: CGFloat) -> Int {
+    Int((Double(CanvasConfig.width) * Double(scale)).rounded())
 }
 
 private var animationCallback: JSClosure?
+/// Held for the page's lifetime: a JSClosure handed to `addEventListener` and
+/// then released fires into freed memory.
+private var retainedResizeClosure: JSClosure?
+/// The contents scale currently applied to the renderer. File-scope rather than
+/// captured, so the resize callback isn't mutating a local across an escaping
+/// boundary. Single-threaded wasm, so unsafe global state is fine.
+nonisolated(unsafe) private var appliedContentsScale: CGFloat = 1
 private var skRenderer: SKRenderer?
 private var gameScene: GameScene?
 private var didAnnounceFirstFrame = false
@@ -100,12 +159,19 @@ private func reportFrameTiming(update: Double, render: Double, at now: Double) {
     // GC, the wasm/JS boundary, or simply waiting on the display.
     let accounted = WebFrameStats.updateTotal + WebFrameStats.renderTotal + WebFrameStats.inputTotal
     func ms(_ value: Double) -> String { "\(Double(Int(value * 10)) / 10)ms" }
-    _ = JSObject.global.console.log(
-        "FortoldWeb: \(Int(fps.rounded())) fps [art \(WebArt.registered)] | per frame — update \(ms(WebFrameStats.updateTotal / frames)),"
-        + " render \(ms(WebFrameStats.renderTotal / frames))"
-        + " | this second — \(WebFrameStats.inputEvents) hovers costing \(ms(WebFrameStats.inputTotal)),"
-        + " unaccounted \(ms(elapsed - accounted))"
-    )
+    // Rewritten in place in the page's corner box rather than logged: a line
+    // a second buried everything else in the console.
+    if let box = JSObject.global.document.getElementById("fps").object {
+        _ = box.classList.add("show")   // idempotent; the box stays hidden without ?log
+        box.textContent = .string(
+            "\(Int(fps.rounded())) fps · \(Double(Int(appliedContentsScale * 100)) / 100)×"
+            + "\nupdate \(ms(WebFrameStats.updateTotal / frames))"
+            + "  render \(ms(WebFrameStats.renderTotal / frames))"
+            + "\n\(WebFrameStats.inputEvents) hovers \(ms(WebFrameStats.inputTotal))"
+            + "  other \(ms(elapsed - accounted))"
+            + "\nart \(WebArt.registered)"
+        )
+    }
     WebFrameStats.reset(at: now)
 }
 
@@ -146,7 +212,20 @@ private func start() async {
         report(failure: "SKRenderer.initialize failed: \(String(describing: error))")
         return
     }
-    renderer.resize(width: CanvasConfig.width, height: CanvasConfig.height)
+    // The scene stays 1680×900 points; only the backing store follows the
+    // display. Without this the canvas rendered 1680×900 pixels and the browser
+    // stretched them over the (usually larger, usually retina) CSS box, which
+    // is what made the whole board look soft.
+    appliedContentsScale = canvasContentsScale(canvas)
+    renderer.resize(width: CanvasConfig.width, height: CanvasConfig.height,
+                    contentsScale: appliedContentsScale)
+    if WebFrameStats.logging {
+        _ = JSObject.global.console.log(
+            "FortoldWeb: \(CanvasConfig.width)×\(CanvasConfig.height) pt at"
+            + " \(Double(Int(appliedContentsScale * 100)) / 100)× →"
+            + " \(backingWidth(for: appliedContentsScale))px backing"
+        )
+    }
 
     // Sprites have to be in the rig's cache before the scene is built: each
     // body reads it once as it's constructed. No manifest = no art, and the
@@ -174,6 +253,26 @@ private func start() async {
     stage("input")
     installInput(scene: scene, canvas: canvas,
                  width: Double(CanvasConfig.width), height: Double(CanvasConfig.height))
+
+    // Resizing the window changes the CSS box the board fills, and dragging it
+    // to another display changes devicePixelRatio — both change how many real
+    // pixels the same 1680×900 points get. Re-scale when the backing store
+    // would actually come out a different size; the scene itself never moves.
+    let resized = JSClosure { _ in
+        let scale = canvasContentsScale(canvas)
+        guard backingWidth(for: scale) != backingWidth(for: appliedContentsScale) else {
+            return .undefined
+        }
+        appliedContentsScale = scale
+        skRenderer?.resize(width: CanvasConfig.width, height: CanvasConfig.height,
+                           contentsScale: scale)
+        // Nothing else to do: the next frame redraws the whole layer tree into
+        // the new backing store, and cached text textures are keyed by pixel
+        // size, so they miss at the new scale and re-rasterize on demand.
+        return .undefined
+    }
+    retainedResizeClosure = resized
+    _ = JSObject.global.addEventListener!("resize", resized)
 
     stage("first-frame")
     let startTime = JSObject.global.performance.now().number ?? 0

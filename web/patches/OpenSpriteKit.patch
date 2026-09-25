@@ -1,8 +1,102 @@
+diff --git a/Sources/OpenSpriteKit/Internal/SKNullSceneRenderer.swift b/Sources/OpenSpriteKit/Internal/SKNullSceneRenderer.swift
+index afa82f4..3e28de0 100644
+--- a/Sources/OpenSpriteKit/Internal/SKNullSceneRenderer.swift
++++ b/Sources/OpenSpriteKit/Internal/SKNullSceneRenderer.swift
+@@ -28,7 +28,7 @@ internal final class SKNullSceneRenderer: SKSceneRendererDelegate {
+         .unsupportedPlatform
+     }
+ 
+-    func resize(width: Int, height: Int) {
++    func resize(width: Int, height: Int, contentsScale: CGFloat) {
+         // No-op
+     }
+ 
+diff --git a/Sources/OpenSpriteKit/Internal/SKSceneRendererDelegate.swift b/Sources/OpenSpriteKit/Internal/SKSceneRendererDelegate.swift
+index 65826bd..867a22c 100644
+--- a/Sources/OpenSpriteKit/Internal/SKSceneRendererDelegate.swift
++++ b/Sources/OpenSpriteKit/Internal/SKSceneRendererDelegate.swift
+@@ -53,9 +53,12 @@ internal protocol SKSceneRendererDelegate: AnyObject {
+     /// depth buffers, render textures, etc.
+     ///
+     /// - Parameters:
+-    ///   - width: The new width in pixels.
+-    ///   - height: The new height in pixels.
+-    func resize(width: Int, height: Int)
++    ///   - width: The new width in logical points.
++    ///   - height: The new height in logical points.
++    ///   - contentsScale: Device pixels per point. Backends that render to a
++    ///     HiDPI surface allocate `width × height × contentsScale²` pixels and
++    ///     keep the scene's coordinates in points.
++    func resize(width: Int, height: Int, contentsScale: CGFloat)
+ 
+     // MARK: - Cleanup
+ 
+@@ -65,3 +68,14 @@ internal protocol SKSceneRendererDelegate: AnyObject {
+     /// any further rendering operations.
+     func invalidate()
+ }
++
++extension SKSceneRendererDelegate {
++
++    /// Resizes at 1× — points and pixels are the same thing.
++    ///
++    /// Swift forbids default arguments on a protocol requirement, so the
++    /// unscaled spelling every existing caller uses lives here instead.
++    func resize(width: Int, height: Int) {
++        resize(width: width, height: height, contentsScale: 1)
++    }
++}
+diff --git a/Sources/OpenSpriteKit/Internal/SKViewRenderer.swift b/Sources/OpenSpriteKit/Internal/SKViewRenderer.swift
+index bef501f..15e69d1 100644
+--- a/Sources/OpenSpriteKit/Internal/SKViewRenderer.swift
++++ b/Sources/OpenSpriteKit/Internal/SKViewRenderer.swift
+@@ -512,9 +512,10 @@ internal final class SKViewRenderer: CADisplayLinkDelegate {
+     /// Updates the renderer size when the view is resized.
+     ///
+     /// - Parameters:
+-    ///   - width: The new width in pixels.
+-    ///   - height: The new height in pixels.
+-    func resize(width: Int, height: Int) {
+-        rendererDelegate.resize(width: width, height: height)
++    ///   - width: The new width in logical points.
++    ///   - height: The new height in logical points.
++    ///   - contentsScale: Device pixels per point (see `SKRenderer.resize`).
++    func resize(width: Int, height: Int, contentsScale: CGFloat = 1) {
++        rendererDelegate.resize(width: width, height: height, contentsScale: contentsScale)
+     }
+ }
+diff --git a/Sources/OpenSpriteKit/Internal/SKWebGPUSceneRenderer.swift b/Sources/OpenSpriteKit/Internal/SKWebGPUSceneRenderer.swift
+index eb82116..a11ad6f 100644
+--- a/Sources/OpenSpriteKit/Internal/SKWebGPUSceneRenderer.swift
++++ b/Sources/OpenSpriteKit/Internal/SKWebGPUSceneRenderer.swift
+@@ -57,8 +57,8 @@ internal final class SKWebGPUSceneRenderer: SKSceneRendererDelegate {
+         return nil
+     }
+ 
+-    func resize(width: Int, height: Int) {
+-        webGPURenderer?.resize(width: width, height: height)
++    func resize(width: Int, height: Int, contentsScale: CGFloat) {
++        webGPURenderer?.resize(width: width, height: height, contentsScale: contentsScale)
+     }
+ 
+     func invalidate() {
 diff --git a/Sources/OpenSpriteKit/SKLabelNode.swift b/Sources/OpenSpriteKit/SKLabelNode.swift
-index dda47e3..2e40a0d 100644
+index dda47e3..7c69753 100644
 --- a/Sources/OpenSpriteKit/SKLabelNode.swift
 +++ b/Sources/OpenSpriteKit/SKLabelNode.swift
-@@ -92,27 +92,59 @@ open class SKLabelNode: SKNode {
+@@ -72,6 +72,11 @@ open class SKLabelNode: SKNode {
+             #else
+             textLayer.font = fontName
+             #endif
++            // The font changes the measured text size, so the layer bounds have
++            // to be recomputed — without this, bounds kept whatever font was set
++            // when `text`/`fontSize` last ran (i.e. only correct if fontName
++            // happens to be assigned before them).
++            updateLayerBounds()
+         }
+     }
+ 
+@@ -92,25 +97,57 @@ open class SKLabelNode: SKNode {
      /// This method only sets bounds width when preferredMaxLayoutWidth is specified
      /// (for multi-line text wrapping).
      private func updateLayerBounds() {
@@ -40,9 +134,9 @@ index dda47e3..2e40a0d 100644
          didSet {
              updateTextLayerAlignment()
 +            updateAnchorForAlignment()
-         }
-     }
- 
++        }
++    }
++
 +    /// Maps the label's alignment modes onto the backing layer's anchorPoint so
 +    /// text positions like SpriteKit. The base SKNode leaves anchorPoint at
 +    /// (0.5, 0.5), which centers every label on its position — wrong for left/
@@ -60,14 +154,12 @@ index dda47e3..2e40a0d 100644
 +        case .center: ay = 0.5
 +        case .bottom: ay = 0.0
 +        case .baseline: ay = 0.17   // baseline sits ~0.2·fontSize above the bottom
-+        }
+         }
 +        layer.anchorPoint = CGPoint(x: ax, y: ay)
-+    }
-+
+     }
+ 
      /// Updates the text layer alignment based on horizontal alignment mode.
-     private func updateTextLayerAlignment() {
-         switch horizontalAlignmentMode {
-@@ -172,31 +204,86 @@ open class SKLabelNode: SKNode {
+@@ -172,31 +209,86 @@ open class SKLabelNode: SKNode {
  
      // MARK: - Computed Properties
  
@@ -165,7 +257,7 @@ index dda47e3..2e40a0d 100644
      }
  
      /// A rectangle in the label's local coordinate system that defines its content area.
-@@ -339,6 +426,7 @@ open class SKLabelNode: SKNode {
+@@ -339,6 +431,7 @@ open class SKLabelNode: SKNode {
          #endif
          updateTextLayerAlignment()
          updateTextLayerTruncation()
@@ -192,3 +284,26 @@ index c4aa270..de5aadd 100644
                  results.append((node, nodeZ, currentDepth))
              }
  
+diff --git a/Sources/OpenSpriteKit/SKRenderer.swift b/Sources/OpenSpriteKit/SKRenderer.swift
+index 978a4eb..2ba47ce 100644
+--- a/Sources/OpenSpriteKit/SKRenderer.swift
++++ b/Sources/OpenSpriteKit/SKRenderer.swift
+@@ -127,10 +127,14 @@ open class SKRenderer {
+     /// Resizes the renderer to match a new canvas size.
+     ///
+     /// - Parameters:
+-    ///   - width: The new width in pixels.
+-    ///   - height: The new height in pixels.
+-    public func resize(width: Int, height: Int) {
+-        rendererDelegate.resize(width: width, height: height)
++    ///   - width: The new width in logical points.
++    ///   - height: The new height in logical points.
++    ///   - contentsScale: Device pixels per point — pass the page's
++    ///     `devicePixelRatio` to render at the display's true resolution. The
++    ///     scene keeps its coordinates in points, so nothing in the layer tree
++    ///     has to be rescaled; only the backing store grows.
++    public func resize(width: Int, height: Int, contentsScale: CGFloat = 1) {
++        rendererDelegate.resize(width: width, height: height, contentsScale: contentsScale)
+     }
+ 
+     // MARK: - Frame Cycle

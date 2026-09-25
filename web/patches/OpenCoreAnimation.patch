@@ -89,10 +89,55 @@ index 253953c..fc9878d 100644
          } else {
              return nil
 diff --git a/Sources/OpenCoreAnimation/CAWebGPURenderer.swift b/Sources/OpenCoreAnimation/CAWebGPURenderer.swift
-index 17840e5..81cd9da 100644
+index 17840e5..e66bdf8 100644
 --- a/Sources/OpenCoreAnimation/CAWebGPURenderer.swift
 +++ b/Sources/OpenCoreAnimation/CAWebGPURenderer.swift
-@@ -2338,8 +2338,17 @@ private final class CommittedAnimationEvaluationFailure {
+@@ -961,9 +961,27 @@ private final class CommittedAnimationEvaluationFailure {
+     /// view alongside it and invalidate together with the texture.
+     private var depthTextureView: GPUTextureView?
+ 
+-    /// The current size.
++    /// The current size, in logical points.
++    ///
++    /// Every projection matrix, vertex position and layer bound is expressed in
++    /// this space. The backing store may be larger — see `contentsScale`.
+     public private(set) var size: CGSize = CGSize(width: 0, height: 0)
+ 
++    /// How many device pixels one logical point occupies (HiDPI / retina).
++    ///
++    /// Set through `resize(width:height:contentsScale:)`. The canvas backing
++    /// store, the depth attachment, every render-pass viewport and scissor rect,
++    /// and text rasterization all work in `size × contentsScale` pixels, while
++    /// scene coordinates stay in points — so a 2× display renders sharp without
++    /// the caller rescaling its layer tree.
++    public private(set) var contentsScale: CGFloat = 1
++
++    /// The backing-store size in device pixels: `size × contentsScale`, rounded.
++    ///
++    /// Stored rather than recomputed so the canvas, the depth texture and the
++    /// viewport can never disagree by a rounding step.
++    public private(set) var pixelSize: CGSize = CGSize(width: 0, height: 0)
++
+     /// Number of transition source textures captured during this renderer's lifetime.
+     @_spi(RendererDiagnostics)
+     public private(set) var transitionSourceCaptureCount: Int = 0
+@@ -1478,8 +1496,14 @@ private final class CommittedAnimationEvaluationFailure {
+     /// Overrides viewport-derived calculations while a layer subtree is captured offscreen.
+     private var renderTargetSizeOverride: CGSize?
+ 
++    /// The render target's size in device pixels.
++    ///
++    /// Everything derived from this is measured in pixels, not points: scissor
++    /// rects (`setScissorRect` takes framebuffer pixels), pass viewports, and
++    /// the viewport-sized offscreen captures shadows and filters allocate. An
++    /// override is already a pixel size, so it passes through untouched.
+     private var currentRenderTargetSize: CGSize {
+-        renderTargetSizeOverride ?? size
++        renderTargetSizeOverride ?? pixelSize
+     }
+ 
+     /// Returns the current effective opacity from the stack.
+@@ -2338,8 +2362,17 @@ private final class CommittedAnimationEvaluationFailure {
          }
          context = GPUCanvasContext(jsObject: ctxObject)
  
@@ -112,7 +157,25 @@ index 17840e5..81cd9da 100644
          }
  
          // Create shader module
-@@ -4239,12 +4248,20 @@ private final class CommittedAnimationEvaluationFailure {
+@@ -2592,7 +2625,16 @@ private final class CommittedAnimationEvaluationFailure {
+             maxMemoryBytes: 64 * 1024 * 1024  // 64 MB
+         )
+ 
+-        size = CGSize(width: renderTarget.width, height: renderTarget.height)
++        // The canvas element is measured in pixels, so the logical size is that
++        // divided by the scale. `contentsScale` is normally still its default 1
++        // here (a caller resizes after initializing), which makes this the
++        // identity it has always been; dividing matters only if someone resized
++        // to a HiDPI backing store before initializing.
++        pixelSize = CGSize(width: renderTarget.width, height: renderTarget.height)
++        size = CGSize(
++            width: CGFloat(renderTarget.width) / contentsScale,
++            height: CGFloat(renderTarget.height) / contentsScale
++        )
+ 
+         // Create depth texture
+         let depthResources = createDepthResources(
+@@ -4239,12 +4281,20 @@ private final class CommittedAnimationEvaluationFailure {
      /// successful in that case.
      private func configureCanvas(toneMappingMode: GPUCanvasToneMappingMode) -> Bool {
          guard let device, let context else { return false }
@@ -139,8 +202,176 @@ index 17840e5..81cd9da 100644
  
          let reportedMode = context.getConfiguration()?.toneMapping?.mode
          supportsExtendedDynamicRangeOutput = reportedMode != nil
-@@ -14092,10 +14109,10 @@ private final class CommittedAnimationEvaluationFailure {
-                 Double(configuration.contentsScale)
+@@ -4504,10 +4554,30 @@ private final class CommittedAnimationEvaluationFailure {
+         return true
+     }
+ 
++    /// Resizes the render target at 1×, where points and pixels coincide.
++    ///
++    /// This is `CARendererDelegate`'s spelling. A protocol requirement can't be
++    /// satisfied by a method with a defaulted extra parameter, so it forwards
++    /// rather than sharing one signature with the HiDPI variant below.
+     public func resize(width: Int, height: Int) {
++        resize(width: width, height: height, contentsScale: 1)
++    }
++
++    /// Resizes the render target.
++    ///
++    /// - Parameters:
++    ///   - width: The new width in logical points.
++    ///   - height: The new height in logical points.
++    ///   - contentsScale: Device pixels per point (pass the page's
++    ///     `devicePixelRatio` to render sharp on a HiDPI display). The backing
++    ///     store becomes `width × height × contentsScale²` pixels while the
++    ///     layer tree keeps working in points.
++    public func resize(width: Int, height: Int, contentsScale: CGFloat) {
+         let maximumTextureDimension = device.map {
+             Int($0.limits.maxTextureDimension2D)
+         } ?? Int.max
++        // The logical target validates the point-space size that drives every
++        // projection matrix; `size` is set from it below.
+         let renderTarget: CARenderTargetConfiguration
+         do {
+             renderTarget = try CARenderTargetConfiguration(
+@@ -4519,6 +4589,29 @@ private final class CommittedAnimationEvaluationFailure {
+             recordFrameRenderFailure(.invalidRenderTarget(error))
+             return
+         }
++        // And the backing target validates the pixel-space size, which is what
++        // actually has to fit in a texture. A scale that overflows the device
++        // limit is rejected outright rather than silently clamped: the caller
++        // picked it, and a half-applied scale renders at the wrong size.
++        guard contentsScale.isFinite, contentsScale > 0 else {
++            recordFrameRenderFailure(
++                .invalidRenderTarget(
++                    .invalidDimensions(width: Double(width), height: Double(height))
++                )
++            )
++            return
++        }
++        let backingTarget: CARenderTargetConfiguration
++        do {
++            backingTarget = try CARenderTargetConfiguration(
++                width: (Double(width) * Double(contentsScale)).rounded(),
++                height: (Double(height) * Double(contentsScale)).rounded(),
++                maximumTextureDimension: maximumTextureDimension
++            )
++        } catch {
++            recordFrameRenderFailure(.invalidRenderTarget(error))
++            return
++        }
+ 
+         // Configure first so a rejected context change cannot leave the public
+         // size and canvas dimensions partially committed.
+@@ -4529,17 +4622,22 @@ private final class CommittedAnimationEvaluationFailure {
+             return
+         }
+ 
+-        // Update canvas size
++        // Update canvas size. The element's backing store is in pixels; its CSS
++        // box (and so the scene's apparent size) is the page's business.
+         size = CGSize(width: renderTarget.width, height: renderTarget.height)
+-        canvas.width = .number(Double(renderTarget.width))
+-        canvas.height = .number(Double(renderTarget.height))
+-
+-        // Recreate depth texture
++        self.contentsScale = contentsScale
++        pixelSize = CGSize(width: backingTarget.width, height: backingTarget.height)
++        canvas.width = .number(Double(backingTarget.width))
++        canvas.height = .number(Double(backingTarget.height))
++
++        // Recreate depth texture. It's a companion attachment to the canvas
++        // texture, so it's sized in pixels — every pass that pairs the two has
++        // to agree or WebGPU rejects the descriptor.
+         if let device {
+             let depthResources = createDepthResources(
+                 device: device,
+-                width: renderTarget.width,
+-                height: renderTarget.height
++                width: backingTarget.width,
++                height: backingTarget.height
+             )
+             depthTexture?.destroy()
+             depthTexture = depthResources.texture
+@@ -4565,7 +4663,7 @@ private final class CommittedAnimationEvaluationFailure {
+         // Recreating the cache on resize applies the new viewport-derived
+         // immutable byte budget. The eviction callback releases every old
+         // capture and its dependent texture view before replacement.
+-        configureRasterizationCache(width: renderTarget.width, height: renderTarget.height)
++        configureRasterizationCache(width: backingTarget.width, height: backingTarget.height)
+         prerasterizedTextures.removeAll(keepingCapacity: true)
+         failedRasterizationRenderKeys.removeAll(keepingCapacity: true)
+         pendingContentMaskFrameFailure = nil
+@@ -4748,11 +4846,14 @@ private final class CommittedAnimationEvaluationFailure {
+             )
+         )
+         renderPass.setPipeline(pipeline)
++        // Pixels, not points: the viewport has to cover the whole canvas
++        // texture, or a HiDPI backing store would only be painted in the
++        // bottom-left corner the logical size happens to occupy.
+         renderPass.setViewport(
+             x: 0,
+             y: 0,
+-            width: Float(size.width),
+-            height: Float(size.height),
++            width: Float(pixelSize.width),
++            height: Float(pixelSize.height),
+             minDepth: 0,
+             maxDepth: 1
+         )
+@@ -5830,12 +5931,14 @@ private final class CommittedAnimationEvaluationFailure {
+ 
+         renderPass.setPipeline(pipeline)
+ 
+-        // Set viewport to full canvas size
++        // Set viewport to full canvas size — in device pixels, which is what
++        // the canvas texture is measured in. The projection above stays in
++        // points, so scene coordinates are unaffected by the backing scale.
+         renderPass.setViewport(
+             x: 0,
+             y: 0,
+-            width: Float(size.width),
+-            height: Float(size.height),
++            width: Float(pixelSize.width),
++            height: Float(pixelSize.height),
+             minDepth: 0,
+             maxDepth: 1
+         )
+@@ -13999,8 +14102,13 @@ private final class CommittedAnimationEvaluationFailure {
+             throw .rendererResourcesUnavailable
+         }
+         let maximumTextureDimension = max(1, Int(device.limits.maxTextureDimension2D))
+-        let scaledWidth = logicalSize.width * configuration.contentsScale
+-        let scaledHeight = logicalSize.height * configuration.contentsScale
++        // Glyphs are rasterized by Canvas2D into a texture, so unlike geometry
++        // they don't sharpen for free on a HiDPI backing store — they have to
++        // be drawn at that scale. The layer's own contentsScale still applies
++        // on top of the renderer's, the way an oversampled layer would.
++        let effectiveScale = configuration.contentsScale * contentsScale
++        let scaledWidth = logicalSize.width * effectiveScale
++        let scaledHeight = logicalSize.height * effectiveScale
+         guard scaledWidth.isFinite,
+               scaledHeight.isFinite,
+               scaledWidth > 0,
+@@ -14062,6 +14170,7 @@ private final class CommittedAnimationEvaluationFailure {
+             text: text,
+             width: pixelWidth,
+             height: pixelHeight,
++            contentsScale: effectiveScale,
+             configuration: configuration
+         )
+ 
+@@ -14087,15 +14196,17 @@ private final class CommittedAnimationEvaluationFailure {
+             // Keeping the text texture transparent prevents translucent backgrounds
+             // from being composited twice.
+             _ = ctx.clearRect!(0, 0, pixelWidth, pixelHeight)
++            // Everything below lays the text out in points; this maps those
++            // points onto the (possibly larger) pixel grid allocated above.
+             _ = ctx.scale!(
+-                Double(configuration.contentsScale),
+-                Double(configuration.contentsScale)
++                Double(effectiveScale),
++                Double(effectiveScale)
              )
  
 -            // Set font
@@ -154,6 +385,79 @@ index 17840e5..81cd9da 100644
  
              // Set text color
              let color = configuration.foregroundRGBA
+@@ -14271,6 +14382,7 @@ private final class CommittedAnimationEvaluationFailure {
+         text: String,
+         width: Int,
+         height: Int,
++        contentsScale: CGFloat,
+         configuration: CATextRenderConfiguration
+     ) -> TextTextureCacheKey {
+         let color = configuration.foregroundRGBA
+@@ -14279,7 +14391,7 @@ private final class CommittedAnimationEvaluationFailure {
+             pixelWidth: width,
+             pixelHeight: height,
+             fontSize: configuration.fontSize,
+-            contentsScale: configuration.contentsScale,
++            contentsScale: contentsScale,
+             alignmentMode: configuration.alignmentMode,
+             truncationMode: configuration.truncationMode,
+             fontFamily: configuration.fontFamily,
+@@ -15011,8 +15123,8 @@ private final class CommittedAnimationEvaluationFailure {
+             } else {
+                 resources = ShadowLayerResources(
+                     device: device,
+-                    width: Int(size.width),
+-                    height: Int(size.height),
++                    width: Int(pixelSize.width),
++                    height: Int(pixelSize.height),
+                     format: preferredFormat
+                 )
+                 shadowLayerResources[shadowRenderKey] = resources
+@@ -15298,7 +15410,10 @@ private final class CommittedAnimationEvaluationFailure {
+         let previousStencilValue = currentStencilValue
+ 
+         shadowCaptureRootLayer = layer
+-        renderTargetSizeOverride = size
++        // The silhouette is captured into a viewport-sized texture, which is
++        // allocated in pixels — so the override that clips and scissors it is
++        // in pixels too.
++        renderTargetSizeOverride = pixelSize
+         clipRectStack.removeAll(keepingCapacity: true)
+         opacityStack.removeAll(keepingCapacity: true)
+         maskNestingDepth = 0
+@@ -15436,8 +15551,8 @@ private final class CommittedAnimationEvaluationFailure {
+             } else {
+                 resources = FilterLayerResources(
+                     device: device,
+-                    width: Int(size.width),
+-                    height: Int(size.height),
++                    width: Int(pixelSize.width),
++                    height: Int(pixelSize.height),
+                     format: preferredFormat
+                 )
+                 filterLayerResources[filteredRenderKey] = resources
+@@ -16285,8 +16400,8 @@ private final class CommittedAnimationEvaluationFailure {
+         let filterResources = resources.contentMaskResources(
+             at: contentMaskIndex,
+             device: device,
+-            width: Int(size.width),
+-            height: Int(size.height),
++            width: Int(pixelSize.width),
++            height: Int(pixelSize.height),
+             format: preferredFormat
+         )
+         guard renderRawCompositionContentMask(
+@@ -16649,8 +16764,8 @@ private final class CommittedAnimationEvaluationFailure {
+                 } else {
+                     resources = CompositionLayerResources(
+                         device: device,
+-                        width: Int(size.width),
+-                        height: Int(size.height),
++                        width: Int(pixelSize.width),
++                        height: Int(pixelSize.height),
+                         format: preferredFormat
+                     )
+                     compositionLayerResources[key] = resources
 diff --git a/Sources/OpenCoreAnimation/Rendering/CATextRenderConfiguration.swift b/Sources/OpenCoreAnimation/Rendering/CATextRenderConfiguration.swift
 index bd9518f..6a225c9 100644
 --- a/Sources/OpenCoreAnimation/Rendering/CATextRenderConfiguration.swift

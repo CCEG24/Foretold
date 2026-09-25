@@ -1195,6 +1195,72 @@ struct GameState {
         return current
     }
 
+    /// Reels whatever an enemy's grapple bit back toward the attacker standing
+    /// on `origin`: a comrade still on its feet is dragged up the line (raking
+    /// live spikes on the way), and a barrel is hauled in to burst soft in the
+    /// attacker's lap. The same reel `performGrapple` runs for the player, just
+    /// pointed the other way. The player is never dragged here — that pull
+    /// belongs with the hit that landed on them.
+    private mutating func reelEnemyGrapple(
+        toward origin: GridPosition,
+        bitten: GridPosition,
+        facing: Direction,
+        hits: inout [TurnResolution.EnemyHit],
+        explosions: inout [TurnResolution.Explosion],
+        shoves: inout [TurnResolution.Shove],
+        barrelMoves: inout [TurnResolution.BarrelMove]
+    ) {
+        let step = facing.unitStep
+        let pull = GridPosition(x: -step.x, y: -step.y)
+        /// Walks back down the line from `bitten`, stopping just shy of the
+        /// attacker, the player, or anything else in the way. `moverID` is the
+        /// body being dragged, which can't block its own path.
+        func destination(ignoring moverID: Int?) -> (tile: GridPosition, crossed: [GridPosition]) {
+            var current = bitten
+            var crossed: [GridPosition] = []
+            while true {
+                let next = GridPosition(x: current.x + pull.x, y: current.y + pull.y)
+                if next == origin || next == playerPosition { break }
+                guard contains(next), obstacle(at: next) == nil,
+                      !enemies.contains(where: { $0.id != moverID && $0.position == next }) else { break }
+                current = next
+                crossed.append(next)
+            }
+            return (current, crossed)
+        }
+
+        // A barrel comes in and goes off where it lands, softly — the grapple's
+        // controlled 2, blast and chains intact. Handled here rather than by the
+        // sweep's own detonation so it bursts against the attacker, not where it
+        // was standing.
+        if let barrelIndex = obstacles.firstIndex(where: { $0.kind == .barrel && $0.position == bitten }) {
+            let landing = destination(ignoring: nil).tile
+            obstacles[barrelIndex].position = landing
+            if landing != bitten {
+                barrelMoves.append(TurnResolution.BarrelMove(from: bitten, to: landing))
+            }
+            let blast = detonateBarrels(struckTiles: [landing], chargesUltimate: false,
+                                        damageOverride: Self.grappleBarrelDamage)
+            explosions += blast.explosions
+            hits += blast.hits
+            return
+        }
+
+        // A comrade: already damaged by the sweep, so anyone still here survived.
+        guard let index = enemies.firstIndex(where: { $0.position == bitten }) else { return }
+        let id = enemies[index].id
+        let (landing, crossed) = destination(ignoring: id)
+        guard landing != bitten else { return }
+        enemies[index].position = landing
+        shoves.append(TurnResolution.Shove(enemyID: id, from: bitten, to: landing))
+        let raked = crossed.dropLast().filter { tile in
+            spikes.contains { $0.active && $0.position == tile }
+        }.count
+        for _ in 0..<raked {
+            hits += damageEnemies(on: [landing], damage: Self.spikeDamage, chargesUltimate: false)
+        }
+    }
+
     /// Tiles the player must move (without acting) to earn a dodge. A pact can
     /// make it trivial (Sidestep) or impossible (Leadfoot); the Sure Feet boon
     /// also drops it to one (but Leadfoot's ban wins).
@@ -2909,6 +2975,26 @@ struct GameState {
             let comradeHits = damageEnemies(on: struckEnemies, damage: attackDamage, chargesUltimate: false)
             afflict(comradeHits, with: strikingWeapon.affliction, chargesUltimate: false, credit: nil)
             friendlyFireHits += comradeHits
+            // A hook that bit something other than the player still reels: the
+            // line stops at the first body or barrel it meets, so whatever sits
+            // on the last swept tile is what gets hauled in. Runs after the
+            // sweep's damage (only a survivor is dragged) and before the sweep's
+            // detonation (a reeled barrel bursts where it lands instead).
+            if strikingWeapon.grapples, !hitsPlayer, let facing = attacker.plannedDirection,
+               let bitten = tiles.last, bitten != playerPosition,
+               enemies.contains(where: { $0.position == bitten })
+                   || obstacles.contains(where: { $0.kind == .barrel && $0.position == bitten }) {
+                enemyGrappleHooks.append(TurnResolution.GrappleHook(from: attacker.position, to: bitten))
+                reelEnemyGrapple(
+                    toward: attacker.position,
+                    bitten: bitten,
+                    facing: facing,
+                    hits: &friendlyFireHits,
+                    explosions: &enemyExplosions,
+                    shoves: &enemyShoves,
+                    barrelMoves: &enemyBarrelMoves
+                )
+            }
             // A Vortex doesn't pop the barrels it covers — it drags them (below),
             // and they burst only if the pull rams them into something. Every
             // other attack sets off whatever it swept.
@@ -3412,6 +3498,9 @@ struct GameState {
         // Clearing a level tops armor back up to its (possibly newly-shrunken)
         // cap — a breather each level, though health still never regenerates.
         playerArmor = armorCap
+        // Both carried weapons come off cooldown too: you step onto the new
+        // board ready, not spending its first turns waiting out the last one.
+        weaponCooldowns = [:]
 
         // Dev: pin the level-up offer for testing. Either slot can be set; both
         // set reproduces the exact two options, one set offers just that one.

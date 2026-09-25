@@ -3632,8 +3632,9 @@ class GameScene: SKScene {
             return
         }
 
-        // Enemies reeling the player in throw a hook line, just as the player's
-        // grapple does — the player's skid to `playerShoveTo` (below) is the reel.
+        // Enemies reeling something in throw a hook line, just as the player's
+        // grapple does — the reel itself is the player's skid to `playerShoveTo`
+        // (below), or the comrade/barrel dragged up the line in `enemyShoves`.
         for hook in resolution.enemyGrappleHooks {
             drawGrappleLine(from: hook.from, to: hook.to)
         }
@@ -3643,8 +3644,9 @@ class GameScene: SKScene {
                 paintTile(tile, SKColor(red: 0.55, green: 0.12, blue: 0.10, alpha: 1.0))
             }
         }
-        // Comrades and barrels hauled in by an enemy's Vortex slide as the blast
-        // lands — barrels first, so one rammed into scenery bursts on arrival.
+        // Comrades and barrels hauled in by an enemy's Vortex or grapple slide
+        // as the blast lands — barrels first, so one reeled into the attacker
+        // bursts on arrival.
         animateBarrelMoves(resolution.enemyBarrelMoves)
         animateShoves(resolution.enemyShoves)
         // A keg an enemy lobbed pops in where it landed, same flourish as a

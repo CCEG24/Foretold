@@ -15,22 +15,58 @@
               font: 13px/1.4 monospace; background: rgba(0,0,0,0.7);
               padding: 8px 12px; border-radius: 5px; white-space: pre-wrap; max-width: 90vw; }
     #status.err { color: #ff7b7b; }
+    /* Covers the canvas until the renderer has warmed its textures, so the
+       upload stall and the first blank frames happen out of sight. */
+    #boot { position: fixed; inset: 0; z-index: 50; background: #16161c;
+            display: grid; place-items: center; align-content: center; gap: 14px;
+            text-align: center; transition: opacity 0.4s ease; }
+    #boot .title { color: #eecc73; font: 400 34px/1 Papyrus, "Papyrus", fantasy;
+                   letter-spacing: 0.14em; }
+    #boot .line { color: #8c8f99; font: 13px/1.5 "Helvetica Neue", sans-serif;
+                  letter-spacing: 0.06em; }
+    #boot.gone { opacity: 0; pointer-events: none; }
+    /* Proof of life while the wasm loads. Animates only transform/opacity, which
+       browsers run on the compositor thread — so it keeps turning even while
+       the main thread is pinned compiling or starting the 70 MB module, exactly
+       when a static screen looks frozen. */
+    #boot .ring { width: 38px; height: 38px; margin: 0 auto; border-radius: 50%;
+                  border: 2px solid rgba(238,204,115,0.18); border-top-color: #eecc73;
+                  animation: boot-spin 1.1s linear infinite; }
+    #boot .line { animation: boot-breathe 2.4s ease-in-out infinite; }
+    @keyframes boot-spin { to { transform: rotate(360deg); } }
+    @keyframes boot-breathe { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
     /* On-page log so console messages (incl. Swift stdout) are visible without DevTools. */
     /* Debug log panel — hidden unless the URL has ?log */
     #log { display: none; position: fixed; top: 0; right: 0; width: 42vw; height: 100vh; overflow: auto;
            margin: 0; padding: 8px; background: rgba(0,0,0,0.82); color: #b8c0cc;
            font: 11px/1.35 monospace; white-space: pre-wrap; z-index: 99; }
     #log.show { display: block; }
+    /* Live frame stats (?log only) — WebMain rewrites it once a second instead
+       of adding a console line every second. */
+    #fps { display: none; position: fixed; top: 8px; left: 8px; z-index: 98;
+           padding: 4px 8px; border-radius: 4px; background: rgba(0,0,0,0.7);
+           color: #69db7c; font: 11px/1.35 monospace; white-space: pre;
+           pointer-events: none; }
+    #fps.show { display: block; }
     #log .e { color: #ff7b7b; }
     #log .drop { color: #ffd479; }
   </style>
 </head>
 <body>
   <div id="app">
+    <!-- width/height are the pre-boot backing store only: WebMain resizes it to
+         the CSS box × devicePixelRatio so the board renders at the display's
+         real resolution. The CSS above owns the displayed size. -->
     <canvas id="canvas" width="1680" height="900" tabindex="0"></canvas>
+  </div>
+  <div id="boot">
+    <div class="title">FORETOLD</div>
+    <div class="ring"></div>
+    <div class="line" id="boot-phase">consulting the bones…</div>
   </div>
   <div id="status">Loading…</div>
   <pre id="log"></pre>
+  <div id="fps"></div>
 
   <script>
     // Mirror console.log/warn/error onto the page. Collapses repeated lines so a
@@ -85,6 +121,7 @@
     // it's recoverable from a bug report.
     const fail = (short, detail) => {
       console.error(short + (detail ? '\n' + detail : ''));
+      clearBoot();   // never leave an error hidden behind the loading cover
       status.style.display = '';
       status.className = 'err';
       status.textContent = DEBUG && detail
@@ -96,15 +133,44 @@
     // as soon as it spawns its Task, so the page must NOT treat that as success —
     // adapter/canvas failures surface later, off the call stack we can catch.
     let settled = false;
-    window.foretoldReady = () => { settled = true; note('rendering'); hideStatus(); };
+    // The loading cover comes down on the first real frame — by which point
+    // the textures are warm — and on failure too, so an error is never hidden
+    // behind it.
+    const boot = document.getElementById('boot');
+    const clearBoot = () => {
+      if (!boot || boot.classList.contains('gone')) return;
+      boot.classList.add('gone');
+      setTimeout(() => boot.remove(), 500);
+    };
+
+    window.foretoldReady = () => { settled = true; note('rendering'); hideStatus(); clearBoot(); };
     window.foretoldFailed = (m) => { settled = true; fail(GENERIC_FAILURE, 'Renderer failed: ' + m); };
 
     // Breadcrumbs from start(), so a boot that dies without reporting still says
     // where. A JavaScript exception thrown into WASM (a browser rejecting a
     // WebGPU configuration, say) unwinds the instance rather than returning an
     // error, which is how "neither callback fired" happens.
+    // The loading line follows the boot along, so a long step reads as progress
+    // rather than a hang. Keys are WebMain's stage() names; unknown ones leave
+    // the line as it was.
+    const bootPhase = document.getElementById('boot-phase');
+    const setPhase = (text) => { if (bootPhase) bootPhase.textContent = text; };
+    const PHASES = {
+      'canvas':        'waking the renderer…',
+      'renderer-init': 'waking the renderer…',
+      'assets':        'gathering the pieces…',
+      'scene':         'laying out the board…',
+      'prewarm':       'warming the board…',
+      'input':         'warming the board…',
+      'first-frame':   'almost there…',
+    };
+
     const stages = [];
-    window.foretoldStage = (s) => { stages.push(String(s)); note('stage: ' + s); };
+    window.foretoldStage = (s) => {
+      stages.push(String(s));
+      note('stage: ' + s);
+      if (PHASES[s]) setPhase(PHASES[s]);
+    };
     const trail = () => stages.length
       ? 'Stages started: ' + stages.join(' → ') + ' (last one never finished)'
       : 'No stage was reached — setup() died before its first step.';
@@ -169,6 +235,8 @@
         }
       } catch {}
       note('WebGPU adapter acquired' + desc + ' — starting…');
+      // The download + compile is the longest silent stretch of the boot.
+      setPhase('unrolling the scroll…');
       try {
         const { instantiate, MODULE_PATH } = await import('./instantiate.js');
         const { WASI, OpenFile, File, ConsoleStdout } = await import('./wasi-shim.js');
