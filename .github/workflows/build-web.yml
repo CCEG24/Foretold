@@ -106,7 +106,10 @@ jobs:
         run: |
           set -euxo pipefail
           chmod +x build.sh
-          ./build.sh
+          # build.sh defaults to dist-local so a dev machine can never produce
+          # the published bundle by accident; CI is the one place that asks
+          # for dist.
+          FORETOLD_DIST=dist ./build.sh
           ls -lh dist
 
       - name: Commit built dist if changed

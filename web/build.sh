@@ -1,11 +1,20 @@
 #!/usr/bin/env bash
 #
-# Builds Foretold's web target to WASM + JS glue and assembles ./dist.
+# Builds Foretold's web target to WASM + JS glue.
+#
+# Output goes to ./dist-local by default, which is gitignored. ./dist is the
+# published bundle Render serves, and CI owns it: the workflow builds with
+# FORETOLD_DIST=dist and commits the result. A local build must never touch
+# it — dist is tracked (CI force-adds it), so .gitignore no longer protects it,
+# and a locally built wasm riding along in a commit conflicts with CI's own
+# rebuild on the next pull, every time.
 #
 # Prereqs: swiftly-selected Swift 6.4 release on PATH + the swift.org wasm SDK
 # (same setup as web-spike/README.md). Deps are reused from ../web-spike/Deps.
 set -euo pipefail
 cd "$(dirname "$0")"
+
+OUT="${FORETOLD_DIST:-dist-local}"
 
 # swiftly puts the selected toolchain's `swift` on PATH.
 . "${SWIFTLY_HOME_DIR:-$HOME/.swiftly}/env.sh" 2>/dev/null || true
@@ -30,7 +39,7 @@ echo "== FortoldWeb → WASM =="
 echo "   swift: $(swift --version 2>/dev/null | head -1)"
 echo "   sdk:   $SWIFT_WASM_SDK"
 
-rm -rf dist && mkdir -p dist
+rm -rf "$OUT" && mkdir -p "$OUT"
 
 swift package \
   --swift-sdk "$SWIFT_WASM_SDK" \
@@ -38,7 +47,7 @@ swift package \
   js \
   -c release \
   --use-cdn \
-  --output dist
+  --output $OUT
 
 # Assert the WASI-reactor contract. Package.swift passes `-mexec-model=reactor`
 # plus three `--export=` linker flags via .unsafeFlags; index.html calls setup()
@@ -46,9 +55,9 @@ swift package \
 # flags the build still SUCCEEDS and the page just renders blank — the classic
 # silent failure. Export names live as plain UTF-8 in the wasm export section,
 # so grep is enough to catch it at build time instead of in the browser.
-wasm="$(ls dist/*.wasm 2>/dev/null | head -1 || true)"
+wasm="$(ls $OUT/*.wasm 2>/dev/null | head -1 || true)"
 if [ -z "$wasm" ]; then
-  echo "!! no .wasm in dist/ — PackageToJS produced no module" >&2
+  echo "!! no .wasm in $OUT/ — PackageToJS produced no module" >&2
   exit 1
 fi
 missing=""
@@ -98,28 +107,28 @@ bytes="$(wc -c < "$wasm" | tr -d '[:space:]')"
 echo "   no DWARF ✓  ($((bytes / 1048576)) MiB)"
 
 # PackageToJS emits the JS module but no html/WASI wiring — supply ours.
-cp Web/index.html dist/index.html
-cp Web/wasi-shim.js dist/wasi-shim.js
+cp Web/index.html $OUT/index.html
+cp Web/wasi-shim.js $OUT/wasi-shim.js
 
 # The sprites. There's no asset catalog in the browser, so the PNGs ship
 # beside the wasm, flattened out of their .imageset folders, with a manifest
 # naming them — WebArt fetches that list at boot and registers each one under
 # the same name the mac build looks up. No art, no manifest, no problem: the
 # board falls back to the shapes it always drew.
-mkdir -p dist/assets
+mkdir -p $OUT/assets
 sprites=""
 for imageset in ../Foretold/Assets.xcassets/*.imageset; do
   [ -d "$imageset" ] || continue
   name="$(basename "$imageset" .imageset)"
   [ -f "$imageset/$name.png" ] || continue
-  cp "$imageset/$name.png" "dist/assets/$name.png"
+  cp "$imageset/$name.png" "$OUT/assets/$name.png"
   sprites="$sprites\"$name\","
 done
-printf '[%s]\n' "${sprites%,}" > dist/assets/manifest.json
-echo "   sprites: $(ls dist/assets/*.png 2>/dev/null | wc -l | tr -d '[:space:]') copied"
+printf '[%s]\n' "${sprites%,}" > $OUT/assets/manifest.json
+echo "   sprites: $(ls $OUT/assets/*.png 2>/dev/null | wc -l | tr -d '[:space:]') copied"
 
 echo
-echo "== bundle → ./dist =="
-ls -la dist
+echo "== bundle → ./$OUT =="
+ls -la $OUT
 echo
-echo "Serve:  python3 serve.py    # http://localhost:8000 (COOP/COEP + wasm MIME)"
+echo "Serve:  python3 serve.py 8000 $OUT    # http://localhost:8000 (COOP/COEP + wasm MIME)"

@@ -1,6 +1,12 @@
 # Local build output. NOT committed from dev machines — CI is the sole producer
 # of web/dist (its build step force-adds it via `git add -f web/dist`). This stops
 # macOS-built and Linux-built wasm from churning 85MB diffs against each other.
-# Local `build.sh` still writes these for local testing with serve.py.
+#
+# Ignoring dist/ alone wasn't enough: once CI force-added it, dist became a
+# tracked path, and .gitignore never applies to tracked files — so every local
+# build showed up as a modified 67MB wasm and got swept into commits, which then
+# conflicted with CI's own rebuild on the next pull. Local builds now go to
+# dist-local instead (see build.sh); only CI writes dist.
 .build/
 dist/
+dist-local/
