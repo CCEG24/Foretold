@@ -29,6 +29,10 @@ class GameScene: SKScene {
     /// land on the same colour is skipped entirely. Cleared for any tile
     /// painted directly (a flash, a blocked spawn) so the next refresh
     /// restores it.
+    ///
+    /// This has to hold *every* input `tileColor` reads — anything missing here
+    /// is a change the cache can't see. The biome was once left out, so a new
+    /// level's floor only showed up tile by tile as highlights passed over it.
     private struct TileAppearance: Equatable {
         let isLegalTarget: Bool
         let isPlannedAttack: Bool
@@ -37,6 +41,9 @@ class GameScene: SKScene {
         let isThrowRange: Bool
         let isSpawnTelegraph: Bool
         let isPlannedDestination: Bool
+        let isPlannedTarget: Bool
+        let isHovered: Bool
+        let biome: Biome
     }
     private var tileAppearances: [GridPosition: TileAppearance] = [:]
     /// The same idea for crumbling walls, which carry their telegraph in their
@@ -2394,7 +2401,10 @@ class GameScene: SKScene {
                 hazardDamage: hazardDamages[position],
                 isThrowRange: throwRange.contains(position),
                 isSpawnTelegraph: spawnTiles.contains(position),
-                isPlannedDestination: position == plannedWarpExit
+                isPlannedDestination: position == plannedWarpExit,
+                isPlannedTarget: position == state.plannedTarget,
+                isHovered: position == hoveredTile,
+                biome: state.biome
             )
             guard tileAppearances[position] != appearance else { continue }
             tileAppearances[position] = appearance
