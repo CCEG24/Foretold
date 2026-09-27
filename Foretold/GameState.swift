@@ -600,6 +600,16 @@ struct GameState {
     private(set) var plannedDetonateTarget: GridPosition?
     /// Turns left on Quickening's free-reload window (0 = weapons reload as normal).
     private(set) var freeReloadTurns = 0
+    /// Turns left on Fury's double-damage window (0 = damage as normal).
+    private(set) var empoweredTurns = 0
+
+    /// Everything the player deals is scaled by this: the pact's deal-double
+    /// boon (Sharpened) times Fury while it lasts. One multiplier on purpose —
+    /// swing, bash, bolt, lob and player-lit barrel all read it, so neither
+    /// effect can quietly miss a damage source the other covers.
+    var outgoingDamageMult: Double {
+        rules.damageDealtMult * (empoweredTurns > 0 ? 2 : 1)
+    }
 
     /// Kills needed to charge this run's omen — the omen's own cost, not a
     /// global. Reads as an instance value so call sites can't accidentally
@@ -632,7 +642,7 @@ struct GameState {
         case .zero: return 0
         case .normal:
             let base = equippedWeapon.damage + buffs.reduce(0) { $0 + $1.bonusDamage }
-            return Int((Double(base) * rules.damageDealtMult).rounded())
+            return Int((Double(base) * outgoingDamageMult).rounded())
         }
     }
     /// The armor ceiling right now: the base cap plus buff bonuses.
@@ -1298,7 +1308,8 @@ struct GameState {
             // detonate intent telegraphs.
             let barrels = obstacles.filter { $0.kind == .barrel }.map(\.position)
             return Array(Set(barrels.flatMap { barrelChainBlast(from: $0) }))
-        case .quickening:
+        case .quickening, .fury:
+            // Both land on the player, not on anything the preview could show.
             return []
         }
     }
@@ -2502,6 +2513,12 @@ struct GameState {
                 // it promises.
                 ultimateTiles = [playerPosition]
                 freeReloadTurns = omen.duration + 1
+            case .fury:
+                // Firing the omen is this turn's action, so the window opens
+                // next turn; +1 for the same reason as Quickening, so the
+                // player gets every turn the blurb promises.
+                ultimateTiles = [playerPosition]
+                empoweredTurns = omen.duration + 1
             }
         }
         plannedUltimate = false
@@ -2622,7 +2639,7 @@ struct GameState {
             let struck = Set(attackTiles)
             // Bash rides the deal-double boon too (attackDamage already does).
             let strikeDamage = bashing
-                ? Int((Double(Self.bashDamage) * rules.damageDealtMult).rounded())
+                ? Int((Double(Self.bashDamage) * outgoingDamageMult).rounded())
                 : attackDamage
             // A directional swing can be parried from the front and rewards a
             // backstab; a thrown blast or a radial swing (greataxe/hammer/scythe)
@@ -3169,6 +3186,7 @@ struct GameState {
         // real cooldowns keep ticking underneath, so weapons aren't left hot
         // the moment the window shuts.
         if freeReloadTurns > 0 { freeReloadTurns -= 1 }
+        if empoweredTurns > 0 { empoweredTurns -= 1 }
         // The jab doesn't restart the reload — the real weapon keeps counting.
         if didAttack && !bashing {
             // Rampage: a kill this turn shaves a turn off the reload.
@@ -4213,7 +4231,7 @@ struct GameState {
                 // Player-lit chains tally toward the explosives milestones and ride
                 // the deal-double boon (Sharpened); enemy-lit ones stay at base.
                 let enemyBlastDamage = damageOverride ?? (chargesUltimate
-                    ? Int((Double(base) * rules.damageDealtMult).rounded())
+                    ? Int((Double(base) * outgoingDamageMult).rounded())
                     : base)
                 hits += damageEnemies(on: blastSet, damage: enemyBlastDamage, chargesUltimate: chargesUltimate, credit: chargesUltimate ? "Barrels" : nil)
                 // Damage to the player runs through applyDamage, which already

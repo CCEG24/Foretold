@@ -180,6 +180,9 @@ enum Omen: String, CaseIterable {
     case stillness
     /// Both carried weapons ignore their reload for two turns.
     case quickening
+    /// Everything you deal lands double for three turns — swings, shots, lobs,
+    /// and the barrels you set off.
+    case fury
 
     var title: String {
         switch self {
@@ -187,15 +190,17 @@ enum Omen: String, CaseIterable {
         case .detonation: return "Detonation"
         case .stillness: return "Stillness"
         case .quickening: return "Quickening"
+        case .fury: return "Fury"
         }
     }
 
     var blurb: String {
         switch self {
-        case .smite: return "the sky falls on every enemy at once"
-        case .detonation: return "3 charges — set off a barrel of your choosing"
+        case .smite: return "damage all enemies on screen"
+        case .detonation: return "set off barrels of your choosing - 3 charges"
         case .stillness: return "every enemy freezes for two turns"
         case .quickening: return "your weapons ignore their reload for two turns"
+        case .fury: return "everything you deal lands double for three turns"
         }
     }
 
@@ -204,6 +209,9 @@ enum Omen: String, CaseIterable {
         switch self {
         case .smite, .stillness: return 10
         case .detonation, .quickening: return 5
+        // Pricier than Quickening: that one only buys tempo, this doubles the
+        // payoff of every turn it covers.
+        case .fury: return 8
         }
     }
 
@@ -215,7 +223,7 @@ enum Omen: String, CaseIterable {
     var charges: Int {
         switch self {
         case .detonation: return 3
-        case .smite, .stillness, .quickening: return 0
+        case .smite, .stillness, .quickening, .fury: return 0
         }
     }
 
@@ -223,6 +231,7 @@ enum Omen: String, CaseIterable {
     var duration: Int {
         switch self {
         case .stillness, .quickening: return 2
+        case .fury: return 3
         case .smite, .detonation: return 0
         }
     }
@@ -230,7 +239,27 @@ enum Omen: String, CaseIterable {
     /// The order the draft cycles them in: the blunt, legible one first, the
     /// ones that need you to read the board last. Unlocks are expected to
     /// follow the same order.
-    static let ordered: [Omen] = [.smite, .quickening, .detonation, .stillness]
+    static let ordered: [Omen] = [.smite, .quickening, .fury, .detonation, .stillness]
+
+    struct Milestone {
+        let omen: Omen
+        /// Key into the lifetime tallies (same keys as `Weapon.Milestone`).
+        let tally: String
+        let count: Int
+        /// Human-readable unlock condition.
+        let requirement: String
+    }
+
+    /// How each omen past Smite is earned, in `ordered` order. Each feat leans
+    /// toward the omen's verb: streaks for tempo, barrels for Detonation,
+    /// dodging for the omen that stops the board.
+    static let milestones: [Milestone] = [
+        Milestone(omen: .quickening, tally: "Streaks", count: 5, requirement: "reach a ×3 kill streak, 5 times"),
+        // Fury pays for big turns, so it's earned by having them.
+        Milestone(omen: .fury, tally: "ComboTurns", count: 10, requirement: "kill 3+ in a single turn, 10 times"),
+        Milestone(omen: .detonation, tally: "Barrels", count: 15, requirement: "15 kills with exploding barrels"),
+        Milestone(omen: .stillness, tally: "Dodges", count: 25, requirement: "dodge 25 attacks"),
+    ]
 }
 
 /// A buff the player currently holds, with its remaining lifetime. Exactly one

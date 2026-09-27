@@ -360,6 +360,11 @@ class GameScene: SKScene {
             "swing freely, chosen one.| the waiting is suspended. |the consequences are not.",
             "i have consulted the bones.| the bones said 'again'. and then 'again'.",
         ]
+        case .fury: return [
+            "a terrible wrath awakens within you!| it's mostly in your arms. |but it is terrible.",
+            "thy blows shall fall as twain!| two. it means two. |everything counts twice.",
+            "the heavens lend you their fury.| on loan. three turns. |spend it wisely.",
+        ]
         }
     }
 
@@ -2257,7 +2262,7 @@ class GameScene: SKScene {
         if state.weaponSwapCostsAttack {
             itemsLabel.text = "swapped to \(state.equippedWeapon.name) — spends your attack (swap back to undo)"
         } else if state.plannedBash {
-            let bashDmg = Int((Double(GameState.bashDamage) * state.rules.damageDealtMult).rounded())
+            let bashDmg = Int((Double(GameState.bashDamage) * state.outgoingDamageMult).rounded())
             itemsLabel.text = "bash drafted — a \(bashDmg) dmg jab while the \(state.equippedWeapon.name) reloads"
         } else if state.plannedUltimate {
             itemsLabel.text = "omen drafted — \(state.omen.blurb)"
