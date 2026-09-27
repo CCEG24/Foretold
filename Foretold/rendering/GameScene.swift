@@ -3473,18 +3473,28 @@ class GameScene: SKScene {
         for tile in resolution.attackTiles {
             paintTile(tile, SKColor(red: 0.85, green: 0.25, blue: 0.15, alpha: 1.0))
         }
-        // Whip the grapple line out to whatever it bit, and reel the player in if
-        // it grabbed a wall or barrel (a dragged enemy rides `shoves`, below).
-        animateGrapple(resolution)
+        // Fire the grapple at whatever it bit, and reel the player in if it
+        // grabbed a wall or barrel (a dragged enemy rides `shoves`, below).
+        let hookFlight = animateGrapple(resolution)
         // Slide shoved/reeled barrels and flung enemies (both still in their node
         // maps here) so a body or barrel driven into scenery arrives just as it
-        // goes off.
-        animateBarrelMoves(resolution.barrelMoves)
-        animateShoves(resolution.shoves)
-        animateEnemyHits(resolution.enemyHits)
-        animateExplosions(resolution.playerExplosions)
+        // goes off. After a grapple, all of it waits for the hook to land — a
+        // grapple turn has no other source of shoves, so nothing is held back
+        // that shouldn't be.
+        let landShot = { [weak self] in
+            guard let self else { return }
+            self.animateBarrelMoves(resolution.barrelMoves)
+            self.animateShoves(resolution.shoves)
+            self.animateEnemyHits(resolution.enemyHits)
+            self.animateExplosions(resolution.playerExplosions)
+        }
+        if hookFlight > 0 {
+            run(SKAction.wait(forDuration: hookFlight), completion: landShot)
+        } else {
+            landShot()
+        }
 
-        run(SKAction.wait(forDuration: 0.3)) { [weak self] in
+        run(SKAction.wait(forDuration: 0.3 + hookFlight)) { [weak self] in
             guard let self else { return }
             self.refreshTileHighlights()
             self.playEnemyAttacks(resolution)
@@ -3493,35 +3503,82 @@ class GameScene: SKScene {
 
     /// The grapple: a taut line snaps out from the player to the bitten tile and
     /// fades, and if it caught a wall/barrel the player zips across the gap.
-    private func animateGrapple(_ resolution: TurnResolution) {
-        guard let hook = resolution.grappleHook else { return }
-        drawGrappleLine(from: hook.from, to: hook.to)
+    /// Returns how long the hook is in the air (0 without a grapple), so the
+    /// caller can hold whatever it drags in until it bites.
+    @discardableResult
+    private func animateGrapple(_ resolution: TurnResolution) -> TimeInterval {
+        guard let hook = resolution.grappleHook else { return 0 }
+        let flight = drawGrappleLine(from: hook.from, to: hook.to)
         if let zipTo = resolution.playerGrappleTo {
             let destination = point(for: zipTo)
             let distanceInTiles = hypot(destination.x - playerNode.position.x,
                                         destination.y - playerNode.position.y) / tileSize
             let zip = SKAction.move(to: destination, duration: 0.08 + 0.04 * distanceInTiles)
             zip.timingMode = .easeIn
-            playerNode.run(zip)
+            // Haul across once the hook has bitten, not while it's still flying.
+            playerNode.run(SKAction.sequence([SKAction.wait(forDuration: flight), zip]))
         }
+        return flight
     }
 
-    /// A taut grapple line that snaps out from `from` to `to`, then fades. Shared
-    /// by the player's hook and enemies reeling the player in.
-    private func drawGrappleLine(from: GridPosition, to: GridPosition) {
-        let path = CGMutablePath()
-        path.move(to: point(for: from))
-        path.addLine(to: point(for: to))
-        let line = SKShapeNode(path: path)
-        line.strokeColor = SKColor(red: 0.78, green: 0.72, blue: 0.52, alpha: 1.0)
-        line.lineWidth = 2.5
-        line.zPosition = 9
-        boardNode.addChild(line)
-        line.run(SKAction.sequence([
-            SKAction.wait(forDuration: 0.20),
+    /// A grapple throw: the hook flies from `from` to `to` with its line paying
+    /// out behind it, holds taut while the reel happens, then fades. Shared by
+    /// the player's hook and enemies reeling the player in.
+    ///
+    /// Returns how long the hook takes to land, so whatever it reels in can
+    /// wait for the bite instead of moving before the line reaches it. Kept
+    /// under 0.1s: the enemy phase already holds the player's skid that long,
+    /// so an enemy's throw lands in time without any re-plumbing there.
+    @discardableResult
+    private func drawGrappleLine(from: GridPosition, to: GridPosition) -> TimeInterval {
+        let start = point(for: from)
+        let end = point(for: to)
+        let length = hypot(end.x - start.x, end.y - start.y)
+        guard length > 0 else { return 0 }
+        let flight = min(0.09, 0.03 + 0.012 * TimeInterval(length / tileSize))
+
+        // Everything lives in a frame rotated onto the line and rooted at the
+        // thrower, so "along the throw" is simply +x — the hook and rope art are
+        // both authored pointing right, like every other projectile. A plain
+        // SKNode as the parent: children of sized nodes are offset on the web.
+        let throwFrame = SKNode()
+        throwFrame.position = start
+        throwFrame.zRotation = atan2(end.y - start.y, end.x - start.x)
+        throwFrame.zPosition = 9
+        boardNode.addChild(throwFrame)
+
+        // The rope: the artist's strip stretched to the throw's length, or a
+        // plain cord. Grown by resizing and re-centring rather than by
+        // anchorPoint, which the web renderer doesn't honour for sprites.
+        let rope: SKSpriteNode
+        if let texture = Art.texture(Art.ProjectileArt.grappleRope) {
+            rope = SKSpriteNode(texture: texture, color: .clear, size: CGSize(width: 1, height: tileSize))
+        } else {
+            rope = SKSpriteNode(color: SKColor(red: 0.78, green: 0.72, blue: 0.52, alpha: 1.0),
+                                size: CGSize(width: 1, height: 2.5))
+        }
+        throwFrame.addChild(rope)
+        rope.run(SKAction.customAction(withDuration: flight) { node, elapsed in
+            guard let rope = node as? SKSpriteNode else { return }
+            let paidOut = max(1, length * elapsed / CGFloat(flight))
+            rope.size.width = paidOut
+            rope.position = CGPoint(x: paidOut / 2, y: 0)
+        })
+
+        // The hook leads the line out. With no art the cord alone reads fine.
+        if let texture = Art.texture(Art.ProjectileArt.grappleHook) {
+            let hook = SKSpriteNode(texture: texture, color: .clear,
+                                    size: CGSize(width: tileSize, height: tileSize))
+            throwFrame.addChild(hook)
+            hook.run(SKAction.move(to: CGPoint(x: length, y: 0), duration: flight))
+        }
+
+        throwFrame.run(SKAction.sequence([
+            SKAction.wait(forDuration: flight + 0.20),
             SKAction.fadeOut(withDuration: 0.18),
             SKAction.removeFromParent(),
         ]))
+        return flight
     }
 
     /// The smite: a radio transmission "explains" the incoming strike, then a
@@ -3645,9 +3702,9 @@ class GameScene: SKScene {
         // Enemies reeling something in throw a hook line, just as the player's
         // grapple does — the reel itself is the player's skid to `playerShoveTo`
         // (below), or the comrade/barrel dragged up the line in `enemyShoves`.
-        for hook in resolution.enemyGrappleHooks {
-            drawGrappleLine(from: hook.from, to: hook.to)
-        }
+        let hookFlight = resolution.enemyGrappleHooks
+            .map { drawGrappleLine(from: $0.from, to: $0.to) }
+            .max() ?? 0
 
         for attack in resolution.enemyAttacks {
             for tile in attack.tiles {
@@ -3656,9 +3713,18 @@ class GameScene: SKScene {
         }
         // Comrades and barrels hauled in by an enemy's Vortex or grapple slide
         // as the blast lands — barrels first, so one reeled into the attacker
-        // bursts on arrival.
-        animateBarrelMoves(resolution.enemyBarrelMoves)
-        animateShoves(resolution.enemyShoves)
+        // bursts on arrival. A grapple's haul waits the moment it takes the
+        // hook to bite; the player's own skid already waits longer than that.
+        let haul = { [weak self] in
+            guard let self else { return }
+            self.animateBarrelMoves(resolution.enemyBarrelMoves)
+            self.animateShoves(resolution.enemyShoves)
+        }
+        if hookFlight > 0 {
+            run(SKAction.wait(forDuration: hookFlight), completion: haul)
+        } else {
+            haul()
+        }
         // A keg an enemy lobbed pops in where it landed, same flourish as a
         // telegraphed delivery but here in the enemy phase, as the throw lands.
         for tile in resolution.enemyBarrelSpawns {

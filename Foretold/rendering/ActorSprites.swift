@@ -175,7 +175,7 @@ enum Art {
     /// are optional upgrades that fall back to the plain arrow, so the artist
     /// can draw one arrow now and specialise later.
     enum ProjectileArt {
-        /// Any plain bolt — bow, crossbow, grapple line.
+        /// Any plain bolt — bow, crossbow.
         case arrow
         /// Tipped Bow: leaves burning ground where it passes.
         case fireArrow
@@ -187,6 +187,13 @@ enum Art {
         case cannonball
         /// A lobbed grenade or flask, arcing between tiles.
         case shell
+        /// The Grapple's head: flies out down the line and bites whatever it
+        /// meets. Not a `Bolt` — the grapple resolves instantly — so it has
+        /// its own path, `drawGrappleLine` in GameScene.
+        case grappleHook
+        /// The line paid out behind the hook, stretched to whatever length the
+        /// throw was. Without it the scene draws a plain cord.
+        case grappleRope
 
         var textureName: String {
             switch self {
@@ -196,6 +203,8 @@ enum Art {
             case .bluntArrow: return "projectile-arrow-blunt"
             case .cannonball: return "projectile-cannonball"
             case .shell: return "projectile-shell"
+            case .grappleHook: return "projectile-grapple"
+            case .grappleRope: return "projectile-grapple-rope"
             }
         }
 
@@ -203,7 +212,7 @@ enum Art {
         /// own thing — an arrow would read as the wrong attack entirely.
         var fallback: ProjectileArt? {
             switch self {
-            case .arrow, .shell: return nil
+            case .arrow, .shell, .grappleHook, .grappleRope: return nil
             default: return .arrow
             }
         }

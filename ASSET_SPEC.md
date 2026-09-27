@@ -190,8 +190,20 @@ lobbed shell tumbles instead, so it's drawn as it lies and never rotated.
 
 | File | Used by | Current placeholder |
 |---|---|---|
-| `projectile-arrow` | every plain shot — Bow, Crossbow, Grapple line | steel sliver 0.45×0.12 |
+| `projectile-arrow` | every plain shot — Bow, Crossbow | steel sliver 0.45×0.12 |
 | `projectile-shell` | Grenade, Poison Potion, Keg, Vortex mid-arc | dark bead 0.28 |
+| `projectile-grapple` | the Grapple's hook head, flying out to what it bites | none — the cord alone |
+| `projectile-grapple-rope` | the line paid out behind the hook | plain tan cord |
+
+**The grapple is two pieces.** The hook head is drawn like any other ammo:
+pointing right, centred on the canvas, rotated by the game to the throw's
+direction (any of eight). The rope is a **straight horizontal strip across the
+full canvas width**, which the game stretches lengthwise to however far the
+throw reached — one tile or five — so draw it as something that survives being
+stretched: a braid or twist that reads the same at any length, not a coil
+with a beginning and an end. Its thickness is whatever you draw inside the
+256px height. Both are used by the player's grapple and by enemies reeling the
+player in.
 
 Those two cover everything. Four optional specialisations, each falling back
 to `projectile-arrow` if it's never drawn:
