@@ -3,7 +3,8 @@
 //
 // Proves, in a real Chrome, that the exact artifact about to be deployed:
 //   1. boots and renders with WebGPU removed from the browser entirely
-//      (navigator.gpu is a trap that throws if anything touches it),
+//      (navigator.gpu is a trap that throws if anything touches it, so the
+//      page's adapter probe fails and it must fall back to Canvas 2D),
 //   2. does so WITHOUT cross-origin isolation — GitHub Pages cannot send
 //      COOP/COEP headers, so a build that needed SharedArrayBuffer would
 //      die there,
@@ -70,13 +71,14 @@ function staticServer(root, port, override = {}) {
 
 // Installs (in the page, before any page script runs):
 //  - a navigator.gpu trap: any access throws, so a page that "works" here
-//    demonstrably never asked for WebGPU;
+//    demonstrably fell back to Canvas 2D instead of depending on WebGPU (the
+//    page probes for an adapter first, and must survive the probe throwing);
 //  - a hook that flags when the game calls its own foretoldReady.
 const PAGE_PROLOGUE = () => {
   try {
     Object.defineProperty(navigator, 'gpu', {
       configurable: true,
-      get() { throw new Error('WEBGPU_API_TOUCHED: page accessed navigator.gpu — the default (Canvas 2D) path must never do that'); },
+      get() { throw new Error('WEBGPU_API_TOUCHED: simulated broken WebGPU — the page must fall back to Canvas 2D'); },
     });
   } catch {}
   window.__smokeReady = false;

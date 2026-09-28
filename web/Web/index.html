@@ -108,7 +108,7 @@
 
     // What a normal player sees. Anything more specific is diagnostics.
     const GENERIC_FAILURE = "Foretold couldn't start on this machine.";
-    const NO_WEBGPU = 'Foretold was asked to use WebGPU (?webgpu) but this browser has none — drop the flag to use the Canvas 2D presenter.';
+    const NO_WEBGPU = 'Foretold was asked to use WebGPU (?webgpu) but this browser has none — drop the flag to fall back to Canvas 2D.';
 
     // Progress chatter is debug-only — in production the status line stays
     // hidden and the canvas is the whole page.
@@ -221,12 +221,21 @@
       return { ok: false, short: NO_WEBGPU, detail: head + '\n' + mid + '\n' + FLAG_HELP };
     }
 
-    // Canvas 2D is the default presenter and needs no probing — every browser
-    // has it. `?webgpu` opts into OpenSpriteKit's GPU path (kept for output
-    // comparison), and only then does a missing adapter block startup.
-    // WebMain.swift reads the same flag to pick its presenter.
-    const WANT_WEBGPU = /[?&]webgpu\b/.test(location.search);
-    const probe = WANT_WEBGPU ? await probeAdapter() : { ok: true, adapter: null };
+    // WebGPU when the machine has a usable adapter, Canvas 2D when it doesn't —
+    // school and managed machines usually don't. `?webgpu` forces the GPU path
+    // (a missing adapter is then an error, not a fallback) and `?canvas2d`
+    // skips the probe entirely. The verdict goes to WebMain.swift through
+    // `window.foretoldRenderer`; Swift can still drop to Canvas 2D if WebGPU
+    // initialisation fails after a successful probe.
+    const FORCE_WEBGPU = /[?&]webgpu\b/.test(location.search);
+    const FORCE_CANVAS2D = /[?&]canvas2d\b/.test(location.search);
+    const gpuProbe = FORCE_CANVAS2D
+      ? { ok: false, detail: 'Canvas 2D forced by ?canvas2d.' }
+      : await probeAdapter();
+    const probe = gpuProbe.ok || FORCE_WEBGPU ? gpuProbe : { ok: true, adapter: null };
+    if (!gpuProbe.ok && !FORCE_WEBGPU) note('No WebGPU — falling back to Canvas 2D.\n' + gpuProbe.detail);
+    window.foretoldRenderer = gpuProbe.ok ? 'webgpu' : 'canvas2d';
+    window.foretoldForceWebGPU = FORCE_WEBGPU;
     if (!probe.ok) {
       fail(probe.short, probe.detail);
     } else {

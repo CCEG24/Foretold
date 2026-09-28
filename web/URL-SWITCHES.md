@@ -9,12 +9,20 @@ http://localhost:8000/?webgpu&log
 ```
 
 None of them are meant for players. Without any flags the page uses the
-Canvas 2D renderer, with art, full resolution, and no debug UI.
+WebGPU renderer when the machine has a usable GPU adapter, and falls back to
+Canvas 2D when it doesn't. It also falls back if WebGPU fails to start after
+the adapter probe succeeds. Art and full resolution are on, and there's no
+debug UI.
+
+To see which renderer you got, open `?log`: the console panel says "No WebGPU
+— falling back to Canvas 2D" or "WebGPU adapter acquired", and in Canvas 2D
+mode the overlay shows the extra `2d/` lines.
 
 | Switch | What it does | Where it's read |
 | --- | --- | --- |
 | `?log` | Shows the debug surfaces: the console mirror panel on the right, the green fps overlay in the top-left, and detailed error text. | `Web/index.html`, `WebMain.swift` (`WebFrameStats`) |
-| `?webgpu` | Uses OpenSpriteKit's WebGPU renderer instead of Canvas 2D. Fails with a message if the browser has no GPU adapter. | `Web/index.html`, `WebMain.swift` |
+| `?webgpu` | Forces the WebGPU renderer. If there's no adapter or it fails to start, the page shows an error instead of falling back. | `Web/index.html`, `WebMain.swift` |
+| `?canvas2d` | Forces the Canvas 2D renderer, skipping the GPU probe. This is what a school machine without WebGPU gets. | `Web/index.html` |
 | `?ss=N` | WebGPU only. Supersampling factor for antialiasing, default `2`, capped by `maxContentsScale`. `?ss=1` turns it off. | `WebMain.swift` (`CanvasConfig`) |
 | `?noart` (or `#noart`) | Skips loading sprite PNGs, so bodies and weapons fall back to placeholder shapes. Useful for telling texture costs from scene costs. | `WebArt.swift` |
 | `?nohover` | Ignores pointer movement entirely. Separates the game's hover work from the browser's own cost of pointer events. | `WebInput.swift` |

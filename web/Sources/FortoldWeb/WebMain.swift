@@ -6,10 +6,11 @@
 //  (update → actions → callbacks) is always driven by OpenSpriteKit's
 //  SKRenderer; what puts pixels on the canvas is one of two presenters:
 //
-//    - Canvas 2D (default) — `Canvas2DRenderer` walks the node tree and draws
+//    - WebGPU (default when the machine has a usable adapter) — OpenSpriteKit's
+//      own presenter. `?webgpu` forces it.
+//    - Canvas 2D (fallback) — `Canvas2DRenderer` walks the node tree and draws
 //      it with the plain 2D context. Works in every browser; no GPU needed.
-//    - WebGPU (opt-in via `?webgpu`) — OpenSpriteKit's own presenter, kept
-//      for comparing output while the 2D path matures.
+//      `?canvas2d` forces it.
 
 import OpenSpriteKit
 import JavaScriptKit
@@ -212,27 +213,46 @@ func setup() {
 private func start() async {
     stage("canvas")
     let document = JSObject.global.document
-    guard let canvas = document.getElementById("canvas").object else {
+    guard var canvas = document.getElementById("canvas").object else {
         report(failure: "canvas #canvas not found")
         return
     }
 
-    // `?webgpu` in the URL selects OpenSpriteKit's GPU presenter; everything
-    // else gets Canvas 2D. The page mirrors this flag when it decides whether
-    // to probe for a GPU adapter at all.
-    let search = JSObject.global.location.search.string ?? ""
-    let useWebGPU = search.contains("webgpu")
+    // The page probes for a GPU adapter before loading us and leaves its
+    // verdict in `window.foretoldRenderer`. `?webgpu` forces the GPU path, in
+    // which case a failure here is reported rather than papered over.
+    let pageWantsWebGPU = JSObject.global.foretoldRenderer.string == "webgpu"
+    let forceWebGPU = JSObject.global.foretoldForceWebGPU.boolean == true
 
     stage("renderer-init")
-    let renderer: SKRenderer
-    if useWebGPU {
-        renderer = SKRenderer(canvas: canvas)
+    var gpuRenderer: SKRenderer?
+    if pageWantsWebGPU {
+        let candidate = SKRenderer(canvas: canvas)
         do {
-            try await renderer.initialize()
+            try await candidate.initialize()
+            gpuRenderer = candidate
         } catch {
-            report(failure: "SKRenderer.initialize failed: \(String(describing: error))")
-            return
+            let reason = String(describing: error)
+            if forceWebGPU {
+                report(failure: "SKRenderer.initialize failed: \(reason)")
+                return
+            }
+            // An adapter existed but the device or canvas configuration was
+            // refused. Fall back rather than fail — and on a fresh element,
+            // because a canvas that has handed out a WebGPU context can never
+            // give a 2D one.
+            _ = JSObject.global.console.warn("FortoldWeb: WebGPU failed (\(reason)) — falling back to Canvas 2D")
+            if let fresh = canvas.cloneNode!(false).object {
+                _ = canvas.replaceWith!(fresh)
+                canvas = fresh
+            }
         }
+    }
+    let useWebGPU = gpuRenderer != nil
+
+    let renderer: SKRenderer
+    if let gpuRenderer {
+        renderer = gpuRenderer
         // The scene stays 1680×900 points; only the backing store follows the
         // display. Without this the canvas rendered 1680×900 pixels and the browser
         // stretched them over the (usually larger, usually retina) CSS box, which
