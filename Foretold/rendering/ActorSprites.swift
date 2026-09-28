@@ -183,7 +183,9 @@ enum Art {
         case barbedArrow
         /// Concussion Bow: blunt-tipped, dazes on impact.
         case bluntArrow
-        /// Cannon and Explosive Crossbow: bursts where its flight ends.
+        /// Explosive Crossbow: a bolt that bursts where its flight ends.
+        case explosiveArrow
+        /// Cannon: bursts where its flight ends.
         case cannonball
         /// A lobbed grenade or flask, arcing between tiles.
         case shell
@@ -201,6 +203,7 @@ enum Art {
             case .fireArrow: return "projectile-arrow-fire"
             case .barbedArrow: return "projectile-arrow-barbed"
             case .bluntArrow: return "projectile-arrow-blunt"
+            case .explosiveArrow: return "projectile-arrow-explosive"
             case .cannonball: return "projectile-cannonball"
             case .shell: return "projectile-shell"
             case .grappleHook: return "projectile-grapple"
@@ -223,11 +226,13 @@ enum Art {
         var rotatesToFlight: Bool { self != .shell }
     }
 
-    /// Which ammo a bolt reads as. A `Bolt` doesn't carry the weapon that
-    /// fired it, so this goes by what the shot does — which is what the art
-    /// would be showing anyway.
+    /// Which ammo a bolt reads as. Mostly this goes by what the shot does —
+    /// which is what the art would be showing anyway — except that the two
+    /// blast weapons share an effect but not a look, so those go by name.
     static func ammo(for bolt: Bolt) -> ProjectileArt {
-        if bolt.impactBlastRadius > 0 { return .cannonball }
+        if bolt.impactBlastRadius > 0 {
+            return bolt.weaponName == Weapon.cannon.name ? .cannonball : .explosiveArrow
+        }
         if bolt.lingering != nil { return .fireArrow }
         if bolt.affliction != nil { return .barbedArrow }
         if bolt.stun > 0 { return .bluntArrow }

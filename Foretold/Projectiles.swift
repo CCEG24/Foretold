@@ -80,6 +80,8 @@ struct Bolt {
     let sourceName: String
     /// Kill-tally key for player shots (the weapon's name); nil for enemies.
     let creditName: String?
+    /// The weapon that fired it, for either side — picks the in-flight art.
+    let weaponName: String
     /// Damage over time stuck to struck survivors, if the weapon afflicts.
     let affliction: Weapon.Affliction?
     /// Turns a struck target is stunned on impact (Concussion Bow); 0 = none.

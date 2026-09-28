@@ -2580,6 +2580,7 @@ struct GameState {
                     chargesUltimate: true,
                     sourceName: "your own \(equippedWeapon.name)",
                     creditName: equippedWeapon.name,
+                    weaponName: equippedWeapon.name,
                     affliction: equippedWeapon.affliction,
                     stun: equippedWeapon.stun
                 )
@@ -2854,6 +2855,7 @@ struct GameState {
                         chargesUltimate: false,
                         sourceName: attacker.slayerName,
                         creditName: nil,
+                        weaponName: attacker.weapon.name,
                         affliction: attacker.weapon.affliction,
                         stun: attacker.weapon.stun
                     )
@@ -2932,6 +2934,7 @@ struct GameState {
                     chargesUltimate: false,
                     sourceName: "the gatekeeper's cannon",
                     creditName: nil,
+                    weaponName: cannon.name,
                     affliction: cannon.affliction
                 )
                 nextProjectileID += 1

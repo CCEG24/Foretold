@@ -205,7 +205,7 @@ with a beginning and an end. Its thickness is whatever you draw inside the
 256px height. Both are used by the player's grapple and by enemies reeling the
 player in.
 
-Those two cover everything. Four optional specialisations, each falling back
+Those two cover everything. Five optional specialisations, each falling back
 to `projectile-arrow` if it's never drawn:
 
 | File | Used by | What it says |
@@ -213,7 +213,8 @@ to `projectile-arrow` if it's never drawn:
 | `projectile-arrow-fire` | Tipped Bow | leaves burning ground behind it |
 | `projectile-arrow-barbed` | Serrated Bow | leaves a bleed on whoever it hits |
 | `projectile-arrow-blunt` | Concussion Bow | dazes on impact |
-| `projectile-cannonball` | Cannon, Explosive Crossbow | slow, menacing, bursts where it stops |
+| `projectile-arrow-explosive` | Explosive Crossbow | bursts where it stops |
+| `projectile-cannonball` | Cannon | slow, menacing, bursts where it stops |
 
 ## Effects (priority 4 — current placeholders work fine)
 
