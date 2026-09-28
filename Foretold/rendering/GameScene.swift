@@ -1759,6 +1759,20 @@ class GameScene: SKScene {
     private var tutorialShowcasing = false
     /// The run's real state, stashed while the showcase mutates a throwaway copy.
     private var tutorialSnapshot: GameState?
+    /// The run's health-bar caches, stashed alongside `tutorialSnapshot`. The
+    /// sandbox numbers its enemies from 0 again, so sharing the caches would
+    /// hand the run's later spawns the tutorial enemies' maxes.
+    private var tutorialSnapshotBars: (max: [Int: Int], drawn: [Int: [Int]])?
+
+    /// Starts a sandbox's health bars from scratch, stashing the run's first
+    /// (a chained sandbox keeps the run's stash, not the previous sandbox's).
+    private func resetEnemyBarsForSandbox() {
+        if tutorialSnapshotBars == nil {
+            tutorialSnapshotBars = (enemyMaxHealth, enemyBarDrawn)
+        }
+        enemyMaxHealth.removeAll()
+        enemyBarDrawn.removeAll()
+    }
     /// The next showcase beat, run on the player's click so they read at their
     /// own pace. Nil during the boon-pick beat (the picker drives that one).
     private var tutorialAdvance: (() -> Void)?
@@ -1792,6 +1806,7 @@ class GameScene: SKScene {
         // a mid-run replay's progress accounting survives the sandbox.
         let savedBaseline = tallyBaseline
         state = makeRunState(modifiersOverride: [])
+        resetEnemyBarsForSandbox()
         // Not invincible: hits have to cost something or the tutorial teaches
         // that they don't, and the first real hit of a run comes as a nasty
         // surprise. A killing blow coaches and revives instead — see
@@ -2024,6 +2039,7 @@ class GameScene: SKScene {
         if tutorialSnapshot == nil { tutorialSnapshot = state }
         let savedBaseline = tallyBaseline
         state = makeRunState(modifiersOverride: [])
+        resetEnemyBarsForSandbox()
         state.devFreeSwap = true
         // Damage is real here too; `tutorialRevive` catches a killing blow.
         tallyBaseline = savedBaseline
@@ -2057,6 +2073,11 @@ class GameScene: SKScene {
         buffChoiceOverlay = nil
         if let snapshot = tutorialSnapshot { state = snapshot }
         tutorialSnapshot = nil
+        if let bars = tutorialSnapshotBars {
+            enemyMaxHealth = bars.max
+            enemyBarDrawn = bars.drawn
+        }
+        tutorialSnapshotBars = nil
         resyncBoardToState()
         // Opened from the draft: return there so the player picks their own run,
         // rather than being dropped into the sandbox loadout.
@@ -4805,6 +4826,7 @@ class GameScene: SKScene {
         tutorialShowcasing = false
         tutorialShowcasePending = false
         tutorialSnapshot = nil
+        tutorialSnapshotBars = nil
         tutorialAdvance = nil
         offeringAdvanced = false
         advancedTutorialActive = false
