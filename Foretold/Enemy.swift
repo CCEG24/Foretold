@@ -54,6 +54,8 @@ struct Enemy {
     let id: Int
     var position: GridPosition
     var health: Int
+    /// What it spawned with — the full length of its health bar.
+    let maxHealth: Int
     /// Where this enemy intends to move next resolve; visible to the player while planning.
     var plannedTarget: GridPosition?
     /// The tiles it will step through to get there (destination included) —
@@ -123,6 +125,7 @@ struct Enemy {
         self.weapon = carried
         self.secondaryWeapon = secondaryWeapon
         self.health = health ?? carried.enemyHealth
+        self.maxHealth = self.health
         self.damage = damage ?? carried.damage
         self.archetype = archetype
     }
