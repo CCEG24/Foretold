@@ -11,6 +11,9 @@
     /* Board is authored at 1680×900; keep that aspect while fitting the viewport. */
     #canvas { display: block; width: min(100vw, 177.78vh); aspect-ratio: 1680 / 900;
               touch-action: none; }
+    /* The canvas holds keyboard focus (tabindex) for the whole session, so the
+       browser's focus ring would frame the game permanently. */
+    #canvas:focus { outline: none; }
     #status { position: fixed; bottom: 12px; left: 12px; color: #69db7c;
               font: 13px/1.4 monospace; background: rgba(0,0,0,0.7);
               padding: 8px 12px; border-radius: 5px; white-space: pre-wrap; max-width: 90vw; }
