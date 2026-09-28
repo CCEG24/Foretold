@@ -418,6 +418,10 @@ struct GameState {
     /// friendly fire and the player's blasts doesn't retrigger a summon every
     /// single turn (the cap limits how many, this limits how often).
     static let bossSummonInterval = 2
+    /// The most of its own side the boss will catch in a nova or volley. Past
+    /// this it holds that weapon — a couple of casualties is the price of a
+    /// shot at the player, a whole fresh retinue isn't.
+    static let bossFriendlyFireTolerance = 2
 
     /// Score needed to reach a level: 100 for level 2, 300 for 3, 600 for 4…
     /// (Tetris-style widening gaps).
@@ -2295,6 +2299,10 @@ struct GameState {
             } else {
                 enemies.append(arrival)
                 spawns.append(TurnResolution.SpawnEvent(position: tile, enemyID: arrival.id))
+                // An elite that came in as an arrival (the dev panel's forced
+                // gatekeeper) opens the gate fight only once it's standing —
+                // waves and score freeze until it falls, like a real one.
+                if arrival.isElite { bossPhase = true }
             }
         }
         pendingArrivals = []
@@ -4335,9 +4343,11 @@ struct GameState {
             }).randomElement() else { return }
             pendingArrivals = [Enemy.elite(archetype, id: nextEnemyID, at: tile, config: BossConfig.forLevel(level))]
             nextEnemyID += 1
-            // Enter the gate fight: waves and score freeze until it falls, just
-            // like a real gatekeeper.
-            bossPhase = true
+            // The gate fight starts when it actually lands (see the arrivals
+            // loop), not here at the telegraph. Starting it now meant a blocked
+            // landing tile — a body or barrel arriving there first — lost the
+            // elite and left the fight on with nobody to kill: waves and score
+            // frozen for the rest of the run.
         }
     }
 
@@ -4872,17 +4882,28 @@ struct GameState {
 
         // Weapons come first: a ready boss fires rather than fiddling with
         // abilities, so hugging it (with the cannon loaded) earns a nova and
-        // standing at range a volley.
-        if cannonReady && playerPosition.distance(to: tile) <= config.novaRadius {
+        // standing at range a volley. Either one holds fire if it would cut
+        // down more than a couple of its own — otherwise a boss with fresh
+        // summons at its side (and a greataxe in hand) would summon, then wipe
+        // them itself, then summon again, forever.
+        if cannonReady && playerPosition.distance(to: tile) <= config.novaRadius
+            && comradesCaught(in: blastTiles(around: tile, radius: config.novaRadius),
+                              besides: boss.id) <= Self.bossFriendlyFireTolerance {
             enemies[index].plannedIntent = .nova
             return
         }
         // A volley fires whichever weapons are both loaded and have a firing
         // line; a melee primary that can't reach the player is left holstered
         // so it doesn't scythe the boss's own retinue for nothing.
-        let primaryAim = primaryReady ? aimDirection(weapon: boss.weapon, attackerID: boss.id, from: tile) : nil
+        let primaryAim = (primaryReady ? aimDirection(weapon: boss.weapon, attackerID: boss.id, from: tile) : nil)
+            .flatMap { aim -> Direction? in
+                spares(boss.weapon, of: boss, from: tile, facing: aim) ? aim : nil
+            }
         let cannonAim = (cannonReady ? boss.secondaryWeapon : nil)
-            .flatMap { aimDirection(weapon: $0, attackerID: boss.id, from: tile) }
+            .flatMap { cannon -> Direction? in
+                guard let aim = aimDirection(weapon: cannon, attackerID: boss.id, from: tile) else { return nil }
+                return spares(cannon, of: boss, from: tile, facing: aim) ? aim : nil
+            }
         if primaryAim != nil || cannonAim != nil {
             // With a firing solution the boss volleys, occasionally rebuilding
             // a thinned retinue instead so it isn't a pure turret.
@@ -4917,6 +4938,39 @@ struct GameState {
         if liveVolatile < config.bossBarrageCount && !barrageTiles().isEmpty {
             enemies[index].plannedIntent = .barrage
         }
+    }
+
+    /// How many enemies besides `attackerID` will be on `tiles` when the
+    /// attack lands.
+    ///
+    /// Read from where they stand while the boss drafts, not where they'll end
+    /// up: most of them draft their own moves after it, so that's the best the
+    /// boss can know — and it's the same board the player is reading. Arrivals
+    /// still in their telegraph count too: they land at the head of the turn,
+    /// before any attack, so the boss's own freshly summoned recruits would
+    /// otherwise be invisible to this check and walk straight into its nova.
+    private func comradesCaught(in tiles: [GridPosition], besides attackerID: Int) -> Int {
+        let struck = Set(tiles)
+        let standing = enemies.filter { $0.id != attackerID && struck.contains($0.position) }.count
+        let landing = pendingArrivals.filter { struck.contains($0.position) }.count
+        return standing + landing
+    }
+
+    /// True when firing `weapon` from `tile` down `direction` stays within the
+    /// boss's friendly-fire tolerance. Traces the attack the way resolution
+    /// does: a swing sweeps its pattern, stopped by the first body unless it
+    /// pierces; a shot flies the same line and, if it's a shell, bursts
+    /// wherever it stops.
+    private func spares(_ weapon: Weapon, of attacker: Enemy, from tile: GridPosition,
+                        facing direction: Direction) -> Bool {
+        guard let pattern = weapon.attackPattern else { return true }
+        var blockers = Set(enemies.filter { $0.id != attacker.id }.map(\.position))
+        blockers.insert(playerPosition)
+        var tiles = sweep(pattern, from: tile, facing: direction, pierces: weapon.pierces, blockers: blockers)
+        if weapon.projectileSpeed != nil, weapon.impactBlastRadius > 0, let stop = tiles.last {
+            tiles += blastTiles(around: stop, radius: weapon.impactBlastRadius)
+        }
+        return comradesCaught(in: tiles, besides: attacker.id) <= Self.bossFriendlyFireTolerance
     }
 
     /// Open tiles 1–3 tiles from the player the boss could drop barrels onto —

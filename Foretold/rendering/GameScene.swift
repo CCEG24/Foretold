@@ -72,7 +72,9 @@ class GameScene: SKScene {
     /// when each needs to be read separately.
     private var freezeLabel: SKLabelNode!
     private var itemsLabel: SKLabelNode!
-    private var scoreLabel: SKLabelNode!
+    /// The top status row: level and biome, a bar filling toward the next
+    /// level, then turn and best. Rebuilt whole on every HUD update.
+    private var scoreHUD: SKNode!
     /// The pact row (boon + curse) as separate colored, hoverable pieces.
     private var pactHUD: SKNode!
     private var pactTooltip: SKLabelNode?
@@ -158,6 +160,15 @@ class GameScene: SKScene {
     private var devPactBoons: [RunModifier] { RunModifier.boons.sorted { $0.title < $1.title } }
     private var devPactCurses: [RunModifier] { RunModifier.curses.sorted { $0.title < $1.title } }
     private var devLevelBoons: [Buff] { Buff.all.sorted { $0.name < $1.name } }
+    /// Best score that opens up pacts. New players learn the vanilla rules
+    /// first; the bargain only shows up once they've cleared the opening levels.
+    private static let pactUnlockScore = 200
+    /// Whether this profile may swear a pact. A dev-forced half bypasses the
+    /// wall so pacts stay testable on a fresh profile.
+    private var pactsUnlocked: Bool {
+        highScore >= Self.pactUnlockScore || devForcedPactBoon != nil || devForcedPactCurse != nil
+    }
+
     /// A fresh pact: one boon paired with one curse. Either half can be pinned
     /// via the dev panel.
     private func rolledPact() -> Set<RunModifier> {
@@ -533,9 +544,77 @@ class GameScene: SKScene {
                   secondary: enemy.secondaryWeapon,
                   secondaryReady: enemy.secondaryCooldownRemaining == 0)
         node.face(facing(of: enemy))
+        setEnemyHealthBar(on: node, enemyID: enemy.id, health: enemy.health)
         boardNode.addChild(node)
         enemyNodes[enemy.id] = node
         return node
+    }
+
+    /// Highest health each enemy has been seen at. Enemies carry no max of
+    /// their own, but they spawn at full, so first sight is the max.
+    private var enemyMaxHealth: [Int: Int] = [:]
+    /// The [health, max] each enemy's bar was last drawn at.
+    private var enemyBarDrawn: [Int: [Int]] = [:]
+    private static let healthRed = SKColor(red: 0.85, green: 0.25, blue: 0.30, alpha: 1.0)
+    private static let armorSilver = SKColor(red: 0.78, green: 0.80, blue: 0.84, alpha: 1.0)
+
+    /// A thin red health bar under an enemy's feet.
+    private func setEnemyHealthBar(on node: SKNode, enemyID: Int, health: Int) {
+        let maxHealth = max(enemyMaxHealth[enemyID] ?? health, health)
+        enemyMaxHealth[enemyID] = maxHealth
+        // Refreshes run after every state change; skip the redraw when the
+        // bar on this node already shows these numbers.
+        let existing = node.childNode(withName: "hpBar")
+        if existing != nil, let drawn = enemyBarDrawn[enemyID], drawn == [health, maxHealth] { return }
+        enemyBarDrawn[enemyID] = [health, maxHealth]
+        existing?.removeFromParent()
+        let width = tileSize * 0.7
+        let bar = makeSegmentedBar(filled: max(0, health), total: maxHealth,
+                                   width: width, height: 5, color: Self.healthRed,
+                                   dividers: true)
+        bar.name = "hpBar"
+        bar.position = CGPoint(x: -width / 2, y: -tileSize * 0.44)
+        bar.zPosition = 5
+        node.addChild(bar)
+    }
+
+    /// A bar that fills left to right. Origin is the left edge, vertically
+    /// centered. With `dividers`, thin notches split it into one cell per
+    /// point, so "3 of 5" can be counted at a glance instead of estimated.
+    private func makeSegmentedBar(filled: Int, total: Int, width: CGFloat, height: CGFloat, color: SKColor,
+                                  dividers: Bool = false) -> SKNode {
+        let bar = SKNode()
+        let radius = min(4, height / 2)
+        let back = SKShapeNode(rectOf: CGSize(width: width, height: height), cornerRadius: radius)
+        back.fillColor = SKColor(white: 0.12, alpha: 0.9)
+        back.strokeColor = SKColor(white: 0.35, alpha: 1.0)
+        back.lineWidth = 1
+        back.position = CGPoint(x: width / 2, y: 0)
+        bar.addChild(back)
+        guard total > 0 else { return bar }
+        let fraction = min(1, CGFloat(filled) / CGFloat(total))
+        if fraction > 0 {
+            let fillWidth = max(height - 2, (width - 2) * fraction)
+            let fill = SKShapeNode(rectOf: CGSize(width: fillWidth, height: height - 2), cornerRadius: max(0, radius - 1))
+            fill.fillColor = color
+            fill.strokeColor = .clear
+            fill.position = CGPoint(x: fillWidth / 2 + 1, y: 0)
+            bar.addChild(fill)
+        }
+        if dividers, total > 1 {
+            // A boss's 20-odd points in a 34pt bar would be a notch every
+            // pixel — a grey smear, not cells. Past that density, notch every
+            // fifth point instead so the bar still counts in readable chunks.
+            let inner = width - 2
+            let step = inner / CGFloat(total) >= 3 ? 1 : 5
+            for point in stride(from: step, to: total, by: step) {
+                let notch = SKSpriteNode(color: SKColor(white: 0.08, alpha: 0.9),
+                                         size: CGSize(width: 1, height: height - 2))
+                notch.position = CGPoint(x: 1 + inner * CGFloat(point) / CGFloat(total), y: 0)
+                bar.addChild(notch)
+            }
+        }
+        return bar
     }
 
     /// What an enemy visibly carries. A bomber carries a dagger in the data —
@@ -599,6 +678,11 @@ class GameScene: SKScene {
                       secondary: enemy.secondaryWeapon,
                       secondaryReady: hold?.enemySecondaryReady[enemy.id] ?? (enemy.secondaryCooldownRemaining == 0))
             node.face(hold == nil ? facing(of: enemy) : hold?.enemyFacing[enemy.id])
+            // Mid-resolve the bars drop as each hit lands (animateEnemyHits);
+            // outside it, catch everything else — bleeds, hazards, heals.
+            if hold == nil {
+                setEnemyHealthBar(on: node, enemyID: enemy.id, health: enemy.health)
+            }
         }
     }
 
@@ -1172,19 +1256,15 @@ class GameScene: SKScene {
         rebuildMilestonesPage()
         setHUDPage(hudPage)
 
-        scoreLabel = SKLabelNode()
-        scoreLabel.fontName = "HelveticaNeue-Bold"
-        scoreLabel.fontSize = 18
-        scoreLabel.fontColor = .white
-        scoreLabel.verticalAlignmentMode = .center
-        scoreLabel.position = CGPoint(x: size.width / 2, y: size.height - (size.height - boardSide) / 4)
-        scoreLabel.zPosition = 20
-        addChild(scoreLabel)
+        scoreHUD = SKNode()
+        scoreHUD.position = CGPoint(x: size.width / 2, y: size.height - (size.height - boardSide) / 4)
+        scoreHUD.zPosition = 20
+        addChild(scoreHUD)
 
         // Just under the score: the pact in play, its boon and curse as separate
         // pieces so the curse can burn red and each can be hovered for its effect.
         pactHUD = SKNode()
-        pactHUD.position = CGPoint(x: size.width / 2, y: scoreLabel.position.y - 42)
+        pactHUD.position = CGPoint(x: size.width / 2, y: scoreHUD.position.y - 42)
         pactHUD.zPosition = 20
         addChild(pactHUD)
 
@@ -1199,6 +1279,41 @@ class GameScene: SKScene {
 
         setUpWeaponButton(center: CGPoint(x: columnLeft + 104, y: columnTop - 362))
         updateHUD()
+    }
+
+    private static let progressBarWidth: CGFloat = 172
+    private static let progressBarHeight: CGFloat = 8
+
+    /// A slim gold progress bar toward an unlock, count at its right end. The
+    /// node's origin is the bar's left edge, vertically centered.
+    private func makeProgressBar(progress: Int, total: Int) -> SKNode {
+        let width = Self.progressBarWidth
+        let height = Self.progressBarHeight
+        let gold = SKColor(red: 0.93, green: 0.80, blue: 0.45, alpha: 1.0)
+        let bar = SKNode()
+        let back = SKShapeNode(rectOf: CGSize(width: width, height: height), cornerRadius: 4)
+        back.fillColor = SKColor(white: 0.18, alpha: 1.0)
+        back.strokeColor = SKColor(white: 0.35, alpha: 1.0)
+        back.lineWidth = 1
+        back.position = CGPoint(x: width / 2, y: 0)
+        bar.addChild(back)
+        if progress > 0 {
+            let fillWidth = max(height, width * CGFloat(progress) / CGFloat(total)) - 3
+            let fill = SKShapeNode(rectOf: CGSize(width: fillWidth, height: height - 3), cornerRadius: 2.5)
+            fill.fillColor = gold.withAlphaComponent(0.85)
+            fill.strokeColor = .clear
+            fill.position = CGPoint(x: fillWidth / 2 + 1.5, y: 0)
+            bar.addChild(fill)
+        }
+        let count = SKLabelNode(text: "\(progress)/\(total)")
+        count.fontName = "HelveticaNeue"
+        count.fontSize = 10
+        count.fontColor = SKColor(white: 0.45, alpha: 1.0)
+        count.horizontalAlignmentMode = .left
+        count.verticalAlignmentMode = .center
+        count.position = CGPoint(x: width + 8, y: 0)
+        bar.addChild(count)
+        return bar
     }
 
     /// Every weapon and how it's earned — the MILESTONES page.
@@ -1230,34 +1345,9 @@ class GameScene: SKScene {
         let locked = SKColor(white: 0.45, alpha: 1.0)
         addLine("THE ARSENAL", font: "HelveticaNeue-Bold", size: 15, color: gold, drop: 28)
 
-        // A slim progress bar for a locked milestone, count at its right end.
         func addProgressBar(progress: Int, total: Int) {
-            let width: CGFloat = 172
-            let height: CGFloat = 8
-            let bar = SKNode()
-            bar.position = CGPoint(x: columnLeft, y: y - height / 2)
-            let back = SKShapeNode(rectOf: CGSize(width: width, height: height), cornerRadius: 4)
-            back.fillColor = SKColor(white: 0.18, alpha: 1.0)
-            back.strokeColor = SKColor(white: 0.35, alpha: 1.0)
-            back.lineWidth = 1
-            back.position = CGPoint(x: width / 2, y: 0)
-            bar.addChild(back)
-            if progress > 0 {
-                let fillWidth = max(height, width * CGFloat(progress) / CGFloat(total)) - 3
-                let fill = SKShapeNode(rectOf: CGSize(width: fillWidth, height: height - 3), cornerRadius: 2.5)
-                fill.fillColor = gold.withAlphaComponent(0.85)
-                fill.strokeColor = .clear
-                fill.position = CGPoint(x: fillWidth / 2 + 1.5, y: 0)
-                bar.addChild(fill)
-            }
-            let count = SKLabelNode(text: "\(progress)/\(total)")
-            count.fontName = "HelveticaNeue"
-            count.fontSize = 10
-            count.fontColor = locked
-            count.horizontalAlignmentMode = .left
-            count.verticalAlignmentMode = .center
-            count.position = CGPoint(x: width + 8, y: 0)
-            bar.addChild(count)
+            let bar = makeProgressBar(progress: progress, total: total)
+            bar.position = CGPoint(x: columnLeft, y: y - Self.progressBarHeight / 2)
             column.addChild(bar)
             y -= 20
         }
@@ -1288,6 +1378,27 @@ class GameScene: SKScene {
             } else {
                 addLine(owned ? "trophy claimed from a gatekeeper" : "claim one off a fallen gatekeeper",
                         font: "HelveticaNeue", size: 12, color: nameColor, drop: 21)
+            }
+        }
+
+        y -= 12
+        addLine("OMENS", font: "HelveticaNeue-Bold", size: 15, color: gold, drop: 28)
+        let omens = Set(unlockedOmens)
+        for omen in Omen.ordered {
+            let owned = omens.contains(omen)
+            let nameColor = owned ? earned : locked
+            addLine(owned ? "✓ \(omen.title)" : "· \(omen.title)",
+                    font: "HelveticaNeue-Bold", size: 13, color: nameColor, drop: 17)
+            if let milestone = Omen.milestones.first(where: { $0.omen == omen }) {
+                if owned {
+                    addLine(milestone.requirement + " — done", font: "HelveticaNeue", size: 12, color: nameColor, drop: 21)
+                } else {
+                    addLine(milestone.requirement, font: "HelveticaNeue", size: 12, color: nameColor, drop: 17)
+                    let progress = min(lifetime[milestone.tally, default: 0], milestone.count)
+                    addProgressBar(progress: progress, total: milestone.count)
+                }
+            } else {
+                addLine("starting omen", font: "HelveticaNeue", size: 12, color: nameColor, drop: 21)
             }
         }
 
@@ -1832,10 +1943,10 @@ class GameScene: SKScene {
         // Honest to the run's rules: if the player took the Quickhands pact,
         // swapping really is free — don't teach the costly default over it.
         let cost = state.swapsAreFree
-            ? "and you took Quickhands, so it's free."
-            : "but it costs your attack that turn (a boon can make it free)."
+            ? "and you have the Quickhands boon, so it's free."
+            : "but it costs your attack that turn."
         buildLessonOverlay(
-            text: "SWAP WEAPONS · press Tab (or tap the weapon button) to swap to your holstered weapon — try it. It changes your reach and attack, \(cost)"
+            text: "SWAP WEAPONS · press Tab (or tap the blue weapon button) to swap to your holstered weapon. It changes your reach and attack, \(cost)"
         ) { [weak self] in self?.showcaseFormation() }
     }
 
@@ -1843,7 +1954,7 @@ class GameScene: SKScene {
         state.tutorialSpawnFormation()
         resyncBoardToState()
         buildLessonOverlay(
-            text: "FORMATIONS · enemies sometimes march in as a squad, holding ranks until they close, then breaking to swarm. Take a swing if you like."
+            text: "FORMATIONS · enemies sometimes march in as a squad, holding ranks until they close, then breaking to swarm you."
         ) { [weak self] in self?.showcaseGatekeeper() }
     }
 
@@ -1874,7 +1985,7 @@ class GameScene: SKScene {
     private func finishTutorialShowcase() {
         beginnerShowcaseActive = false
         buildLessonOverlay(
-            text: "THAT'S THE GIST · one last trick: move 2+ tiles without attacking and you dodge a hit. The rest is in the dropdowns on the left. Want the ADVANCED tactics — barrels, ice, grapple, blink? NEXT to learn them, EXIT to play."
+            text: "THAT'S THE GIST · one last trick: move 2+ tiles without attacking and you dodge a hit. The rest is in the dropdowns on the left. Want the ADVANCED tactics — barrels, ice, grapple? NEXT to learn them, EXIT to play."
         ) { [weak self] in
             self?.advancedReturnToBuildPicker = false   // chained into a live run
             self?.startAdvancedTutorial()
@@ -1896,14 +2007,14 @@ class GameScene: SKScene {
         // Each card names the one thing to try. Flavor catalogues (barrel
         // colours, tile behaviour) live in the TILES dropdown — repeating them
         // here buried the instruction.
-        AdvancedLesson(demo: .barrels, text: "KNOCKBACK & BARRELS · you're holding the Ram (knockback 2). Attack the enemy beside you to fling it into the barrel behind it. Slamming a foe into a wall or off the edge bruises it too — and it cuts both ways. (Tab swaps to the Keg: lob it to drop your own barrel.)"),
-        AdvancedLesson(demo: .spikes, text: "SPIKES · lit tiles bite whoever ends the turn on them, then toggle. Attack the enemy — the Ram flings it across the live spikes for a bite on the way. Mind your own footing."),
+        AdvancedLesson(demo: .barrels, text: "KNOCKBACK & BARRELS · you're holding the Ram (knockback 2). Attack the enemy beside you to fling it into the barrel behind it, detonating the barrel. Slamming a foe into a wall or the edge of the map bruises it too. (Tab swaps to the Keg: use it to drop your own barrel.)"),
+        AdvancedLesson(demo: .spikes, text: "SPIKES · lit tiles damage whoever ends the turn on them. They toggle every turn. Attack the enemy — the Ram flings it across the live spikes for a bite on the way. Mind your own footing."),
         AdvancedLesson(demo: .teleporters, text: "TELEPORTERS · step onto the portal to warp to its linked twin across the board. Enemies path through them to reach you, and a bolt fired through one flies out the far side."),
         AdvancedLesson(demo: .ice, text: "ICE · a move that ends on ice slides you on down the strip until something stops you, and the gold marker shows where you'll really land. Draft a step onto the ice and slide into the foe."),
         AdvancedLesson(demo: .mud, text: "MUD · crossing a mud tile eats an extra step — yours or an enemy's. Route around it, or use it to slow a foe closing on you."),
         AdvancedLesson(demo: .walls, text: "WALLS · brown walls crumble: smash one with a swing or a blast to open a path. Grey walls are solid."),
-        AdvancedLesson(demo: .grapple, text: "GRAPPLE · right-click a direction to fire it: aim RIGHT at the enemy to reel it in, UP at the wall to haul yourself over, or LEFT at the barrel to yank it into your lap for a 2 damage hit."),
-        AdvancedLesson(demo: .slipstep, text: "SLIPSTEP · sends you 7 tiles but barely scratches them. Go next to the enemy, then Tab to the Sword (free) and strike the same turn. Next turn, swap back and get out."),
+        AdvancedLesson(demo: .grapple, text: "GRAPPLE · right-click a direction to fire it: aim RIGHT at the enemy to reel it in, UP at the wall to haul yourself over, or LEFT at the barrel to yank it into your lap for a 2 damage explosion."),
+        AdvancedLesson(demo: .slipstep, text: "SLIPSTEP · sends you 7 tiles but only does 1 dmg them. Go to the enemy, then swap to the Sword (free right now) and strike the same turn. Next turn, swap back and get out."),
     ]
 
     private func startAdvancedTutorial() {
@@ -2081,19 +2192,21 @@ class GameScene: SKScene {
     }
 
     /// Redraws a pip row: one cell per point, filled up to `filled`.
-    private func drawPips(in container: SKNode, filled: Int, total: Int, color: SKColor) {
+    /// The player's HP / armor row: a segmented bar the width of the ULT bar,
+    /// with the count on the caption row over its right end (as ULT does).
+    private func drawStatBar(in container: SKNode, filled: Int, total: Int, color: SKColor) {
         container.removeAllChildren()
         guard total > 0 else { return }
-        let step: CGFloat = min(21, 208 / CGFloat(total))
-        let side = step - 3
-        for index in 0..<total {
-            let cell = SKShapeNode(rectOf: CGSize(width: side, height: 16), cornerRadius: 3)
-            cell.position = CGPoint(x: CGFloat(index) * step + side / 2, y: 0)
-            cell.fillColor = index < filled ? color : SKColor(white: 0.18, alpha: 1.0)
-            cell.strokeColor = index < filled ? color : SKColor(white: 0.35, alpha: 1.0)
-            cell.lineWidth = 1
-            container.addChild(cell)
-        }
+        let width: CGFloat = 208
+        container.addChild(makeSegmentedBar(filled: filled, total: total, width: width, height: 16, color: color))
+        let count = SKLabelNode(text: "\(filled)/\(total)")
+        count.fontName = "HelveticaNeue-Bold"
+        count.fontSize = 11
+        count.fontColor = SKColor(white: 0.65, alpha: 1.0)
+        count.horizontalAlignmentMode = .right
+        count.verticalAlignmentMode = .bottom
+        count.position = CGPoint(x: width, y: 12)
+        container.addChild(count)
     }
 
     /// The ultimate as a filling bar; pulses gold once it's ready to call down.
@@ -2175,18 +2288,18 @@ class GameScene: SKScene {
             hidden.verticalAlignmentMode = .center
             healthBarNode.addChild(hidden)
         } else {
-            drawPips(
+            drawStatBar(
                 in: healthBarNode,
                 filled: max(0, state.playerHealth),
                 total: max(state.maxHealth, state.playerHealth),
-                color: SKColor(red: 0.85, green: 0.25, blue: 0.30, alpha: 1.0)
+                color: Self.healthRed
             )
         }
-        drawPips(
+        drawStatBar(
             in: armorBarNode,
             filled: max(0, state.playerArmor),
             total: max(state.armorCap, state.playerArmor),
-            color: armorFlashColor
+            color: Self.armorSilver
         )
         updateUltimateBar()
         var playerStatuses: [String] = []
@@ -2205,7 +2318,7 @@ class GameScene: SKScene {
         freezeLabel.isHidden = state.freezeStacks <= 0
         if state.freezeStacks > 0 {
             freezeLabel.text = state.freezeIsCritical
-                ? "❄ FREEZING \(state.freezeStacks)/\(GameState.frostbiteAt) — ONE MORE SLIDE AND YOU SEIZE UP"
+                ? "❄ FREEZING \(state.freezeStacks)/\(GameState.frostbiteAt)"
                 : "❄ FREEZING \(state.freezeStacks)/\(GameState.frostbiteAt)"
             // Brighter, not a different hue: it stays unmistakably the cold
             // rather than borrowing the red the affliction row already owns.
@@ -2216,14 +2329,7 @@ class GameScene: SKScene {
         afflictionLabel.text = playerStatuses.joined(separator: "  ·  ")
         afflictionLabel.isHidden = playerStatuses.isEmpty
         dodgeChipLabel.isHidden = !state.plannedDodgeReady
-        let nextLevel = GameState.scoreThreshold(forLevel: state.level + 1)
-        let streak = state.killStreak >= 2 ? " · STREAK ×\(state.killStreak)" : ""
-        let progress = state.bossPhase ? "\(state.score) · SLAY THE GATEKEEPER" : "\(state.score)/\(nextLevel)"
-        // While the best is frozen it neither climbs nor persists, and the whole
-        // score line turns blue to make the testing mode unmistakable.
-        let best = devFreezeHighScore ? highScore : max(highScore, state.score)
-        scoreLabel.text = "LVL \(state.level) · \(state.biome.title.uppercased()) · SCORE \(progress)\(streak) · TURN \(state.turnNumber) · BEST \(best)"
-        scoreLabel.fontColor = devFreezeHighScore ? SKColor(red: 0.45, green: 0.65, blue: 0.95, alpha: 1.0) : .white
+        rebuildScoreHUD()
 
         // The run's pact: the boon (gold) and curse (red) as separate hoverable
         // pieces, laid out as one centered row.
@@ -3393,6 +3499,7 @@ class GameScene: SKScene {
                     SKAction.removeFromParent(),
                 ]))
             } else {
+                setEnemyHealthBar(on: node, enemyID: hit.enemyID, health: hit.healthAfter)
                 node.run(SKAction.sequence([
                     SKAction.fadeAlpha(to: 0.2, duration: 0.08),
                     SKAction.fadeAlpha(to: 1.0, duration: 0.08),
@@ -3648,6 +3755,10 @@ class GameScene: SKScene {
             } else {
                 node.run(SKAction.sequence([
                     SKAction.wait(forDuration: delay),
+                    SKAction.run { [weak self, weak node] in
+                        guard let self, let node else { return }
+                        self.setEnemyHealthBar(on: node, enemyID: hit.enemyID, health: hit.healthAfter)
+                    },
                     SKAction.fadeAlpha(to: 0.2, duration: 0.08),
                     SKAction.fadeAlpha(to: 1.0, duration: 0.08),
                 ]))
@@ -4477,6 +4588,120 @@ class GameScene: SKScene {
 
     /// Lays the active pact out as "PACT · ⚡ Boon · ☠ Curse" — separate labels so
     /// the curse burns red and each half carries a name for its hover tooltip.
+    /// Lays out "LVL 2 · BIOME · SCORE [bar] · TURN 5 · BEST 120". The bar
+    /// spans this level's threshold to the next, so it empties at each level-up
+    /// and a new player can see how far off the next one is at a glance.
+    private func rebuildScoreHUD() {
+        scoreHUD.removeAllChildren()
+        // While the best is frozen it neither climbs nor persists, and the whole
+        // score line turns blue to make the testing mode unmistakable.
+        let textColor = devFreezeHighScore ? SKColor(red: 0.45, green: 0.65, blue: 0.95, alpha: 1.0) : .white
+        let best = devFreezeHighScore ? highScore : max(highScore, state.score)
+        let streak = state.killStreak >= 2 ? " · STREAK ×\(state.killStreak)" : ""
+
+        func makeLabel(_ text: String, size: CGFloat) -> SKLabelNode {
+            let label = SKLabelNode(text: text)
+            label.fontName = "HelveticaNeue-Bold"
+            label.fontSize = size
+            label.fontColor = textColor
+            label.verticalAlignmentMode = .center
+            label.horizontalAlignmentMode = .left
+            return label
+        }
+        // Two rows: the score bar and best on top, where the eye lands first;
+        // level, biome, and turn in smaller type beneath.
+        let lead = makeLabel("SCORE ", size: 18)
+        let tail = makeLabel("BEST \(best)", size: 18)
+        let info = makeLabel("LVL \(state.level) · \(state.biome.title.uppercased()) · TURN \(state.turnNumber)\(streak)", size: 15)
+        info.horizontalAlignmentMode = .center
+        // Clear of the buffs row 22pt below the HUD's anchor.
+        info.position = CGPoint(x: 0, y: -8)
+        scoreHUD.addChild(info)
+        let topRowY: CGFloat = 14
+
+        // The bar: during a boss phase score no longer levels you — the
+        // gatekeeper does — so the same slot becomes the gatekeeper's health,
+        // where the eye already goes to see how far off the next level is.
+        let gatekeeper = state.bossPhase ? state.enemies.first(where: \.isElite) : nil
+        let gatekeeperMax = gatekeeper.map { max(enemyMaxHealth[$0.id] ?? $0.health, $0.health) } ?? 0
+        let barWidth: CGFloat = gatekeeper != nil ? 260 : (state.bossPhase ? 200 : 150)
+        let barHeight: CGFloat = 16
+        let floor = GameState.scoreThreshold(forLevel: state.level)
+        let nextLevel = GameState.scoreThreshold(forLevel: state.level + 1)
+        let fraction: CGFloat
+        if let gatekeeper {
+            fraction = min(1, max(0, CGFloat(gatekeeper.health) / CGFloat(max(1, gatekeeperMax))))
+        } else {
+            fraction = state.bossPhase ? 1 : min(1, max(0, CGFloat(state.score - floor) / CGFloat(max(1, nextLevel - floor))))
+        }
+        let fillColor = state.bossPhase
+            ? SKColor(red: 0.75, green: 0.25, blue: 0.22, alpha: 0.9)
+            : SKColor(red: 0.93, green: 0.80, blue: 0.45, alpha: 0.85)
+        let bar = SKNode()
+        let back = SKShapeNode(rectOf: CGSize(width: barWidth, height: barHeight), cornerRadius: 5)
+        back.fillColor = SKColor(white: 0.15, alpha: 1.0)
+        back.strokeColor = SKColor(white: 0.4, alpha: 1.0)
+        back.lineWidth = 1
+        back.position = CGPoint(x: barWidth / 2, y: 0)
+        bar.addChild(back)
+        if fraction > 0 {
+            let fillWidth = max(barHeight - 3, (barWidth - 3) * fraction)
+            let fill = SKShapeNode(rectOf: CGSize(width: fillWidth, height: barHeight - 3), cornerRadius: 4)
+            fill.fillColor = fillColor
+            fill.strokeColor = .clear
+            fill.position = CGPoint(x: fillWidth / 2 + 1.5, y: 0)
+            bar.addChild(fill)
+        }
+        // The gatekeeper's bar is notched like the enemy bars, so hits left
+        // can be counted — a notch a point, or every fifth if that's too dense.
+        if gatekeeper != nil, gatekeeperMax > 1 {
+            let inner = barWidth - 3
+            let step = inner / CGFloat(gatekeeperMax) >= 3 ? 1 : 5
+            for point in stride(from: step, to: gatekeeperMax, by: step) {
+                let notch = SKSpriteNode(color: SKColor(white: 0.08, alpha: 0.85),
+                                         size: CGSize(width: 1, height: barHeight - 3))
+                notch.position = CGPoint(x: 1.5 + inner * CGFloat(point) / CGFloat(gatekeeperMax), y: 0)
+                bar.addChild(notch)
+            }
+        }
+        let gatekeeperTitle = gatekeeper.map { enemy -> String in
+            // "BOSS · Scythe + Cannon" → "BOSS": the weapons are on the hover card.
+            // Stdlib split, since this file also builds for the web.
+            var name = String(enemy.displayName.prefix { $0 != "·" })
+            while name.last == " " { name.removeLast() }
+            return "\(name.uppercased())  \(max(0, enemy.health)) / \(gatekeeperMax)"
+        }
+        let count = SKLabelNode(text: gatekeeperTitle
+            ?? (state.bossPhase ? "SLAY THE GATEKEEPER" : "\(state.score) / \(nextLevel)"))
+        count.fontName = "HelveticaNeue-Bold"
+        count.fontSize = 11
+        count.fontColor = .white
+        count.verticalAlignmentMode = .center
+        count.position = CGPoint(x: barWidth / 2, y: 0)
+        // A dark copy just behind keeps the count legible over the gold fill.
+        let shadow = SKLabelNode(text: count.text)
+        shadow.fontName = count.fontName
+        shadow.fontSize = count.fontSize
+        shadow.fontColor = SKColor(white: 0, alpha: 0.7)
+        shadow.verticalAlignmentMode = .center
+        shadow.position = CGPoint(x: barWidth / 2 + 1, y: -1)
+        bar.addChild(shadow)
+        bar.addChild(count)
+
+        let gap: CGFloat = 4
+        let tailGap: CGFloat = 14
+        let total = lead.frame.width + gap + barWidth + tailGap + tail.frame.width
+        var x = -total / 2
+        lead.position = CGPoint(x: x, y: topRowY)
+        x += lead.frame.width + gap
+        bar.position = CGPoint(x: x, y: topRowY)
+        x += barWidth + tailGap
+        tail.position = CGPoint(x: x, y: topRowY)
+        scoreHUD.addChild(lead)
+        scoreHUD.addChild(bar)
+        scoreHUD.addChild(tail)
+    }
+
     private func rebuildPactHUD(_ mods: Set<RunModifier>) {
         pactHUD.removeAllChildren()
         pactHUD.isHidden = mods.isEmpty
@@ -4566,7 +4791,7 @@ class GameScene: SKScene {
 
     /// Rolls a fresh pact, refills the reroll allowance, and opens the draft.
     private func openFreshPactDraft() {
-        draftedPact = rolledPact()
+        draftedPact = pactsUnlocked ? rolledPact() : []
         activeModifiers = draftedPact
         pactRerollsRemaining = Self.maxPactRerolls
         showBuildPicker()
@@ -4599,6 +4824,8 @@ class GameScene: SKScene {
         tileNodes.removeAll()
         tileAppearances.removeAll()
         enemyNodes.removeAll()
+        enemyMaxHealth.removeAll()
+        enemyBarDrawn.removeAll()
         obstacleNodes.removeAll()
         wallTints.removeAll()
         spikeNodes.removeAll()
@@ -4621,6 +4848,9 @@ class GameScene: SKScene {
         isResolving = false
         resolveHold = nil
         state = makeRunState()
+        // The dev spawn picks outlive a run (they sit on the panel), so hand
+        // them to the new one — otherwise "next wave: elite" silently lapses.
+        syncDevSpawnOverride()
         setUpScene()
     }
 
@@ -4638,7 +4868,9 @@ class GameScene: SKScene {
     private func makeRunState(modifiersOverride: Set<RunModifier>? = nil) -> GameState {
         tallyBaseline = lifetimeTallies
         let pool = currentWeaponPool()
-        let modifiers = modifiersOverride ?? activeModifiers
+        // A pact persisted from before the profile was reset (or before the wall
+        // existed) doesn't sneak past it.
+        let modifiers = modifiersOverride ?? (pactsUnlocked ? activeModifiers : [])
         let powderKeg = modifiers.contains(.powderKeg)
         var run = GameState(
             weapon: devNextEquipped
@@ -4695,13 +4927,16 @@ class GameScene: SKScene {
         set { Defaults.standard.set(newValue.rawValue, forKey: "loadoutOmen") }
     }
 
+    /// Omens earned across runs via `Omen.milestones`.
+    private var earnedOmens: Set<Omen> {
+        get { Set(Defaults.standard.stringArray(forKey: "unlockedOmens")?.compactMap(Omen.init(rawValue:)) ?? []) }
+        set { Defaults.standard.set(newValue.map(\.rawValue).sorted(), forKey: "unlockedOmens") }
+    }
+
     /// Omens available to pick. Smite is the starter and is always there; the
-    /// rest are meant to come in behind milestones, cheapest to read first
-    /// (see `Omen.ordered`). Until those walls exist, everything is unlocked —
-    /// the chooser is the part being built here, not the gating.
+    /// rest come in behind milestones, cheapest to read first (`Omen.ordered`).
     private var unlockedOmens: [Omen] {
-        let earned = Set(Defaults.standard.stringArray(forKey: "unlockedOmens")?
-            .compactMap(Omen.init(rawValue:)) ?? Omen.allCases.map { $0 })
+        let earned = earnedOmens
         return Omen.ordered.filter { $0 == .smite || earned.contains($0) }
     }
 
@@ -4816,7 +5051,9 @@ class GameScene: SKScene {
 
         let canReroll = pactRerollsRemaining > 0
         let pactText: String
-        if hasPact {
+        if !pactsUnlocked {
+            pactText = "locked"
+        } else if hasPact {
             pactText = canReroll ? "reroll (\(pactRerollsRemaining)) ▸" : "no rerolls left"
         } else {
             pactText = "strike a bargain ▸"
@@ -4824,14 +5061,26 @@ class GameScene: SKScene {
         let pactControl = SKLabelNode(text: pactText)
         pactControl.fontName = "HelveticaNeue"
         pactControl.fontSize = 12
-        pactControl.fontColor = SKColor(white: (hasPact && !canReroll) ? 0.35 : 0.6, alpha: 1.0)
+        pactControl.fontColor = SKColor(white: (!pactsUnlocked || (hasPact && !canReroll)) ? 0.35 : 0.6, alpha: 1.0)
         pactControl.horizontalAlignmentMode = .right
         pactControl.verticalAlignmentMode = .center
         pactControl.position = CGPoint(x: centerX + 150, y: centerY - 54)
-        pactControl.name = hasPact ? (canReroll ? "build:pactReroll" : nil) : "build:pactToggle"
+        if pactsUnlocked {
+            pactControl.name = hasPact ? (canReroll ? "build:pactReroll" : nil) : "build:pactToggle"
+        }
         overlay.addChild(pactControl)
 
-        if hasPact {
+        if !pactsUnlocked {
+            // Behind the high-score wall: tease what's coming, but nothing here
+            // is clickable until the profile's best clears the bar.
+            let hint = SKLabelNode(text: "reach a best score of \(Self.pactUnlockScore) to strike bargains")
+            hint.fontName = "HelveticaNeue"
+            hint.fontSize = 13
+            hint.fontColor = SKColor(white: 0.4, alpha: 1.0)
+            hint.verticalAlignmentMode = .center
+            hint.position = CGPoint(x: centerX, y: centerY - 88)
+            overlay.addChild(hint)
+        } else if hasPact {
             let entries: [(RunModifier?, String, SKColor)] = [
                 (active.first(where: \.isBoon), "BOON", gold),
                 (active.first(where: { !$0.isBoon }), "CURSE", curseColor),
@@ -5311,6 +5560,10 @@ class GameScene: SKScene {
 
     /// Pushes the current dev spawn selections into the game state so the next
     /// wave honors them (standard mode clears the override).
+    ///
+    /// Also run whenever a fresh run replaces `state`. The panel's spawn mode
+    /// lives here on the scene, not on the state — so a restart used to leave
+    /// the panel reading "elite" over a run that had never heard of it.
     private func syncDevSpawnOverride() {
         switch devSpawnMode {
         case .standard: state.devSpawnOverride = nil
@@ -5430,10 +5683,11 @@ class GameScene: SKScene {
         case "dev:unlockAll":
             unlockedWeaponNames = Set(Weapon.milestones.map(\.weapon.name))
             claimedTrophyNames = Set(Weapon.eliteTrophies.map(\.name))
+            earnedOmens = Set(Omen.milestones.map(\.omen))
             rebuildLegend()
             rebuildMilestonesPage()
         case "dev:resetProfile":
-            for key in ["claimedTrophies", "unlockedWeapons", "lifetimeTallies", "highScore", "hasSeenTutorial"] {
+            for key in ["claimedTrophies", "unlockedWeapons", "unlockedOmens", "lifetimeTallies", "highScore", "hasSeenTutorial"] {
                 Defaults.standard.removeObject(forKey: key)
             }
             tallyBaseline = [:]
@@ -5460,6 +5714,12 @@ class GameScene: SKScene {
             unlockedWeaponNames.insert(milestone.weapon.name)
             showToast("UNLOCKED: \(milestone.weapon.name) — found in the wild from your next run", duration: 2.6)
             rebuildLegend()
+        }
+        for milestone in Omen.milestones
+        where !earnedOmens.contains(milestone.omen)
+            && lifetime[milestone.tally, default: 0] >= milestone.count {
+            earnedOmens.insert(milestone.omen)
+            showToast("UNLOCKED: the \(milestone.omen.title) omen — choose it in the draft", duration: 2.6)
         }
         if !milestonesPageNode.isHidden {
             rebuildMilestonesPage()
@@ -5872,7 +6132,9 @@ class GameScene: SKScene {
     // events instead — the handlers themselves never change.
     #if canImport(AppKit)
     override func scrollWheel(with event: NSEvent) {
-        handleScroll(GameInput(scrollDeltaY: event.scrollingDeltaY))
+        // The location routes the wheel to the column under the pointer
+        // (milestones page vs legend); without it every scroll hit the legend.
+        handleScroll(GameInput(location: event.location(in: self), scrollDeltaY: event.scrollingDeltaY))
     }
 
     override func mouseMoved(with event: NSEvent) {

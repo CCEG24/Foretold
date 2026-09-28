@@ -322,7 +322,7 @@ extension Weapon {
     )
     static let greataxe = Weapon(name: "Greataxe", moveRange: 1, damage: 4, cooldown: 2, enemyHealth: 4, attackPattern: .greataxe)
     static let scythe = Weapon(name: "Scythe", moveRange: 2, damage: 2, enemyHealth: 3, attackPattern: .scythe)
-    static let explosiveCrossbow = Weapon(name: "Explosive Crossbow", moveRange: 1, damage: 1, pierces: false, cooldown: 2, enemyHealth: 2, isRanged: true, projectileSpeed: 5, impactBlastRadius: 1, attackPattern: .crossbow)
+    static let explosiveCrossbow = Weapon(name: "Explosive Crossbow", moveRange: 1, damage: 2, pierces: false, cooldown: 2, enemyHealth: 2, isRanged: true, projectileSpeed: 5, impactBlastRadius: 1, attackPattern: .crossbow)
     static let serratedBow = Weapon(name: "Serrated Bow", moveRange: 2, damage: 1, pierces: true, cooldown: 1, enemyHealth: 2, isRanged: true, projectileSpeed: 5, attackPattern: .bow, affliction: Affliction(damagePerTurn: 1, duration: 2))
     static let trident = Weapon(name: "Trident", moveRange: 2, damage: 2, cooldown: 1, enemyHealth: 3, attackPattern: .trident)
     /// Flings whatever it hits two tiles down its
@@ -331,7 +331,7 @@ extension Weapon {
     static let maul = Weapon(name: "Maul", moveRange: 2, damage: 4, cooldown: 1, enemyHealth: 4, knockback: 2, attackPattern: .maul)
     /// A blunt-tipped arrow that dazes on impact — the ranged answer to the
     /// hammer, trading damage for a stun at range.
-    static let concussionBow = Weapon(name: "Concussion Bow", moveRange: 2, damage: 2, pierces: false, cooldown: 2, enemyHealth: 2, isRanged: true, projectileSpeed: 5, stun: 1, attackPattern: .bow)
+    static let concussionBow = Weapon(name: "Concussive Bow", moveRange: 2, damage: 2, pierces: false, cooldown: 2, enemyHealth: 2, isRanged: true, projectileSpeed: 5, stun: 1, attackPattern: .bow)
     /// Barely scratches (1 dmg) but shoves hard and never reloads — with 3 move
     /// you dart in, fling a foe into a barrel or pool, and dart out. The board is
     /// your real weapon.
@@ -340,7 +340,7 @@ extension Weapon {
     /// them in (raking any spikes on the way), or bites a wall to yank *you*
     /// across the gap — bite a barrel and you're dragged into the blast. The
     /// board is a place to move through, not just to shove into.
-    static let grapple = Weapon(name: "Grapple", moveRange: 2, damage: 1, pierces: false, cooldown: 1, enemyHealth: 2, isRanged: true, grapples: true, attackPattern: .harpoon)
+    static let grapple = Weapon(name: "Grappling Gun", moveRange: 2, damage: 1, pierces: false, cooldown: 1, enemyHealth: 2, isRanged: true, grapples: true, attackPattern: .harpoon)
     /// Not a weapon so much as an escape hatch: 7 tiles of movement blink you to
     /// any open tile — the far side of a foe included — but it barely pricks (1),
     /// so you don't kill *with* it. Paired with free swaps it's a scalpel: blink

@@ -154,7 +154,7 @@ extension Buff {
     // Four turns, not three: you dig these out while standing in mud, so the
     // first turn or two goes on slogging back to anything worth using them on.
     static let flintEdge = Buff(name: "Flint Edge · your shots pierce", turnDuration: 4, piercingShots: true)
-    static let maulHead = Buff(name: "Maul Head · your blows shatter any wall", turnDuration: 4, siege: true)
+    static let maulHead = Buff(name: "Maul Head · your blows shatter all walls", turnDuration: 4, siege: true)
     static let oiledStrap = Buff(name: "Oiled Strap · swaps are free", turnDuration: 4, freeSwap: true)
     static let warHorn = Buff(name: "War Horn · a kill shaves your reload", turnDuration: 4, killRefundsCooldown: true)
     /// The boons a mud cache can hold.
