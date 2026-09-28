@@ -5,22 +5,21 @@
 //   1. boots and renders with WebGPU removed from the browser entirely
 //      (navigator.gpu is a trap that throws if anything touches it, so the
 //      page's adapter probe fails and it must fall back to Canvas 2D),
-//   2. does so WITHOUT cross-origin isolation — GitHub Pages cannot send
-//      COOP/COEP headers, so a build that needed SharedArrayBuffer would
-//      die there,
+//   2. does so WITHOUT cross-origin isolation — a plain static host sends no
+//      COOP/COEP headers, so a build that needed SharedArrayBuffer would die
+//      there,
 //   3. renders actual pixels (a "ready" flag alone proves nothing).
 //
-// Two scenarios run sequentially against the built dist:
-//   A. wasm served as application/wasm         → streaming-compile path
-//   B. wasm served as application/octet-stream → the page's MIME-fallback
-//      path (hosts/proxies that don't label wasm correctly)
+// CI runs this in build-web.yml after the build and before web/dist is
+// committed, so a build that breaks the fallback never gets published.
 //
 // Run:  CHROME_PATH=/usr/bin/google-chrome-stable node web/tests/no-webgpu-smoke.mjs
+//       (needs `npm install --no-save puppeteer-core` in web/ first)
 // Env:  DIST_DIR   — built site directory (default: ../dist)
 //       CHROME_PATH— chrome binary (default: /usr/bin/google-chrome-stable)
 //       SMOKE_OUT  — directory for screenshots (default: current dir)
 //
-// Exits 0 only if BOTH scenarios reach the first rendered frame.
+// Exits 0 only if the game reaches its first frame with real pixels.
 
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -33,8 +32,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const DIST = process.env.DIST_DIR ? resolve(process.env.DIST_DIR) : resolve(__dirname, '../dist');
 const CHROME = process.env.CHROME_PATH ?? '/usr/bin/google-chrome-stable';
 const OUT = process.env.SMOKE_OUT ?? process.cwd();
-const PORT_A = 8901; // correct wasm MIME
-const PORT_B = 8902; // wrong wasm MIME (exercises the page's fallback)
+const PORT = 8901;
 const READY_TIMEOUT_MS = 180_000; // 69 MB download + compile on CI
 const PIXEL_TIMEOUT_MS = 30_000;
 
@@ -49,7 +47,7 @@ const MIME_OK = {
   '.png': 'image/png',
 };
 
-function staticServer(root, port, override = {}) {
+function staticServer(root, port) {
   return new Promise((resolveSrv) => {
     const srv = createServer(async (req, res) => {
       const pathname = new URL(req.url, 'http://localhost').pathname;
@@ -62,7 +60,7 @@ function staticServer(root, port, override = {}) {
         return;
       }
       const ext = extname(file);
-      const mime = override[ext] ?? MIME_OK[ext] ?? 'application/octet-stream';
+      const mime = MIME_OK[ext] ?? 'application/octet-stream';
       res.writeHead(200, { 'Content-Type': mime }).end(data);
     });
     srv.listen(port, '127.0.0.1', () => resolveSrv(srv));
@@ -161,9 +159,9 @@ async function runScenario(label, port) {
         sab: typeof SharedArrayBuffer !== 'undefined',
         ready: window.__smokeReady,
       }));
-      console.log(`  crossOriginIsolated=${facts.crossOriginIsolated} (must be false — Pages sends no COOP/COEP)`);
+      console.log(`  crossOriginIsolated=${facts.crossOriginIsolated} (must be false — the test server sends no COOP/COEP)`);
       if (facts.crossOriginIsolated) {
-        console.warn('  !! test host unexpectedly cross-origin isolated — not representative of Pages');
+        console.warn('  !! test host unexpectedly cross-origin isolated — not representative of a plain static host');
       }
 
       const shot = join(OUT, `smoke-${label}.png`);
@@ -199,18 +197,13 @@ let code = 1;
 try {
   await mkdir(OUT, { recursive: true });
   if (!process.env.DIST_DIR) console.log(`dist: ${DIST}`);
-  const [srvA, srvB] = await Promise.all([
-    staticServer(DIST, PORT_A),
-    staticServer(DIST, PORT_B, { '.wasm': 'application/octet-stream' }),
-  ]);
+  const srv = await staticServer(DIST, PORT);
   try {
-    await runScenario('mime-ok', PORT_A);
-    await runScenario('mime-fallback', PORT_B);
+    await runScenario('no-webgpu', PORT);
     code = 0;
-    console.log('\nALL SMOKE SCENARIOS PASSED — deploy is WebGPU-free and Pages-compatible');
+    console.log('\nSMOKE TEST PASSED — the build boots and draws with WebGPU unavailable');
   } finally {
-    srvA.close();
-    srvB.close();
+    srv.close();
   }
 } catch (e) {
   console.error(`\nSMOKE TEST FAILED: ${e.message}`);

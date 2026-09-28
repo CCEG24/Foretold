@@ -19,6 +19,7 @@ on:
       - "web/build.sh"
       - "web-spike/fetch-deps.sh"
       - "web/patches/**"
+      - "web/tests/**"
       - ".github/workflows/build-web.yml"
 
 concurrency:
@@ -111,6 +112,29 @@ jobs:
           # for dist.
           FORETOLD_DIST=dist ./build.sh
           ls -lh dist
+
+      - name: Smoke-test the build with WebGPU unavailable
+        # Boots the fresh dist in headless Chrome with the GPU disabled and
+        # navigator.gpu booby-trapped, so the page has to fall back to Canvas 2D
+        # — what school machines get. Runs before the commit step, so a build
+        # that can't boot without WebGPU never gets published.
+        working-directory: web
+        run: |
+          set -euxo pipefail
+          # The runner image ships Node and Google Chrome; only the driver is missing.
+          npm install --no-save --no-package-lock --no-audit --no-fund puppeteer-core@24
+          CHROME_PATH="$(command -v google-chrome-stable || command -v google-chrome)" \
+          DIST_DIR=dist SMOKE_OUT=smoke \
+            node tests/no-webgpu-smoke.mjs
+
+      - name: Upload smoke-test screenshots
+        # Kept on failure too — the FAILED screenshot is usually the diagnosis.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-screenshots
+          path: web/smoke/
+          if-no-files-found: ignore
 
       - name: Commit built dist if changed
         # Only main owns web/dist. Branch runs exist to prove the build, not to

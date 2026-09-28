@@ -10,3 +10,6 @@
 .build/
 dist/
 dist-local/
+# The smoke test's puppeteer-core install and screenshots (tests/no-webgpu-smoke.mjs).
+node_modules/
+smoke/
