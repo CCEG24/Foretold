@@ -31,8 +31,11 @@ func installInput(scene: GameScene, canvas: JSObject, width: Double, height: Dou
 
     func timestamp(_ e: JSObject) -> TimeInterval { (e.timeStamp.number ?? 0) / 1000.0 }
 
+    // Diagnostic: `?nohover` ignores pointer movement entirely, to tell the
+    // game's hover work apart from the browser's own cost of the events.
+    let ignoreHover = (JSObject.global.location.search.string ?? "").contains("nohover")
     let move = JSClosure { args in
-        guard let e = args[0].object else { return .undefined }
+        guard !ignoreHover, let e = args[0].object else { return .undefined }
         // Hover repaints every tile and re-reads every actor, and it happens
         // outside the frame callback — so its cost is invisible in the frame
         // timing while still being what starves the frame. Counted here.

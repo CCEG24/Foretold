@@ -88,6 +88,32 @@ index 253953c..fc9878d 100644
              origin = .layerContents
          } else {
              return nil
+diff --git a/Sources/OpenCoreAnimation/CATransaction.swift b/Sources/OpenCoreAnimation/CATransaction.swift
+index 778404f..35e6da0 100644
+--- a/Sources/OpenCoreAnimation/CATransaction.swift
++++ b/Sources/OpenCoreAnimation/CATransaction.swift
+@@ -535,6 +535,13 @@ public class CATransaction {
+         }
+     }
+ 
++    /// NOTE(foretold fork): whether commits capture render snapshots at all.
++    /// A host that draws the layer tree some other way (Foretold's Canvas 2D
++    /// presenter walks the SpriteKit nodes directly) never consumes them, and
++    /// capturing converts every image in a dirtied tree pixel by pixel —
++    /// ~160ms per commit on a hovered board. Not part of Apple's API.
++    nonisolated(unsafe) public static var publishesRenderSnapshots = true
++
+     /// Publishes one immutable static-tree snapshot per distinct render root.
+     ///
+     /// Layout reaches a parent-to-child fixed point before capability
+@@ -542,6 +549,7 @@ public class CATransaction {
+     /// Animated trees use an explicit transitional state until immutable
+     /// animation evaluators are carried by CARenderSnapshot.
+     private class func publishCommittedRenderStates(for layers: [CALayer]) {
++        guard publishesRenderSnapshots else { return }
+         for root in minimalRenderRoots(for: layers) {
+             let frameToken = CALayer.advanceFrameToken()
+             root.prepareLayoutForRenderSnapshot()
 diff --git a/Sources/OpenCoreAnimation/CAWebGPURenderer.swift b/Sources/OpenCoreAnimation/CAWebGPURenderer.swift
 index 17840e5..e66bdf8 100644
 --- a/Sources/OpenCoreAnimation/CAWebGPURenderer.swift

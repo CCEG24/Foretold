@@ -2,9 +2,14 @@
 //  WebMain.swift
 //  FortoldWeb — browser entry point (WASM only)
 //
-//  Presents the real GameScene through OpenSpriteKit's SKRenderer, mirroring the
-//  proven spike bootstrap (see web-spike). Input isn't wired yet — that's the
-//  DOM→GameInput adapter step; this first gets the actual board rendering.
+//  Presents the real GameScene in the browser. The SpriteKit frame cycle
+//  (update → actions → callbacks) is always driven by OpenSpriteKit's
+//  SKRenderer; what puts pixels on the canvas is one of two presenters:
+//
+//    - Canvas 2D (default) — `Canvas2DRenderer` walks the node tree and draws
+//      it with the plain 2D context. Works in every browser; no GPU needed.
+//    - WebGPU (opt-in via `?webgpu`) — OpenSpriteKit's own presenter, kept
+//      for comparing output while the 2D path matures.
 
 import OpenSpriteKit
 import JavaScriptKit
@@ -77,6 +82,7 @@ private var retainedResizeClosure: JSClosure?
 /// boundary. Single-threaded wasm, so unsafe global state is fine.
 nonisolated(unsafe) private var appliedContentsScale: CGFloat = 1
 private var skRenderer: SKRenderer?
+private var canvasRenderer: Canvas2DRenderer?
 private var gameScene: GameScene?
 private var didAnnounceFirstFrame = false
 
@@ -170,8 +176,15 @@ private func reportFrameTiming(update: Double, render: Double, at now: Double) {
             + "\n\(WebFrameStats.inputEvents) hovers \(ms(WebFrameStats.inputTotal))"
             + "  other \(ms(elapsed - accounted))"
             + "\nart \(WebArt.registered)"
+            + (canvasRenderer == nil ? "" :
+                "\n2d/frame: \(Canvas2DStats.nodes / max(1, WebFrameStats.frames)) nodes"
+                + "  \(Canvas2DStats.pathsBuilt / max(1, WebFrameStats.frames)) paths"
+                + "\n2d/sec: \(Canvas2DStats.texturesBuilt) textures"
+                + "  \(Canvas2DStats.measures) measures"
+                + "  \(Canvas2DStats.pathsBuilt) paths")
         )
     }
+    Canvas2DStats.reset()
     WebFrameStats.reset(at: now)
 }
 
@@ -204,29 +217,53 @@ private func start() async {
         return
     }
 
-    stage("renderer-init")
-    let renderer = SKRenderer(canvas: canvas)
-    do {
-        try await renderer.initialize()
-    } catch {
-        report(failure: "SKRenderer.initialize failed: \(String(describing: error))")
-        return
-    }
-    // The scene stays 1680×900 points; only the backing store follows the
-    // display. Without this the canvas rendered 1680×900 pixels and the browser
-    // stretched them over the (usually larger, usually retina) CSS box, which
-    // is what made the whole board look soft.
-    appliedContentsScale = canvasContentsScale(canvas)
-    renderer.resize(width: CanvasConfig.width, height: CanvasConfig.height,
-                    contentsScale: appliedContentsScale)
-    if WebFrameStats.logging {
-        _ = JSObject.global.console.log(
-            "FortoldWeb: \(CanvasConfig.width)×\(CanvasConfig.height) pt at"
-            + " \(Double(Int(appliedContentsScale * 100)) / 100)× →"
-            + " \(backingWidth(for: appliedContentsScale))px backing"
-        )
-    }
+    // `?webgpu` in the URL selects OpenSpriteKit's GPU presenter; everything
+    // else gets Canvas 2D. The page mirrors this flag when it decides whether
+    // to probe for a GPU adapter at all.
+    let search = JSObject.global.location.search.string ?? ""
+    let useWebGPU = search.contains("webgpu")
 
+    stage("renderer-init")
+    let renderer: SKRenderer
+    if useWebGPU {
+        renderer = SKRenderer(canvas: canvas)
+        do {
+            try await renderer.initialize()
+        } catch {
+            report(failure: "SKRenderer.initialize failed: \(String(describing: error))")
+            return
+        }
+        // The scene stays 1680×900 points; only the backing store follows the
+        // display. Without this the canvas rendered 1680×900 pixels and the browser
+        // stretched them over the (usually larger, usually retina) CSS box, which
+        // is what made the whole board look soft.
+        appliedContentsScale = canvasContentsScale(canvas)
+        renderer.resize(width: CanvasConfig.width, height: CanvasConfig.height,
+                        contentsScale: appliedContentsScale)
+        if WebFrameStats.logging {
+            _ = JSObject.global.console.log(
+                "FortoldWeb: \(CanvasConfig.width)×\(CanvasConfig.height) pt at"
+                + " \(Double(Int(appliedContentsScale * 100)) / 100)× →"
+                + " \(backingWidth(for: appliedContentsScale))px backing"
+            )
+        }
+    } else {
+        // No canvas binding: this SKRenderer only runs the update cycle.
+        renderer = SKRenderer()
+        // Canvas2DRenderer reads the node tree, never the layer tree, so the
+        // GPU snapshots every Core Animation commit captures are pure waste —
+        // and capturing one re-converts every sprite image pixel by pixel,
+        // which is what made hovering the board drop to single-digit fps.
+        CATransaction.publishesRenderSnapshots = false
+        do {
+            canvasRenderer = try Canvas2DRenderer(canvas: canvas,
+                                                  sceneWidth: CanvasConfig.width,
+                                                  sceneHeight: CanvasConfig.height)
+        } catch {
+            report(failure: "Canvas2DRenderer failed: \(String(describing: error))")
+            return
+        }
+    }
     // Sprites have to be in the rig's cache before the scene is built: each
     // body reads it once as it's constructed. No manifest = no art, and the
     // board draws the shapes it always did.
@@ -242,18 +279,54 @@ private func start() async {
     let view = SKView()
     scene.didMove(to: view)
     skRenderer = renderer
+    canvasRenderer?.scene = scene
     gameScene = scene
 
     // Pay for the texture uploads here, while the loading screen is still up,
-    // rather than in the first seconds of play.
+    // rather than in the first seconds of play. GPU-only: the Canvas 2D path
+    // decodes each texture on first draw and has no uploads to front-load.
     stage("prewarm")
-    WebArt.prewarm(in: scene, renderer: renderer)
+    if useWebGPU {
+        WebArt.prewarm(in: scene, renderer: renderer)
+    }
 
     // Route browser pointer/keyboard/wheel events into GameScene's shared handlers.
     stage("input")
     installInput(scene: scene, canvas: canvas,
                  width: Double(CanvasConfig.width), height: Double(CanvasConfig.height))
 
+    // Canvas2DRenderer re-sizes its backing store every frame on its own; the
+    // listener below is for the WebGPU presenter.
+    if useWebGPU {
+        installResizeListener(canvas: canvas)
+    }
+
+    stage("first-frame")
+    let startTime = JSObject.global.performance.now().number ?? 0
+    let callback = JSClosure { _ in
+        if let cb = animationCallback {
+            _ = JSObject.global.requestAnimationFrame!(cb)
+        }
+        let now = JSObject.global.performance.now().number ?? 0
+        let frameStart = now
+        skRenderer?.update(atTime: (now - startTime) / 1000.0)
+        let updated = JSObject.global.performance.now().number ?? 0
+        if let canvasRenderer {
+            canvasRenderer.render()
+        } else {
+            skRenderer?.render()
+        }
+        let finished = JSObject.global.performance.now().number ?? 0
+        reportFrameTiming(update: updated - frameStart, render: finished - updated, at: finished)
+        reportFirstFrame()
+        return .undefined
+    }
+    animationCallback = callback
+    _ = JSObject.global.requestAnimationFrame!(callback)
+}
+
+@MainActor
+private func installResizeListener(canvas: JSObject) {
     // Resizing the window changes the CSS box the board fills, and dragging it
     // to another display changes devicePixelRatio — both change how many real
     // pixels the same 1680×900 points get. Re-scale when the backing store
@@ -273,23 +346,4 @@ private func start() async {
     }
     retainedResizeClosure = resized
     _ = JSObject.global.addEventListener!("resize", resized)
-
-    stage("first-frame")
-    let startTime = JSObject.global.performance.now().number ?? 0
-    let callback = JSClosure { _ in
-        if let cb = animationCallback {
-            _ = JSObject.global.requestAnimationFrame!(cb)
-        }
-        let now = JSObject.global.performance.now().number ?? 0
-        let frameStart = now
-        skRenderer?.update(atTime: (now - startTime) / 1000.0)
-        let updated = JSObject.global.performance.now().number ?? 0
-        skRenderer?.render()
-        let finished = JSObject.global.performance.now().number ?? 0
-        reportFrameTiming(update: updated - frameStart, render: finished - updated, at: finished)
-        reportFirstFrame()
-        return .undefined
-    }
-    animationCallback = callback
-    _ = JSObject.global.requestAnimationFrame!(callback)
 }
