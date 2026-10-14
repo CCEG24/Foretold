@@ -241,7 +241,7 @@ private func start() async {
             // refused. Fall back rather than fail — and on a fresh element,
             // because a canvas that has handed out a WebGPU context can never
             // give a 2D one.
-            _ = JSObject.global.console.warn("FortoldWeb: WebGPU failed (\(reason)) — falling back to Canvas 2D")
+            _ = JSObject.global.console.warn("ForetoldWeb: WebGPU failed (\(reason)) — falling back to Canvas 2D")
             if let fresh = canvas.cloneNode!(false).object {
                 _ = canvas.replaceWith!(fresh)
                 canvas = fresh
@@ -262,7 +262,7 @@ private func start() async {
                         contentsScale: appliedContentsScale)
         if WebFrameStats.logging {
             _ = JSObject.global.console.log(
-                "FortoldWeb: \(CanvasConfig.width)×\(CanvasConfig.height) pt at"
+                "ForetoldWeb: \(CanvasConfig.width)×\(CanvasConfig.height) pt at"
                 + " \(Double(Int(appliedContentsScale * 100)) / 100)× →"
                 + " \(backingWidth(for: appliedContentsScale))px backing"
             )
@@ -289,7 +289,7 @@ private func start() async {
     // board draws the shapes it always did.
     stage("assets")
     let art = await WebArt.preload()
-    _ = JSObject.global.console.log("FortoldWeb: \(art.loaded) sprites loaded, \(art.failed) failed")
+    _ = JSObject.global.console.log("ForetoldWeb: \(art.loaded) sprites loaded, \(art.failed) failed")
 
     stage("scene")
     let scene = GameScene(size: CGSize(width: CanvasConfig.width, height: CanvasConfig.height))
